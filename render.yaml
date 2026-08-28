@@ -1,0 +1,27 @@
+# Render Blueprint. Create via: Render dashboard -> New -> Blueprint.
+# region: virginia is REQUIRED — Render defaults to Oregon, which would put a
+# cross-country hop between the API and the Virginia Supabase project.
+
+services:
+  - type: web
+    name: finai-api
+    runtime: python
+    region: virginia
+    plan: starter          # never `free`: free instances sleep on inactivity
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - fromGroup: finai-shared
+
+  - type: worker
+    name: finai-worker
+    runtime: python
+    region: virginia
+    plan: starter
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.workers.main
+    envVars:
+      - fromGroup: finai-shared

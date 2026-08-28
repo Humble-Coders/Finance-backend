@@ -19,7 +19,12 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 
+import structlog
+
 from app.config import get_settings
+from app.core.dsn import describe_dsn
+
+log = structlog.get_logger()
 
 
 class Base(DeclarativeBase):
@@ -27,6 +32,10 @@ class Base(DeclarativeBase):
 
 
 _settings = get_settings()
+
+# Logged at import so a deployed instance can be checked against its config
+# without guessing. Credentials are stripped by describe_dsn.
+log.info("database_configured", dsn=describe_dsn(_settings.database_dsn))
 
 engine = create_async_engine(
     _settings.database_dsn,

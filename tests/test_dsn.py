@@ -5,7 +5,7 @@ Every case here is a real string Supabase's dashboard can hand you.
 
 import pytest
 
-from app.core.dsn import normalize_async_dsn
+from app.core.dsn import describe_dsn, normalize_async_dsn
 
 HOST = "aws-0-us-east-1.pooler.supabase.com:6543"
 
@@ -52,3 +52,25 @@ class TestCredentials:
 def test_empty_rejected(bad):
     with pytest.raises(ValueError, match="empty"):
         normalize_async_dsn(bad)
+
+
+class TestFailFast:
+    def test_unsupported_scheme_raises_clearly(self):
+        with pytest.raises(ValueError, match="unsupported scheme 'mysql'"):
+            normalize_async_dsn("mysql://u:p@host/db")
+
+    def test_missing_scheme_raises_clearly(self):
+        # A pasted string without a scheme parses as a bogus one rather than
+        # silently producing a URL SQLAlchemy resolves to another dialect.
+        with pytest.raises(ValueError, match="unsupported scheme"):
+            normalize_async_dsn("postgres.abc:pw@host:6543/postgres")
+
+
+class TestDescribeDsn:
+    def test_strips_credentials(self):
+        described = describe_dsn(
+            "postgresql+asyncpg://postgres.abc:sup3rs3cret@db.example.com:6543/postgres"
+        )
+        assert described == "postgresql+asyncpg://db.example.com:6543/postgres"
+        assert "sup3rs3cret" not in described
+        assert "postgres.abc" not in described

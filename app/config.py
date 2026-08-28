@@ -1,0 +1,44 @@
+"""Application settings, loaded from environment variables.
+
+Values never live in this repo — they come from the Render environment group
+`finai-shared` in deployed environments, or a local .env file in development.
+"""
+
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    app_env: str = "development"
+
+    # Supabase — use the TRANSACTION POOLER connection string (port 6543).
+    # The direct :5432 connection will exhaust Postgres connections once the
+    # API and worker each run multiple instances.
+    database_url: str
+
+    supabase_url: str
+    supabase_service_role_key: str = ""
+    supabase_anon_key: str = ""
+    # Legacy HS256 projects only. Prefer asymmetric keys + JWKS (see auth.py).
+    supabase_jwt_secret: str = ""
+
+    llm_api_key: str = ""
+    document_ai_credentials: str = ""
+
+    extraction_queue_name: str = "extraction_jobs"
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env == "production"
+
+    @property
+    def jwks_url(self) -> str:
+        return f"{self.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()  # type: ignore[call-arg]

@@ -8,6 +8,8 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.dsn import normalize_async_dsn
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -29,6 +31,15 @@ class Settings(BaseSettings):
     document_ai_credentials: str = ""
 
     extraction_queue_name: str = "extraction_jobs"
+
+    @property
+    def database_dsn(self) -> str:
+        """`database_url` coerced into a form asyncpg accepts.
+
+        Always use this, never `database_url` directly — the value pasted into
+        Render is whatever Supabase's dashboard produced.
+        """
+        return normalize_async_dsn(self.database_url)
 
     @property
     def is_production(self) -> bool:

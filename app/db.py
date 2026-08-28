@@ -29,7 +29,7 @@ class Base(DeclarativeBase):
 _settings = get_settings()
 
 engine = create_async_engine(
-    _settings.database_url,
+    _settings.database_dsn,
     poolclass=NullPool,
     connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},
     echo=False,

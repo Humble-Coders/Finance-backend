@@ -1,6 +1,7 @@
 """Alembic environment. The database URL comes from settings, never alembic.ini."""
 
 import asyncio
+from uuid import uuid4
 from logging.config import fileConfig
 
 from alembic import context
@@ -38,7 +39,11 @@ async def run_migrations_online() -> None:
     engine = create_async_engine(
         get_settings().database_dsn,
         poolclass=NullPool,
-        connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},
+        connect_args={
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+            "prepared_statement_name_func": lambda: f"__asyncpg_{uuid4()}__",
+        },
     )
     async with engine.connect() as connection:
         await connection.run_sync(_run)

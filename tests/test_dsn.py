@@ -67,10 +67,19 @@ class TestFailFast:
 
 
 class TestDescribeDsn:
-    def test_strips_credentials(self):
+    def test_strips_password_but_keeps_username(self):
         described = describe_dsn(
             "postgresql+asyncpg://postgres.abc:sup3rs3cret@db.example.com:6543/postgres"
         )
-        assert described == "postgresql+asyncpg://db.example.com:6543/postgres"
+        assert described == (
+            "postgresql+asyncpg://postgres.abc@db.example.com:6543/postgres"
+        )
         assert "sup3rs3cret" not in described
-        assert "postgres.abc" not in described
+
+    def test_username_without_project_ref_is_visible(self):
+        # The failure this is meant to surface: Supavisor needs
+        # postgres.<project-ref>, and rejects a bare `postgres`.
+        described = describe_dsn(
+            "postgresql+asyncpg://postgres:pw@aws-0-us-east-1.pooler.supabase.com:6543/postgres"
+        )
+        assert "postgres@aws-0-us-east-1.pooler.supabase.com" in described

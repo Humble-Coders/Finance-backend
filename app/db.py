@@ -1,15 +1,28 @@
 """Database engine and session management.
 
-IMPORTANT — Supabase transaction pooler (Supavisor) does not support prepared
-statements. asyncpg caches them by default, which produces confusing
-`DuplicatePreparedStatementError` failures under load. Both settings below are
-required, not optional:
+IMPORTANT — Supabase's transaction pooler (Supavisor) hands each statement to
+whichever backend connection is free, so a prepared statement created by one
+round trip may not exist on the next. All four settings below are required
+together; three of them are not enough:
 
-  * statement_cache_size=0   — disable asyncpg's prepared-statement cache
-  * poolclass=NullPool       — let the pooler own pooling, not SQLAlchemy
+  * poolclass=NullPool                — let the pooler own pooling, not SQLAlchemy
+  * statement_cache_size=0            — disable asyncpg's own cache
+  * prepared_statement_cache_size=0   — disable SQLAlchemy's asyncpg-adapter cache
+  * prepared_statement_name_func      — unique names per statement, so two
+                                        connections can never collide
+
+Without the name function you get, on the very first query:
+
+    asyncpg.exceptions.InvalidSQLStatementNameError:
+    prepared statement "__asyncpg_stmt_1__" does not exist
+
+which SQLAlchemy surfaces as a bare ProgrammingError.
+
+This is the configuration SQLAlchemy documents for pgbouncer-style poolers.
 """
 
 from collections.abc import AsyncGenerator
+from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -40,7 +53,11 @@ log.info("database_configured", dsn=describe_dsn(_settings.database_dsn))
 engine = create_async_engine(
     _settings.database_dsn,
     poolclass=NullPool,
-    connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},
+    connect_args={
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid4()}__",
+    },
     echo=False,
 )
 

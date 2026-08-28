@@ -68,12 +68,19 @@ def normalize_async_dsn(url: str) -> str:
 
 
 def describe_dsn(url: str) -> str:
-    """Credential-free description of a DSN, safe to log.
+    """Password-free description of a DSN, safe to log.
 
-    >>> describe_dsn("postgresql+asyncpg://user:secret@db.example.com:6543/postgres")
-    'postgresql+asyncpg://db.example.com:6543/postgres'
+    The username IS included. It is not a secret — Supabase's pooler username is
+    `postgres.<project-ref>`, and the project ref is already the subdomain of the
+    public project URL. Showing it turns the most common pooler failure (a
+    username missing its project ref, which Supavisor rejects as an unknown
+    tenant) into something visible rather than something to guess at.
+
+    >>> describe_dsn("postgresql+asyncpg://postgres.abc:secret@db.example.com:6543/postgres")
+    'postgresql+asyncpg://postgres.abc@db.example.com:6543/postgres'
     """
     parts = urlsplit(url)
     host = parts.hostname or "?"
     port = f":{parts.port}" if parts.port else ""
-    return f"{parts.scheme}://{host}{port}{parts.path}"
+    user = f"{parts.username}@" if parts.username else ""
+    return f"{parts.scheme}://{user}{host}{port}{parts.path}"

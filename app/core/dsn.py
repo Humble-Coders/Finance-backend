@@ -19,7 +19,7 @@ we normalize here. asyncpg negotiates TLS with Supabase on its own, so dropping
 
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-__all__ = ["normalize_async_dsn"]
+__all__ = ["normalize_async_dsn", "describe_dsn"]
 
 _ASYNC_SCHEME = "postgresql+asyncpg"
 
@@ -55,4 +55,25 @@ def normalize_async_dsn(url: str) -> str:
         ]
     )
 
+    if scheme != _ASYNC_SCHEME:
+        # Fail with something actionable. Without this the next symptom is
+        # SQLAlchemy resolving some other dialect and dying on an unrelated
+        # "No module named ..." several frames deep.
+        raise ValueError(
+            f"DATABASE_URL has unsupported scheme {parts.scheme!r}; "
+            f"expected one of {sorted(_SYNC_SCHEMES)} or {_ASYNC_SCHEME!r}"
+        )
+
     return urlunsplit((scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
+def describe_dsn(url: str) -> str:
+    """Credential-free description of a DSN, safe to log.
+
+    >>> describe_dsn("postgresql+asyncpg://user:secret@db.example.com:6543/postgres")
+    'postgresql+asyncpg://db.example.com:6543/postgres'
+    """
+    parts = urlsplit(url)
+    host = parts.hostname or "?"
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}{parts.path}"

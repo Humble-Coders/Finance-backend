@@ -3,7 +3,7 @@
 FastAPI service behind the FinAI mobile and web clients. Owns all business logic,
 all authoritative financial math, and all AI orchestration.
 
-- Product spec: `docs/PRD.md` (in the mobile repo)
+- Product spec: [docs/PRD.md in FinAI-Mobile-2026](https://github.com/Humble-Coders/FinAI-Mobile-2026/blob/main/docs/PRD.md) — canonical, not duplicated here
 - Conventions: `CLAUDE.md`
 - Data platform: Supabase (Postgres, Auth, Storage, Queues, pgvector) — `us-east-1`
 - Hosting: Render (`finai-api` web service, `finai-worker` background worker) — Virginia

@@ -5,7 +5,7 @@
 The FastAPI service behind FinAI, an AI money-coach platform. It owns **all** business
 logic: transaction extraction, categorization, budgets, goals, debt math, the health
 score, and the AI chatbot. Mobile (Kotlin Multiplatform) and web (React) clients are
-display layers. Product spec: `docs/PRD.md` in the mobile repo.
+display layers. Product spec: **https://github.com/Humble-Coders/FinAI-Mobile-2026/blob/main/docs/PRD.md** — the mobile repo holds the canonical PRD; this repo deliberately keeps no copy, so there is one decision log and it cannot drift.
 
 **Positioning constraint:** this is *educational guidance*, **not regulated financial
 advice**. The AI must never give individualized securities recommendations. Projections

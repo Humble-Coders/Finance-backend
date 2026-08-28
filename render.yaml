@@ -13,6 +13,11 @@ services:
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
     envVars:
+      # Pin the interpreter. Render's default tracks the latest Python, and
+      # pydantic-core has no wheels for the newest releases — pip then tries to
+      # compile it from Rust source and the build fails.
+      - key: PYTHON_VERSION
+        value: "3.12.8"
       - fromGroup: finai-shared
 
   - type: worker
@@ -24,4 +29,9 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python -m app.workers.main
     envVars:
+      # Pin the interpreter. Render's default tracks the latest Python, and
+      # pydantic-core has no wheels for the newest releases — pip then tries to
+      # compile it from Rust source and the build fails.
+      - key: PYTHON_VERSION
+        value: "3.12.8"
       - fromGroup: finai-shared

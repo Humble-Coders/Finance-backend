@@ -10,6 +10,9 @@ all authoritative financial math, and all AI orchestration.
 
 ## Local development
 
+Python **3.12** (pinned in `.python-version`; Render uses `PYTHON_VERSION` in
+`render.yaml` — keep the two in step).
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt

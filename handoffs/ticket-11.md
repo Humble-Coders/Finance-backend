@@ -1,7 +1,7 @@
 # Handoff — ticket #11
 
 **Ticket:** [#11 — \[M1\] Wire authentication and bootstrap the household](https://github.com/Humble-Coders/Finance-backend/issues/11)
-**Branch:** `ticket-11-auth-household-bootstrap` · **Base:** `main` · 10 files, +754 / −1
+**Branch:** `ticket-11-auth-household-bootstrap` · **Base:** `main` · **11 files, +840 / −1** — of which 10 files / +754 are code and tests; the remainder is this report
 
 ## Summary
 
@@ -27,6 +27,8 @@ Also adds `current_household`, the dependency every later endpoint will use to s
 | `app/main.py` | Register the router |
 | `tests/conftest.py` | `db_session` (rolled back, joined with `create_savepoint` so code under test may commit) and `api_client` (dependency overrides) |
 | `tests/test_identity_resolution.py`, `tests/test_me_endpoint.py` | 24 tests across the four resolution branches, idempotency, Apple's once-only claims, and the conflict path |
+
+**Not changed:** `app/auth.py` is untouched — verified against the diff. Token verification already worked; this ticket only consumes its output, which is why the 401 criterion is inherited rather than re-implemented.
 
 ## How to test
 

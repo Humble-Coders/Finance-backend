@@ -1,0 +1,259 @@
+"""Constraint behaviour, proven against a real Postgres.
+
+These cannot be unit tests: SQLite implements neither Postgres UUIDs, enums nor
+partial unique indexes, so it would answer differently from production. Each
+test runs in a rolled-back transaction (see conftest) and leaves no data.
+
+Marked `integration`: backend CI (#13) runs without a database and skips them;
+ticket #15 adds one and turns them on.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from asyncpg.exceptions import CheckViolationError, UniqueViolationError
+
+from tests.conftest import requires_db
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.asyncio(loop_scope="session"),
+    requires_db,
+]
+
+
+async def _household(db) -> uuid.UUID:
+    hid = uuid.uuid4()
+    await db.execute(
+        "INSERT INTO household (id, country_code, created_at, updated_at)"
+        " VALUES ($1, 'CA', now(), now())",
+        hid,
+    )
+    return hid
+
+
+async def _user(db, household_id, *, phone=None, auth_id=None) -> uuid.UUID:
+    uid = uuid.uuid4()
+    await db.execute(
+        "INSERT INTO \"user\" (id, household_id, auth_user_id, phone, created_at, updated_at)"
+        " VALUES ($1, $2, $3, $4, now(), now())",
+        uid, household_id, auth_id or str(uuid.uuid4()), phone,
+    )
+    return uid
+
+
+async def _account(db, household_id) -> uuid.UUID:
+    aid = uuid.uuid4()
+    await db.execute(
+        "INSERT INTO account (id, household_id, name, kind, currency, created_at, updated_at)"
+        " VALUES ($1, $2, 'Test', 'chequing', 'CAD', now(), now())",
+        aid, household_id,
+    )
+    return aid
+
+
+async def _transaction(db, household_id, account_id, *, description="STARBUCKS 4471"):
+    await db.execute(
+        """
+        INSERT INTO transaction
+            (id, household_id, account_id, occurred_on, amount_minor_units, currency,
+             direction, normalized_description, source, needs_review, created_at, updated_at)
+        VALUES ($1, $2, $3, DATE '2026-03-01', 575, 'CAD',
+                'debit', $4, 'upload', false, now(), now())
+        """,
+        uuid.uuid4(), household_id, account_id, description,
+    )
+
+
+class TestTransactionDedup:
+    """Re-importing an overlapping statement must not double-count."""
+
+    async def test_identical_transaction_is_rejected(self, db):
+        hid = await _household(db)
+        aid = await _account(db, hid)
+        await _transaction(db, hid, aid)
+
+        with pytest.raises(UniqueViolationError):
+            await _transaction(db, hid, aid)
+
+    async def test_a_genuinely_different_transaction_is_allowed(self, db):
+        """The constraint must not be so broad it blocks real duplicates.
+
+        Two identical coffees on the same day at the same price are plausible —
+        but they differ in description once normalized, which is what the key
+        relies on.
+        """
+        hid = await _household(db)
+        aid = await _account(db, hid)
+        await _transaction(db, hid, aid, description="STARBUCKS 4471")
+        await _transaction(db, hid, aid, description="TIM HORTONS 992")
+
+
+class TestIdentity:
+    """PRD §4.6 — the verified phone is what stops one person becoming two."""
+
+    async def test_duplicate_phone_is_rejected(self, db):
+        hid = await _household(db)
+        await _user(db, hid, phone="+14165550101")
+
+        other = await _household(db)
+        with pytest.raises(UniqueViolationError):
+            await _user(db, other, phone="+14165550101")
+
+    async def test_multiple_users_may_have_no_phone(self, db):
+        """NULLs are distinct, so unverified accounts do not collide."""
+        hid = await _household(db)
+        await _user(db, hid, phone=None)
+        await _user(db, hid, phone=None)
+
+    async def test_one_user_may_hold_several_providers(self, db):
+        """Google, Apple and phone OTP must resolve to a single user."""
+        hid = await _household(db)
+        uid = await _user(db, hid, phone="+14165550102")
+
+        for provider, external in (("google", "g-1"), ("apple", "a-1"), ("phone", "p-1")):
+            await db.execute(
+                "INSERT INTO user_identity (id, user_id, provider, provider_user_id,"
+                " created_at, updated_at) VALUES ($1, $2, $3, $4, now(), now())",
+                uuid.uuid4(), uid, provider, external,
+            )
+
+        count = await db.fetchval(
+            "SELECT count(*) FROM user_identity WHERE user_id = $1", uid
+        )
+        assert count == 3
+
+    async def test_the_same_provider_account_cannot_map_to_two_users(self, db):
+        hid = await _household(db)
+        first = await _user(db, hid)
+        second = await _user(db, hid)
+
+        await db.execute(
+            "INSERT INTO user_identity (id, user_id, provider, provider_user_id,"
+            " created_at, updated_at) VALUES ($1, $2, 'google', 'shared-id', now(), now())",
+            uuid.uuid4(), first,
+        )
+        with pytest.raises(UniqueViolationError):
+            await db.execute(
+                "INSERT INTO user_identity (id, user_id, provider, provider_user_id,"
+                " created_at, updated_at) VALUES ($1, $2, 'google', 'shared-id', now(), now())",
+                uuid.uuid4(), second,
+            )
+
+
+class TestRegion:
+    async def test_household_may_have_no_country_yet(self, db):
+        """Google/Apple users authenticate before providing a phone."""
+        hid = uuid.uuid4()
+        await db.execute(
+            "INSERT INTO household (id, country_code, created_at, updated_at)"
+            " VALUES ($1, NULL, now(), now())",
+            hid,
+        )
+        assert await db.fetchval(
+            "SELECT country_code FROM household WHERE id = $1", hid
+        ) is None
+
+
+class TestMoney:
+    async def test_negative_amounts_are_allowed(self, db):
+        """Refunds, debts and overruns are legitimately negative."""
+        hid = await _household(db)
+        aid = await _account(db, hid)
+        await db.execute(
+            """
+            INSERT INTO transaction
+                (id, household_id, account_id, occurred_on, amount_minor_units, currency,
+                 direction, normalized_description, source, needs_review, created_at, updated_at)
+            VALUES ($1, $2, $3, DATE '2026-03-02', -2500, 'CAD',
+                    'credit', 'REFUND', 'upload', false, now(), now())
+            """,
+            uuid.uuid4(), hid, aid,
+        )
+
+    async def test_currency_must_be_three_characters(self, db):
+        """Assert the specific violation.
+
+        A bare `Exception` would also pass on a typo in the INSERT, which would
+        prove nothing about the constraint — and this is the test that caught
+        the check being silently discarded.
+        """
+        hid = await _household(db)
+        with pytest.raises(CheckViolationError):
+            await db.execute(
+                "INSERT INTO account (id, household_id, name, kind, currency,"
+                " created_at, updated_at) VALUES ($1, $2, 'Bad', 'chequing', 'CA', now(), now())",
+                uuid.uuid4(), hid,
+            )
+
+
+class TestSystemCategories:
+    async def test_a_second_system_category_cannot_reuse_a_slug(self, db):
+        """uq_category_household_slug does not cover these.
+
+        Postgres treats NULLs as distinct, so (NULL, 'groceries') never
+        collides with itself — a partial unique index is what closes it.
+        """
+        with pytest.raises(UniqueViolationError):
+            await db.execute(
+                "INSERT INTO category (id, household_id, slug, name,"
+                " created_at, updated_at)"
+                " VALUES ($1, NULL, 'groceries', 'Duplicate', now(), now())",
+                uuid.uuid4(),
+            )
+
+    async def test_a_household_may_still_define_its_own_slug(self, db):
+        """The partial index must not block user-defined categories."""
+        hid = await _household(db)
+        await db.execute(
+            "INSERT INTO category (id, household_id, slug, name,"
+            " created_at, updated_at)"
+            " VALUES ($1, $2, 'groceries', 'My groceries', now(), now())",
+            uuid.uuid4(), hid,
+        )
+
+
+class TestRowLevelSecurity:
+    """PRD §4.2 — RLS on every table, as defence in depth.
+
+    The migration that enables it hardcodes a table list, so a table added by a
+    future migration gets none. Metadata tests cannot catch that: RLS is
+    database state, not schema metadata. This is the only thing standing between
+    "enabled everywhere" and "enabled on the tables someone remembered".
+    """
+
+    async def test_every_table_has_rls_enabled(self, db):
+        missing = await db.fetch(
+            """
+            SELECT c.relname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relkind = 'r'
+              AND c.relname <> 'alembic_version'
+              AND NOT c.relrowsecurity
+            ORDER BY 1
+            """
+        )
+        names = [r["relname"] for r in missing]
+        assert names == [], (
+            "tables without RLS: "
+            + ", ".join(names)
+            + " — add them to the TABLES list in the RLS migration"
+        )
+
+    async def test_no_permissive_policy_grants_broad_access(self, db):
+        """RLS with no policy denies everything, which is the intent.
+
+        A policy added later without review would quietly open the tables up, so
+        assert none exist rather than trusting that none were added.
+        """
+        policies = await db.fetch(
+            "SELECT tablename, policyname FROM pg_policies WHERE schemaname = 'public'"
+        )
+        assert [dict(p) for p in policies] == [], (
+            "unexpected RLS policies exist; RLS is deliberately policy-free "
+            "because only the backend (which bypasses it) touches these tables"
+        )

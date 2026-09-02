@@ -8,6 +8,7 @@ from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+import app.models  # noqa: F401 — autogenerate only sees imported models
 from app.config import get_settings
 from app.db import Base
 
@@ -20,7 +21,7 @@ target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=get_settings().database_dsn,
+        url=get_settings().migration_dsn,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -37,7 +38,7 @@ def _run(connection) -> None:
 
 async def run_migrations_online() -> None:
     engine = create_async_engine(
-        get_settings().database_dsn,
+        get_settings().migration_dsn,
         poolclass=NullPool,
         connect_args={
             "statement_cache_size": 0,

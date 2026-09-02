@@ -23,7 +23,7 @@ import structlog
 from sqlalchemy import text
 
 from app.config import get_settings
-from app.db import SessionLocal
+from app.db import get_sessionmaker
 
 log = structlog.get_logger()
 
@@ -61,7 +61,7 @@ class Worker:
 
     async def _process_one(self) -> bool:
         """Pop one message; return True if work was done."""
-        async with SessionLocal() as session:
+        async with get_sessionmaker()() as session:
             result = await session.execute(
                 text("SELECT * FROM pgmq.read(:queue, :vt, 1)"),
                 {

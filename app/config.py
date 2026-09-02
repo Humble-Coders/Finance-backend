@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     # API and worker each run multiple instances.
     database_url: str
 
+    # Migrations need a SESSION-mode connection (port 5432). DDL through the
+    # transaction pooler (6543) is cancelled by its statement timeout — even a
+    # trivial CREATE TABLE — because transaction mode is not built for it.
+    # Falls back to database_url so a plain-Postgres environment (e.g. CI, which
+    # has no pooler) needs no extra configuration.
+    migration_database_url: str = ""
+
     supabase_url: str
     supabase_service_role_key: str = ""
     supabase_anon_key: str = ""
@@ -40,6 +47,11 @@ class Settings(BaseSettings):
         Render is whatever Supabase's dashboard produced.
         """
         return normalize_async_dsn(self.database_url)
+
+    @property
+    def migration_dsn(self) -> str:
+        """The DSN Alembic should use. Session-mode where one is configured."""
+        return normalize_async_dsn(self.migration_database_url or self.database_url)
 
     @property
     def is_production(self) -> bool:

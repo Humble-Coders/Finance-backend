@@ -84,7 +84,13 @@ Measured before fixing, with a deliberately broken `app/main.py`:
 
 Ruff caught the first two incidentally (syntax error; unused import) but **does not resolve imports**, so the third — a used import of a nonexistent module — was invisible to every check while breaking the deploy.
 
-`tests/test_entrypoints.py` closes it: both deployed entrypoints must import, and the attributes the start commands depend on must exist (`app` for `uvicorn app.main:app`, `Worker` for `python -m app.workers.main`) — importing alone would let a rename pass while still breaking startup. Re-injecting the same break now produces 2 failures. **121 tests pass.**
+`tests/test_entrypoints.py` closes it: both deployed entrypoints must import, and the attributes the start commands depend on must exist (`app` for `uvicorn app.main:app`, `Worker` for `python -m app.workers.main`) — importing alone would let a rename pass while still breaking startup. Re-injecting the same break still produces failures. **121 tests pass.**
+
+**The new test immediately failed on CI, correctly.** `app/main.py:12` calls `get_settings()` at module level to decide whether to expose `/docs`, so importing it requires configuration — the same import-time-config defect already fixed in `app/db.py`, in a second place, found by the very test added to catch import failures. It passed locally only because a `.env` exists.
+
+The fix was neither to weaken `Settings` (which should keep requiring `DATABASE_URL` in production) nor to put dummy values in the workflow (which would hide the coupling in CI config, where nobody would look). Unlike `app.models` — which must import with no configuration, because schema tests need that — a deployed app is legitimately configured at import. So the tests supply throwaway values via `monkeypatch` and clear the settings cache on both sides. Nothing connects; the engine is lazy.
+
+Verified with `.env` removed and the environment cleared: **121 passed, 13 skipped**.
 
 ## Open questions / follow-ups
 

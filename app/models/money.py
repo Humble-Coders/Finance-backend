@@ -5,16 +5,17 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Enum as SAEnum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.base import (
     HouseholdScopedMixin,
-    currency_check,
     TimestampMixin,
     UUIDMixin,
+    currency_check,
     money_amount,
     money_currency,
 )
@@ -80,10 +81,16 @@ class DocumentUpload(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     extracted_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
-    transactions: Mapped[list[Transaction]] = relationship(back_populates="document_upload")
+    transactions: Mapped[list[Transaction]] = relationship(
+        back_populates="document_upload"
+    )
 
 
 class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
@@ -112,7 +119,9 @@ class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     )
 
     account_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("account.id", ondelete="CASCADE"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("account.id", ondelete="CASCADE"),
+        nullable=False,
     )
     document_upload_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
@@ -120,7 +129,9 @@ class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
         nullable=True,
     )
     category_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("category.id", ondelete="SET NULL"), nullable=True
+        PgUUID(as_uuid=True),
+        ForeignKey("category.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     occurred_on: Mapped[date] = mapped_column(Date, nullable=False)
@@ -143,7 +154,11 @@ class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
 
     # Set by extraction; low-confidence rows go to the user review queue (F2).
     extraction_confidence: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    needs_review: Mapped[bool] = mapped_column(nullable=False, default=False, index=True)
+    needs_review: Mapped[bool] = mapped_column(
+        nullable=False, default=False, index=True
+    )
 
     account: Mapped[Account] = relationship(back_populates="transactions")
-    document_upload: Mapped[DocumentUpload | None] = relationship(back_populates="transactions")
+    document_upload: Mapped[DocumentUpload | None] = relationship(
+        back_populates="transactions"
+    )

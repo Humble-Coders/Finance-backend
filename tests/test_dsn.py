@@ -11,7 +11,9 @@ HOST = "aws-0-us-east-1.pooler.supabase.com:6543"
 
 
 class TestScheme:
-    @pytest.mark.parametrize("scheme", ["postgresql", "postgres", "postgresql+psycopg2"])
+    @pytest.mark.parametrize(
+        "scheme", ["postgresql", "postgres", "postgresql+psycopg2"]
+    )
     def test_sync_schemes_become_asyncpg(self, scheme):
         result = normalize_async_dsn(f"{scheme}://u:p@{HOST}/postgres")
         assert result == f"postgresql+asyncpg://u:p@{HOST}/postgres"
@@ -33,7 +35,9 @@ class TestLibpqParams:
         result = normalize_async_dsn(
             f"postgresql://u:p@{HOST}/postgres?sslmode=require&application_name=finai"
         )
-        assert result == f"postgresql+asyncpg://u:p@{HOST}/postgres?application_name=finai"
+        assert (
+            result == f"postgresql+asyncpg://u:p@{HOST}/postgres?application_name=finai"
+        )
 
 
 class TestCredentials:

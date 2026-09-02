@@ -5,16 +5,17 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Date, Enum as SAEnum, ForeignKey, Index, Integer, String
+from sqlalchemy import Date, ForeignKey, Index, Integer, String
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.base import (
     HouseholdScopedMixin,
-    currency_check,
     TimestampMixin,
     UUIDMixin,
+    currency_check,
     money_amount,
     money_currency,
 )
@@ -28,7 +29,9 @@ class Budget(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
 
     __tablename__ = "budget"
     __table_args__ = (
-        Index("uq_budget_household_period", "household_id", "period_start", unique=True),
+        Index(
+            "uq_budget_household_period", "household_id", "period_start", unique=True
+        ),
         currency_check(),
     )
 
@@ -50,18 +53,26 @@ class BudgetLine(UUIDMixin, TimestampMixin, Base):
 
     __tablename__ = "budget_line"
     __table_args__ = (
-        Index("uq_budget_line_budget_category", "budget_id", "category_id", unique=True),
+        Index(
+            "uq_budget_line_budget_category", "budget_id", "category_id", unique=True
+        ),
         currency_check(),
     )
 
     budget_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("budget.id", ondelete="CASCADE"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("budget.id", ondelete="CASCADE"),
+        nullable=False,
     )
     category_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("category.id", ondelete="CASCADE"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("category.id", ondelete="CASCADE"),
+        nullable=False,
     )
 
-    allocated_minor_units: Mapped[int] = money_amount("allocated_minor_units", nullable=False)
+    allocated_minor_units: Mapped[int] = money_amount(
+        "allocated_minor_units", nullable=False
+    )
     currency: Mapped[str] = money_currency()
 
     budget: Mapped[Budget] = relationship(back_populates="lines")
@@ -98,10 +109,14 @@ class Debt(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     account_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("account.id", ondelete="SET NULL"), nullable=True
+        PgUUID(as_uuid=True),
+        ForeignKey("account.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
-    balance_minor_units: Mapped[int] = money_amount("balance_minor_units", nullable=False)
+    balance_minor_units: Mapped[int] = money_amount(
+        "balance_minor_units", nullable=False
+    )
     minimum_payment_minor_units: Mapped[int | None] = money_amount(
         "minimum_payment_minor_units", nullable=True
     )

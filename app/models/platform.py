@@ -12,13 +12,16 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     DateTime,
-    Enum as SAEnum,
     ForeignKey,
     Index,
     String,
     Text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
+from sqlalchemy import (
+    Enum as SAEnum,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -46,7 +49,9 @@ class SubscriptionEntitlement(UUIDMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "subscription_entitlement"
-    __table_args__ = (Index("ix_entitlement_household_active", "household_id", "is_active"),)
+    __table_args__ = (
+        Index("ix_entitlement_household_active", "household_id", "is_active"),
+    )
 
     household_id: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -58,10 +63,16 @@ class SubscriptionEntitlement(UUIDMixin, TimestampMixin, Base):
         SAEnum(PlanTier, name="plan_tier"), nullable=False, default=PlanTier.free
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
-    external_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_subscription_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
 
 
 class CountryPack(UUIDMixin, TimestampMixin, Base):
@@ -116,9 +127,13 @@ class DisclaimerVersion(UUIDMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "disclaimer_version"
-    __table_args__ = (Index("uq_disclaimer_country_version", "country_code", "version", unique=True),)
+    __table_args__ = (
+        Index("uq_disclaimer_country_version", "country_code", "version", unique=True),
+    )
 
     country_code: Mapped[str | None] = mapped_column(String(2), nullable=True)
     version: Mapped[str] = mapped_column(String(32), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    effective_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    effective_from: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

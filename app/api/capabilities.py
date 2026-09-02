@@ -49,11 +49,16 @@ def resolve(country_code: str, plan: str) -> Capabilities:
             "split_expenses": Feature(enabled=False, reason="coming_soon"),
             "investment_tracking": Feature(enabled=False, reason="region_unsupported"),
         },
-        content={"tax_accounts": ["RRSP", "TFSA", "FHSA"], "disclaimer_version": "ca-v1"},
+        content={
+            "tax_accounts": ["RRSP", "TFSA", "FHSA"],
+            "disclaimer_version": "ca-v1",
+        },
     )
 
 
 @router.get("/capabilities", response_model=Capabilities)
-async def get_capabilities(user: AuthenticatedUser = Depends(current_user)) -> Capabilities:
+async def get_capabilities(
+    user: AuthenticatedUser = Depends(current_user),
+) -> Capabilities:
     # TODO: look up the caller's household country_code and plan.
     return resolve(country_code="CA", plan="free")

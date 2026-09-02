@@ -1,0 +1,19 @@
+# Ruff configuration. Kept explicit rather than relying on defaults, so the rule
+# set is a decision the repo records instead of whatever ruff ships next.
+
+[tool.ruff]
+# Must match .python-version and PYTHON_VERSION in render.yaml. Testing or
+# linting against a different interpreter than we deploy is how the first
+# deploy failed (Python 3.14, no pydantic-core wheels).
+target-version = "py312"
+line-length = 88
+exclude = [".venv", "alembic/versions"]
+
+[tool.ruff.lint]
+# E/F are ruff's defaults (pycodestyle, pyflakes). I adds import sorting, which
+# `ruff format` does not do — without it, import order drifts and produces diff
+# noise that hides real changes.
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]

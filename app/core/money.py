@@ -15,7 +15,7 @@ Rules:
     want rounding (e.g. LLM-extracted values) must opt in explicitly.
 """
 
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 __all__ = [
     "MoneyError",
@@ -96,7 +96,9 @@ def from_minor_units(minor_units: int, currency: str) -> str:
     '1200'
     """
     if not isinstance(minor_units, int) or isinstance(minor_units, bool):
-        raise MoneyError(f"minor units must be an int, got {type(minor_units).__name__}")
+        raise MoneyError(
+            f"minor units must be an int, got {type(minor_units).__name__}"
+        )
     exponent = exponent_for(currency)
     value = Decimal(minor_units).scaleb(-exponent)
     return f"{value:.{exponent}f}"

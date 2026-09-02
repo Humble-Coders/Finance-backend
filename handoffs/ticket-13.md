@@ -38,7 +38,7 @@ Adding `ruff` configuration surfaced 49 violations, fixed in a separate commit s
 ruff check . && ruff format --check . && pytest -q
 ```
 
-Expect `All checks passed!` and `117 passed, 13 deselected`.
+Expect `All checks passed!` and `121 passed, 13 deselected`.
 
 For the workflow itself: open any PR against `main` and watch the **CI** check.
 
@@ -69,6 +69,22 @@ For the workflow itself: open any PR against `main` and watch the **CI** check.
 **6. "Under two minutes" is treated as a note rather than a gate.** It is an arbitrary threshold that will be the first thing to fail as the suite grows, and failing it would not indicate anything is wrong. The run takes 26 seconds today, so the point is moot — but it is flagged rather than silently dropped.
 
 **7. `concurrency` cancels superseded runs** on the same branch. Not in the ticket; it costs nothing and stops a queue of stale runs.
+
+## Manager review — change applied
+
+Review found that **CI could not catch the failure class this ticket exists to prevent.** Nothing in the suite imported `app.main` or `app.workers.main`, so an import-time break in either passed CI and failed on deploy — exactly deploy failure #2 (`ModuleNotFoundError: psycopg2`).
+
+Measured before fixing, with a deliberately broken `app/main.py`:
+
+| Injected fault | `pytest` | `import app.main` |
+|---|---|---|
+| Invalid syntax | 117 passed | fails |
+| Missing module, unused import | 117 passed | `ModuleNotFoundError` |
+| Missing module, import **used** | 117 passed | `ModuleNotFoundError` |
+
+Ruff caught the first two incidentally (syntax error; unused import) but **does not resolve imports**, so the third — a used import of a nonexistent module — was invisible to every check while breaking the deploy.
+
+`tests/test_entrypoints.py` closes it: both deployed entrypoints must import, and the attributes the start commands depend on must exist (`app` for `uvicorn app.main:app`, `Worker` for `python -m app.workers.main`) — importing alone would let a rename pass while still breaking startup. Re-injecting the same break now produces 2 failures. **121 tests pass.**
 
 ## Open questions / follow-ups
 

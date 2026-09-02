@@ -9,8 +9,14 @@ CI was created to prevent (`ModuleNotFoundError: psycopg2`).
 Linting does not close the gap: ruff does not resolve imports, so a *used*
 import of a module that does not exist is invisible to it.
 
-These tests need no configuration — the engine is created lazily — and no
-database. They are the cheapest possible check that what we deploy can start.
+`app.main` configures the FastAPI instance at import (it reads `is_production`
+to decide whether to expose /docs), so importing it legitimately requires
+settings — unlike `app.models`, which must not. These tests therefore supply
+throwaway values rather than weakening `Settings`, which should keep requiring
+DATABASE_URL in production. Nothing connects: the engine is created lazily.
+
+The property under test is that the **import graph is intact** — which is what
+`ModuleNotFoundError: psycopg2` broke.
 """
 
 from __future__ import annotations
@@ -18,6 +24,22 @@ from __future__ import annotations
 import importlib
 
 import pytest
+
+from app.config import get_settings
+
+@pytest.fixture(autouse=True)
+def _throwaway_settings(monkeypatch: pytest.MonkeyPatch):
+    """Minimal configuration so the entrypoints can be imported.
+
+    Deliberately not real: nothing here connects. The cache is cleared on both
+    sides so these values cannot leak into any other test.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pw@localhost:5432/postgres")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
 
 DEPLOYED_ENTRYPOINTS = [
     # Render: uvicorn app.main:app

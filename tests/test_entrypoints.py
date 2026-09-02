@@ -27,6 +27,7 @@ import pytest
 
 from app.config import get_settings
 
+
 @pytest.fixture(autouse=True)
 def _throwaway_settings(monkeypatch: pytest.MonkeyPatch):
     """Minimal configuration so the entrypoints can be imported.

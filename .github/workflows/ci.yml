@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# A newer push to the same branch makes the older run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Must match .python-version and PYTHON_VERSION in render.yaml.
+          # Testing on a different interpreter than we deploy is exactly how the
+          # first deploy failed: Render used 3.14, which has no pydantic-core
+          # wheels, so pip tried to build Rust from source and died.
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        # Reproduces wheel-availability failures on the PR rather than on deploy.
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Check formatting
+        run: ruff format --check .
+
+      - name: Test
+        # No secrets and no database. The engine is created lazily, so importing
+        # the ORM models needs no configuration; the 13 tests that do need a
+        # database skip themselves. See tests/conftest.py.
+        run: pytest -q

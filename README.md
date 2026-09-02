@@ -1,5 +1,7 @@
 # FinAI — Backend
 
+[![CI](https://github.com/Humble-Coders/Finance-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/Humble-Coders/Finance-backend/actions/workflows/ci.yml)
+
 FastAPI service behind the FinAI mobile and web clients. Owns all business logic,
 all authoritative financial math, and all AI orchestration.
 

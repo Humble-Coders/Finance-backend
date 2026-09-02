@@ -7,7 +7,7 @@
 
 Eighteen tables across identity, money, categorization, planning, derived output and platform configuration, with the PRD's four locked constraints enforced by the **database** rather than by convention: UUID primary keys with no sequences, household scoping, integer minor units always paired with a currency, and source-agnostic transactions.
 
-Four migrations: core schema, RLS on every table, the guarded `pgmq` queue, and seed data. All were applied to the real database, then downgraded to base and re-applied, so the round trip is proven rather than assumed. 113 tests pass — metadata rules that scan every table at once, plus constraint behaviour tested against a real Postgres inside a rolled-back transaction.
+Four migrations: core schema, RLS on every table, the guarded `pgmq` queue, and seed data. All were applied to the real database, then downgraded to base and re-applied, so the round trip is proven rather than assumed. 130 tests pass — metadata rules that scan every table at once, plus constraint behaviour tested against a real Postgres inside a rolled-back transaction.
 
 Four defects surfaced during the work, three of which would have blocked the next developer; all are fixed here and described below.
 
@@ -72,7 +72,7 @@ Percent-encode any `@` in the password as `%40`, or the URL parses part of it as
 alembic upgrade head --sql | less     # review before applying, per the ticket
 alembic upgrade head
 alembic upgrade head                  # again: the queue migration must be a no-op
-pytest                                # 113 passed
+pytest                                # 130 passed
 alembic downgrade base && alembic upgrade head   # round trip
 ```
 
@@ -105,7 +105,7 @@ select queue_name from pgmq.list_queues();                                     -
 | RLS enabled on every table | ✅ Met — verified: 0 tables with RLS disabled |
 | Re-running the queue migration where the queue exists succeeds | ✅ Met — run twice |
 | Seeded categories and CA country pack present | ✅ Met — 20 categories, 1 pack |
-| `pytest` passes; CI green | ⚠️ **Half met.** **113 pass locally.** There is *no CI* — `.github/workflows/` does not exist and ticket #13 has not started, so "CI green" cannot be true yet. Returns when #13 lands |
+| `pytest` passes; CI green | ⚠️ **Half met.** **130 pass locally.** There is *no CI* — `.github/workflows/` does not exist and ticket #13 has not started, so "CI green" cannot be true yet. Returns when #13 lands |
 
 ## Deviations / decisions
 
@@ -133,10 +133,22 @@ Review of PR #16 found one real gap and two weak tests. All fixed on this branch
 2. **`pytest.raises(Exception)` narrowed to `CheckViolationError`.** The broad form would have passed on a typo in the INSERT — proving nothing — and this is the test that caught the discarded CheckConstraint.
 3. **"CI green" unticked.** There is no CI yet (#13).
 
+### Second review pass
+
+Re-review confirmed the fixes with a check not run the first time — `alembic revision --autogenerate` against the live database produced **zero operations**, so models and applied schema agree exactly. That validates every hand-edit at once: the enum drops, the seven currency checks and the partial index.
+
+Two further gaps were found and closed, both about tests failing to catch *future* regressions rather than anything wrong today:
+
+4. **RLS coverage would have degraded silently.** The RLS migration hardcodes an 18-table list, so a table added by a future migration gets none — and nothing caught it. Metadata tests structurally cannot: RLS is database state, not schema metadata. Added `TestRowLevelSecurity`, which asserts every public table has `relrowsecurity` and that no permissive policy exists. For a defence-in-depth control, "we remembered last time" is not a mechanism.
+5. **The household-scoping test silently exempted three tables.** `user`, `subscription_entitlement` and `category` all carry `household_id`, but sat in one exclusion set alongside genuinely unscoped tables — so the FK-and-index assertion skipped them while reading as though it covered everything. Split into `NO_HOUSEHOLD` / `HOUSEHOLD_VIA_PARENT` / `HOUSEHOLD_NULLABLE`, plus a test asserting the exclusion lists are honest.
+
+**The test fixture was also rebuilt.** It opened a fresh connection per test, which exhausted the pooler once the suite grew (`ECHECKOUTTIMEOUT`, then `authentication did not complete`). It now shares one connection for the whole session, wrapped in a per-test transaction that always rolls back — and uses the **runtime** DSN rather than the migration one, since these tests only do DML and the small session pool is needed for migrations. A side benefit: the tests now exercise the same connection path the application uses.
+
 ## Open questions / follow-ups
 
 - **`describe_dsn` reports a host SQLAlchemy is not using** when a password contains `@`. `urlsplit` splits userinfo at the last `@` per RFC 3986; SQLAlchemy's `make_url` splits at the first. The diagnostic built to debug connection problems lied during exactly such a problem. Deliberately not fixed here to keep this PR to the schema — worth its own small ticket.
-- **CI cannot run the constraint tests.** Nine tests skip without a database, so the ticket's most important criteria are unproven in CI. Ticket #15 adds Postgres to CI and should also add `MIGRATION_DATABASE_URL` (or rely on the fallback).
+- **The integration suite takes about three minutes** against a cross-region database, while the 117 unit tests run in 0.23s. Ticket #15 should keep them as separate jobs so a slow database check never gates fast feedback.
+- **CI cannot run the constraint tests.** Thirteen tests skip without a database, so the ticket's most important criteria are unproven in CI. Ticket #15 adds Postgres to CI and should also add `MIGRATION_DATABASE_URL` (or rely on the fallback).
 - **Migrations still run against production** — there is no staging. It was safe here because there is no user data, and the destructive round trip was run deliberately while that is still true. That window is closing.
 - **`transaction.normalized_description` is part of the dedup key** but nothing produces it yet. Ticket #11/M3 must normalize deterministically, or dedup silently stops working.
 - **No `pgvector` column yet.** The extension is enabled but the merchant embedding index arrives with M6.

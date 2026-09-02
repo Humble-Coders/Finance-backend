@@ -15,18 +15,22 @@ from app.db import Base
 
 METADATA = Base.metadata
 
-# Tables that are configuration or global reference data, not household records.
-NOT_HOUSEHOLD_SCOPED = {
+# Two genuinely different cases, kept apart so neither hides the other.
+
+# Global configuration and reference data — no household column at all.
+NO_HOUSEHOLD = {
     "household",
-    "user",
-    "user_identity",
-    "budget_line",
     "country_pack",
     "feature_availability",
     "disclaimer_version",
-    "subscription_entitlement",
-    "category",
 }
+
+# Reached through a parent, or scoped by a nullable column: these DO carry
+# household_id (except where noted) but not via HouseholdScopedMixin.
+#   user_identity -> user      budget_line -> budget
+#   category       -> nullable, because system rows are shared by everyone
+HOUSEHOLD_VIA_PARENT = {"user_identity", "budget_line"}
+HOUSEHOLD_NULLABLE = {"category"}
 
 
 def table_names() -> list[str]:
@@ -51,12 +55,25 @@ class TestPrimaryKeys:
             )
 
 
+def household_scoped_tables() -> list[str]:
+    """Every table that carries household_id, including the nullable case.
+
+    Previously `user`, `subscription_entitlement` and `category` sat in a single
+    exclusion set alongside genuinely unscoped tables — so the assertion below
+    silently skipped three tables that do have the column, while reading as
+    though it covered everything.
+    """
+    return [
+        n
+        for n in table_names()
+        if n not in NO_HOUSEHOLD and n not in HOUSEHOLD_VIA_PARENT
+    ]
+
+
 class TestHouseholdScoping:
     """PRD §4.4 — financial records belong to a household, not a user."""
 
-    @pytest.mark.parametrize(
-        "name", [n for n in table_names() if n not in NOT_HOUSEHOLD_SCOPED]
-    )
+    @pytest.mark.parametrize("name", household_scoped_tables())
     def test_has_household_id_with_fk_and_index(self, name):
         table = METADATA.tables[name]
         assert "household_id" in table.c, f"{name} is missing household_id"
@@ -68,6 +85,21 @@ class TestHouseholdScoping:
             column.name in [c.name for c in idx.columns] for idx in table.indexes
         )
         assert indexed, f"{name}.household_id is not indexed"
+
+    @pytest.mark.parametrize(
+        "name", [n for n in household_scoped_tables() if n not in HOUSEHOLD_NULLABLE]
+    )
+    def test_household_id_is_not_nullable(self, name):
+        """Only `category` may leave it NULL, for the shared system taxonomy."""
+        assert METADATA.tables[name].c.household_id.nullable is False
+
+    def test_the_exclusion_lists_are_honest(self):
+        """A table listed as unscoped must genuinely have no household column.
+
+        Otherwise an exclusion quietly turns into an exemption.
+        """
+        wrong = [n for n in NO_HOUSEHOLD if "household_id" in METADATA.tables[n].c]
+        assert wrong == [], f"listed as unscoped but have household_id: {wrong}"
 
 
 class TestMoneyColumns:

@@ -17,7 +17,11 @@ from asyncpg.exceptions import CheckViolationError, UniqueViolationError
 
 from tests.conftest import requires_db
 
-pytestmark = [pytest.mark.integration, pytest.mark.asyncio, requires_db]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.asyncio(loop_scope="session"),
+    requires_db,
+]
 
 
 async def _household(db) -> uuid.UUID:
@@ -208,4 +212,48 @@ class TestSystemCategories:
             " created_at, updated_at)"
             " VALUES ($1, $2, 'groceries', 'My groceries', now(), now())",
             uuid.uuid4(), hid,
+        )
+
+
+class TestRowLevelSecurity:
+    """PRD §4.2 — RLS on every table, as defence in depth.
+
+    The migration that enables it hardcodes a table list, so a table added by a
+    future migration gets none. Metadata tests cannot catch that: RLS is
+    database state, not schema metadata. This is the only thing standing between
+    "enabled everywhere" and "enabled on the tables someone remembered".
+    """
+
+    async def test_every_table_has_rls_enabled(self, db):
+        missing = await db.fetch(
+            """
+            SELECT c.relname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relkind = 'r'
+              AND c.relname <> 'alembic_version'
+              AND NOT c.relrowsecurity
+            ORDER BY 1
+            """
+        )
+        names = [r["relname"] for r in missing]
+        assert names == [], (
+            "tables without RLS: "
+            + ", ".join(names)
+            + " — add them to the TABLES list in the RLS migration"
+        )
+
+    async def test_no_permissive_policy_grants_broad_access(self, db):
+        """RLS with no policy denies everything, which is the intent.
+
+        A policy added later without review would quietly open the tables up, so
+        assert none exist rather than trusting that none were added.
+        """
+        policies = await db.fetch(
+            "SELECT tablename, policyname FROM pg_policies WHERE schemaname = 'public'"
+        )
+        assert [dict(p) for p in policies] == [], (
+            "unexpected RLS policies exist; RLS is deliberately policy-free "
+            "because only the backend (which bypasses it) touches these tables"
         )

@@ -23,7 +23,7 @@ def _database_is_configured() -> bool:
     try:
         from app.config import get_settings
 
-        return bool(get_settings().migration_dsn)
+        return bool(get_settings().database_dsn)
     except Exception:
         return False
 
@@ -34,26 +34,51 @@ requires_db = pytest.mark.skipif(
 )
 
 
-@pytest_asyncio.fixture
-async def db():
-    """An asyncpg connection whose work is rolled back when the test ends."""
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def _connection():
+    """One connection for the whole suite.
+
+    Opening one per test exhausted the pooler — ~30 tests ran it dry with
+    `ECHECKOUTTIMEOUT`. Sharing one connection also cuts runtime substantially,
+    since each connect was a round trip to another region.
+
+    Uses the **runtime** DSN (transaction pooler), not the migration one. These
+    tests only do DML, so session mode buys nothing — and the session pool is
+    small and needed for migrations. This also means the tests exercise the same
+    connection path the application uses.
+    """
     import asyncpg
     from sqlalchemy.engine import make_url
 
     from app.config import get_settings
 
-    url = make_url(get_settings().migration_dsn)
+    url = make_url(get_settings().database_dsn)
     connection = await asyncpg.connect(
         host=url.host,
         port=url.port,
         user=url.username,
         password=url.password,
         database=url.database,
+        # The pooler does not support prepared statements; asyncpg caches them
+        # by default, which fails intermittently under a shared connection.
+        statement_cache_size=0,
     )
-    transaction = connection.transaction()
-    await transaction.start()
     try:
         yield connection
     finally:
-        await transaction.rollback()
         await connection.close()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def db(_connection):
+    """The shared connection, wrapped in a transaction that always rolls back.
+
+    Isolation still holds: each test sees only its own uncommitted work, and
+    nothing survives the test.
+    """
+    transaction = _connection.transaction()
+    await transaction.start()
+    try:
+        yield _connection
+    finally:
+        await transaction.rollback()

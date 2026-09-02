@@ -37,9 +37,15 @@ async def _household(db) -> uuid.UUID:
 async def _user(db, household_id, *, phone=None, auth_id=None) -> uuid.UUID:
     uid = uuid.uuid4()
     await db.execute(
-        "INSERT INTO \"user\" (id, household_id, auth_user_id, phone, created_at, updated_at)"
-        " VALUES ($1, $2, $3, $4, now(), now())",
-        uid, household_id, auth_id or str(uuid.uuid4()), phone,
+        """
+        INSERT INTO "user"
+            (id, household_id, auth_user_id, phone, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, now(), now())
+        """,
+        uid,
+        household_id,
+        auth_id or str(uuid.uuid4()),
+        phone,
     )
     return uid
 
@@ -47,9 +53,13 @@ async def _user(db, household_id, *, phone=None, auth_id=None) -> uuid.UUID:
 async def _account(db, household_id) -> uuid.UUID:
     aid = uuid.uuid4()
     await db.execute(
-        "INSERT INTO account (id, household_id, name, kind, currency, created_at, updated_at)"
-        " VALUES ($1, $2, 'Test', 'chequing', 'CAD', now(), now())",
-        aid, household_id,
+        """
+        INSERT INTO account
+            (id, household_id, name, kind, currency, created_at, updated_at)
+        VALUES ($1, $2, 'Test', 'chequing', 'CAD', now(), now())
+        """,
+        aid,
+        household_id,
     )
     return aid
 
@@ -59,11 +69,15 @@ async def _transaction(db, household_id, account_id, *, description="STARBUCKS 4
         """
         INSERT INTO transaction
             (id, household_id, account_id, occurred_on, amount_minor_units, currency,
-             direction, normalized_description, source, needs_review, created_at, updated_at)
+             direction, normalized_description, source, needs_review,
+             created_at, updated_at)
         VALUES ($1, $2, $3, DATE '2026-03-01', 575, 'CAD',
                 'debit', $4, 'upload', false, now(), now())
         """,
-        uuid.uuid4(), household_id, account_id, description,
+        uuid.uuid4(),
+        household_id,
+        account_id,
+        description,
     )
 
 
@@ -113,11 +127,18 @@ class TestIdentity:
         hid = await _household(db)
         uid = await _user(db, hid, phone="+14165550102")
 
-        for provider, external in (("google", "g-1"), ("apple", "a-1"), ("phone", "p-1")):
+        for provider, external in (
+            ("google", "g-1"),
+            ("apple", "a-1"),
+            ("phone", "p-1"),
+        ):
             await db.execute(
                 "INSERT INTO user_identity (id, user_id, provider, provider_user_id,"
                 " created_at, updated_at) VALUES ($1, $2, $3, $4, now(), now())",
-                uuid.uuid4(), uid, provider, external,
+                uuid.uuid4(),
+                uid,
+                provider,
+                external,
             )
 
         count = await db.fetchval(
@@ -131,15 +152,23 @@ class TestIdentity:
         second = await _user(db, hid)
 
         await db.execute(
-            "INSERT INTO user_identity (id, user_id, provider, provider_user_id,"
-            " created_at, updated_at) VALUES ($1, $2, 'google', 'shared-id', now(), now())",
-            uuid.uuid4(), first,
+            """
+            INSERT INTO user_identity
+                (id, user_id, provider, provider_user_id, created_at, updated_at)
+            VALUES ($1, $2, 'google', 'shared-id', now(), now())
+            """,
+            uuid.uuid4(),
+            first,
         )
         with pytest.raises(UniqueViolationError):
             await db.execute(
-                "INSERT INTO user_identity (id, user_id, provider, provider_user_id,"
-                " created_at, updated_at) VALUES ($1, $2, 'google', 'shared-id', now(), now())",
-                uuid.uuid4(), second,
+                """
+                INSERT INTO user_identity
+                    (id, user_id, provider, provider_user_id, created_at, updated_at)
+                VALUES ($1, $2, 'google', 'shared-id', now(), now())
+                """,
+                uuid.uuid4(),
+                second,
             )
 
 
@@ -152,9 +181,10 @@ class TestRegion:
             " VALUES ($1, NULL, now(), now())",
             hid,
         )
-        assert await db.fetchval(
-            "SELECT country_code FROM household WHERE id = $1", hid
-        ) is None
+        assert (
+            await db.fetchval("SELECT country_code FROM household WHERE id = $1", hid)
+            is None
+        )
 
 
 class TestMoney:
@@ -165,12 +195,15 @@ class TestMoney:
         await db.execute(
             """
             INSERT INTO transaction
-                (id, household_id, account_id, occurred_on, amount_minor_units, currency,
-                 direction, normalized_description, source, needs_review, created_at, updated_at)
+                (id, household_id, account_id, occurred_on, amount_minor_units,
+                 currency, direction, normalized_description, source,
+                 needs_review, created_at, updated_at)
             VALUES ($1, $2, $3, DATE '2026-03-02', -2500, 'CAD',
                     'credit', 'REFUND', 'upload', false, now(), now())
             """,
-            uuid.uuid4(), hid, aid,
+            uuid.uuid4(),
+            hid,
+            aid,
         )
 
     async def test_currency_must_be_three_characters(self, db):
@@ -183,9 +216,13 @@ class TestMoney:
         hid = await _household(db)
         with pytest.raises(CheckViolationError):
             await db.execute(
-                "INSERT INTO account (id, household_id, name, kind, currency,"
-                " created_at, updated_at) VALUES ($1, $2, 'Bad', 'chequing', 'CA', now(), now())",
-                uuid.uuid4(), hid,
+                """
+                INSERT INTO account
+                    (id, household_id, name, kind, currency, created_at, updated_at)
+                VALUES ($1, $2, 'Bad', 'chequing', 'CA', now(), now())
+                """,
+                uuid.uuid4(),
+                hid,
             )
 
 
@@ -211,7 +248,8 @@ class TestSystemCategories:
             "INSERT INTO category (id, household_id, slug, name,"
             " created_at, updated_at)"
             " VALUES ($1, $2, 'groceries', 'My groceries', now(), now())",
-            uuid.uuid4(), hid,
+            uuid.uuid4(),
+            hid,
         )
 
 

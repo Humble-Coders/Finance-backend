@@ -28,7 +28,9 @@ class HealthScoreSnapshot(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base)
 
     __tablename__ = "health_score_snapshot"
     __table_args__ = (
-        Index("uq_health_score_household_date", "household_id", "scored_on", unique=True),
+        Index(
+            "uq_health_score_household_date", "household_id", "scored_on", unique=True
+        ),
     )
 
     scored_on: Mapped[date] = mapped_column(Date, nullable=False)

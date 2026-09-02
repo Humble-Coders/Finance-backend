@@ -31,17 +31,16 @@ from collections.abc import AsyncGenerator
 from functools import lru_cache
 from uuid import uuid4
 
+import structlog
+from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
-
-import structlog
 
 from app.config import get_settings
 from app.core.dsn import describe_dsn

@@ -47,7 +47,9 @@ class Category(UUIDMixin, TimestampMixin, Base):
     slug: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("category.id", ondelete="SET NULL"), nullable=True
+        PgUUID(as_uuid=True),
+        ForeignKey("category.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     @property
@@ -65,16 +67,24 @@ class CategoryCorrection(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     __tablename__ = "category_correction"
 
     transaction_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("transaction.id", ondelete="SET NULL"), nullable=True
+        PgUUID(as_uuid=True),
+        ForeignKey("transaction.id", ondelete="SET NULL"),
+        nullable=True,
     )
     # The merchant string the correction generalizes from, so it can apply to
     # future transactions rather than only the one that was fixed.
-    merchant_pattern: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    merchant_pattern: Mapped[str] = mapped_column(
+        String(255), nullable=False, index=True
+    )
 
     predicted_category_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("category.id", ondelete="SET NULL"), nullable=True
+        PgUUID(as_uuid=True),
+        ForeignKey("category.id", ondelete="SET NULL"),
+        nullable=True,
     )
     corrected_category_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("category.id", ondelete="CASCADE"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("category.id", ondelete="CASCADE"),
+        nullable=False,
     )
     note: Mapped[str | None] = mapped_column(Text, nullable=True)

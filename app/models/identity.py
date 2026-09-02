@@ -32,7 +32,9 @@ class Household(UUIDMixin, TimestampMixin, Base):
     # NULLABLE by design (PRD §4.6): every signup route ends with a verified
     # phone, but Google/Apple users authenticate before providing one, so the
     # region is genuinely unknown for that window. Never guess it.
-    country_code: Mapped[str | None] = mapped_column(String(2), nullable=True, index=True)
+    country_code: Mapped[str | None] = mapped_column(
+        String(2), nullable=True, index=True
+    )
 
     members: Mapped[list[User]] = relationship(back_populates="household")
 

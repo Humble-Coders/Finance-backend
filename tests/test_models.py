@@ -50,9 +50,9 @@ class TestPrimaryKeys:
     @pytest.mark.parametrize("name", table_names())
     def test_no_autoincrement_sequences(self, name):
         for column in METADATA.tables[name].columns:
-            assert not column.autoincrement is True, (
-                f"{name}.{column.name} autoincrements; sequences collide across regions"
-            )
+            assert (
+                column.autoincrement is not True
+            ), f"{name}.{column.name} autoincrements; sequences collide across regions"
 
 
 def household_scoped_tables() -> list[str]:
@@ -147,7 +147,8 @@ class TestMoneyColumns:
             if "currency" not in table.c:
                 continue
             checks = [
-                c for c in table.constraints
+                c
+                for c in table.constraints
                 if c.__class__.__name__ == "CheckConstraint"
                 and "currency" in str(getattr(c, "sqltext", ""))
             ]
@@ -162,9 +163,9 @@ class TestMoneyColumns:
                 if column.name.endswith("_minor_units"):
                     for constraint in table.constraints:
                         text = str(getattr(constraint, "sqltext", ""))
-                        assert f"{column.name} >= 0" not in text, (
-                            f"{table.name}.{column.name} forbids negatives"
-                        )
+                        assert (
+                            f"{column.name} >= 0" not in text
+                        ), f"{table.name}.{column.name} forbids negatives"
 
 
 class TestIdentityConstraints:

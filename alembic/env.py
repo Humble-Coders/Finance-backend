@@ -1,14 +1,14 @@
 """Alembic environment. The database URL comes from settings, never alembic.ini."""
 
 import asyncio
-from uuid import uuid4
 from logging.config import fileConfig
+from uuid import uuid4
 
-from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 import app.models  # noqa: F401 — autogenerate only sees imported models
+from alembic import context
 from app.config import get_settings
 from app.db import Base
 

@@ -11,12 +11,26 @@ Adding `ruff` configuration surfaced 49 violations, fixed in a separate commit s
 
 ## Files changed
 
+18 files, +340 / −85, across five commits.
+
+**New**
 | File | Why |
 |---|---|
 | `.github/workflows/ci.yml` | The workflow. Interpreter read from `.python-version` rather than hardcoded, so CI cannot drift from what Render deploys |
 | `pyproject.toml` | Ruff configuration — rules stated explicitly rather than inherited from whatever ruff ships next |
-| `README.md` | CI status badge |
-| 15 files reformatted + lint fixes | Separate commit `09367c7`; skim rather than read |
+| `handoffs/ticket-13.md` | This report |
+
+**Modified**
+| File(s) | Why |
+|---|---|
+| `README.md` | CI status badge — the only substantive line among the modified files |
+| `tests/test_constraints_integration.py` | Eight `E501`s fixed by rewrapping SQL into triple-quoted blocks; `ruff format` cannot reflow string literals |
+| `tests/test_models.py` | `not x is True` → `is not True` (ruff `E714`, and it was right), plus reflow |
+| 12 further files — `alembic/env.py`, `app/api/capabilities.py`, `app/core/money.py`, `app/db.py`, `app/models/*`, `tests/test_dsn.py` | **Formatting only** — import splitting and sorting, line wrapping, `__all__` one entry per line. All in commit `09367c7`; skim rather than read |
+
+**No behaviour changed in the reformatted files.** Verified after the fact: the same 25 names are exported from `app.models` and the same 18 tables are registered on the metadata as before.
+
+**Commit sequence** — `09367c7` ruff config + fixes → `badb15f` the workflow → `5ea6933` deliberate breakage → `7d5a387` revert → this report. The middle two cancel out in the net diff; they exist so the run history proves the pipeline can fail.
 
 ## How to test
 

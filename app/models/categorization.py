@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import ForeignKey, Index, String, Text
+from sqlalchemy import ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,10 +24,17 @@ class Category(UUIDMixin, TimestampMixin, Base):
 
     __tablename__ = "category"
     __table_args__ = (
-        # A household cannot define the same category name twice. System rows
-        # (household_id NULL) are excluded — Postgres treats NULLs as distinct,
-        # so the seed data is unaffected.
+        # A household cannot define the same category name twice.
         Index("uq_category_household_slug", "household_id", "slug", unique=True),
+        # ...and the index above does NOT cover system rows, because Postgres
+        # treats NULLs as distinct — so without this a second system
+        # "groceries" would be accepted and every household would see two.
+        Index(
+            "uq_category_system_slug",
+            "slug",
+            unique=True,
+            postgresql_where=text("household_id IS NULL"),
+        ),
     )
 
     household_id: Mapped[uuid.UUID | None] = mapped_column(

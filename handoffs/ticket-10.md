@@ -7,7 +7,7 @@
 
 Eighteen tables across identity, money, categorization, planning, derived output and platform configuration, with the PRD's four locked constraints enforced by the **database** rather than by convention: UUID primary keys with no sequences, household scoping, integer minor units always paired with a currency, and source-agnostic transactions.
 
-Four migrations: core schema, RLS on every table, the guarded `pgmq` queue, and seed data. All were applied to the real database, then downgraded to base and re-applied, so the round trip is proven rather than assumed. 111 tests pass — metadata rules that scan every table at once, plus constraint behaviour tested against a real Postgres inside a rolled-back transaction.
+Four migrations: core schema, RLS on every table, the guarded `pgmq` queue, and seed data. All were applied to the real database, then downgraded to base and re-applied, so the round trip is proven rather than assumed. 113 tests pass — metadata rules that scan every table at once, plus constraint behaviour tested against a real Postgres inside a rolled-back transaction.
 
 Four defects surfaced during the work, three of which would have blocked the next developer; all are fixed here and described below.
 
@@ -72,7 +72,7 @@ Percent-encode any `@` in the password as `%40`, or the URL parses part of it as
 alembic upgrade head --sql | less     # review before applying, per the ticket
 alembic upgrade head
 alembic upgrade head                  # again: the queue migration must be a no-op
-pytest                                # 111 passed
+pytest                                # 113 passed
 alembic downgrade base && alembic upgrade head   # round trip
 ```
 
@@ -105,7 +105,7 @@ select queue_name from pgmq.list_queues();                                     -
 | RLS enabled on every table | ✅ Met — verified: 0 tables with RLS disabled |
 | Re-running the queue migration where the queue exists succeeds | ✅ Met — run twice |
 | Seeded categories and CA country pack present | ✅ Met — 20 categories, 1 pack |
-| `pytest` passes; CI green | ✅ Met locally — **111 passed**. CI has no database, so the 9 integration tests skip there (see Follow-ups) |
+| `pytest` passes; CI green | ⚠️ **Half met.** **113 pass locally.** There is *no CI* — `.github/workflows/` does not exist and ticket #13 has not started, so "CI green" cannot be true yet. Returns when #13 lands |
 
 ## Deviations / decisions
 
@@ -124,6 +124,14 @@ select queue_name from pgmq.list_queues();                                     -
 **7. `Category` does not use the household mixin.** System categories are shared and have `household_id` NULL, which a NOT NULL mixin cannot express. A partial unique index on `(household_id, slug)` still prevents duplicates per household.
 
 **8. Interest stored as basis points**, integer — for the same reason money is not float: a rate in floating point drifts once compounded over a repayment schedule.
+
+## Manager review — changes applied
+
+Review of PR #16 found one real gap and two weak tests. All fixed on this branch:
+
+1. **Duplicate system categories were accepted.** `uq_category_household_slug` covers `(household_id, slug)`, but Postgres treats NULLs as distinct — so it constrained user-defined categories and left system rows (`household_id NULL`) unconstrained. A second system "groceries" inserted successfully, and every household would have seen two. Closed with a **partial unique index** (`uq_category_system_slug ... WHERE household_id IS NULL`) in migration `1daf2b084378`, plus two tests: the duplicate is now rejected, and a household can still define its own `groceries`.
+2. **`pytest.raises(Exception)` narrowed to `CheckViolationError`.** The broad form would have passed on a typo in the INSERT — proving nothing — and this is the test that caught the discarded CheckConstraint.
+3. **"CI green" unticked.** There is no CI yet (#13).
 
 ## Open questions / follow-ups
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from asyncpg.exceptions import UniqueViolationError
+from asyncpg.exceptions import CheckViolationError, UniqueViolationError
 
 from tests.conftest import requires_db
 
@@ -170,10 +170,42 @@ class TestMoney:
         )
 
     async def test_currency_must_be_three_characters(self, db):
+        """Assert the specific violation.
+
+        A bare `Exception` would also pass on a typo in the INSERT, which would
+        prove nothing about the constraint — and this is the test that caught
+        the check being silently discarded.
+        """
         hid = await _household(db)
-        with pytest.raises(Exception):
+        with pytest.raises(CheckViolationError):
             await db.execute(
                 "INSERT INTO account (id, household_id, name, kind, currency,"
                 " created_at, updated_at) VALUES ($1, $2, 'Bad', 'chequing', 'CA', now(), now())",
                 uuid.uuid4(), hid,
             )
+
+
+class TestSystemCategories:
+    async def test_a_second_system_category_cannot_reuse_a_slug(self, db):
+        """uq_category_household_slug does not cover these.
+
+        Postgres treats NULLs as distinct, so (NULL, 'groceries') never
+        collides with itself — a partial unique index is what closes it.
+        """
+        with pytest.raises(UniqueViolationError):
+            await db.execute(
+                "INSERT INTO category (id, household_id, slug, name,"
+                " created_at, updated_at)"
+                " VALUES ($1, NULL, 'groceries', 'Duplicate', now(), now())",
+                uuid.uuid4(),
+            )
+
+    async def test_a_household_may_still_define_its_own_slug(self, db):
+        """The partial index must not block user-defined categories."""
+        hid = await _household(db)
+        await db.execute(
+            "INSERT INTO category (id, household_id, slug, name,"
+            " created_at, updated_at)"
+            " VALUES ($1, $2, 'groceries', 'My groceries', now(), now())",
+            uuid.uuid4(), hid,
+        )

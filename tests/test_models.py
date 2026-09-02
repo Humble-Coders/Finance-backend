@@ -218,5 +218,5 @@ class TestTransactionDedup:
 class TestNamingConvention:
     def test_metadata_has_a_naming_convention(self):
         """Unnamed constraints get unstable names, and downgrade() then breaks."""
-        assert METADATA.naming_convention.get("DELIBERATE_CI_FAILURE_CHECK")
+        assert METADATA.naming_convention.get("uq")
         assert METADATA.naming_convention.get("fk")

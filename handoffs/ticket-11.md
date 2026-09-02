@@ -59,7 +59,7 @@ The interesting behaviour, by hand — the Google-then-phone flow:
 | `country_code` left NULL, never guessed | ✅ Met |
 | Reusable `current_household` dependency | ✅ Met |
 | 401 for missing / malformed / expired tokens, never 500 | ✅ Met — unchanged behaviour in `app/auth.py`, which this ticket does not touch |
-| Concurrent first requests produce one household | ⚠️ **Partial** — `ON CONFLICT DO NOTHING` on the provider identity is the mechanism, and it is used, but **no test exercises true concurrency**. See follow-ups |
+| Concurrent first requests produce one household | ✅ **Met** — after review; see below. Three tests fire genuinely parallel requests |
 | No endpoint reads another household's data | ✅ Met — `/me` resolves only through the token |
 | `pytest` passes; CI green | ✅ Met — 158 pass locally; CI runs on the PR |
 
@@ -79,9 +79,30 @@ The interesting behaviour, by hand — the Google-then-phone flow:
 
 **7. `app.main` is imported inside a function in `test_me_endpoint.py`, not at module level.** `app/main.py` configures FastAPI at import and so needs settings; a module-level import breaks *collection* on a runner with no configuration.
 
-## Open questions / follow-ups
+## Manager review — changes applied
 
-- **Concurrency is unproven.** `ON CONFLICT DO NOTHING` handles two simultaneous first requests, but no test fires them in parallel. The mechanism is right; the guarantee is untested. Worth a dedicated test before real signups.
+Review tested the concurrency claim and found the **stated mechanism was wrong**, not merely untested. Firing two genuinely parallel first requests for the same new `sub`:
+
+```
+results: [IntegrityError, <household id>]
+DETAIL:  Key (auth_user_id)=(bd484d8c-…) already exists.
+households created: 1
+```
+
+- Data integrity always held — **one** household, never two.
+- But it held via `user.auth_user_id`'s UNIQUE constraint **raising**, not via the `ON CONFLICT DO NOTHING` this report credited. That clause guards `user_identity`, and the `user` insert fails before it is reached.
+- So the loser of the race got an unhandled `IntegrityError` — **a 500 on someone's first authenticated request**, on the signup path. Two devices, or a client retrying a slow request, is enough.
+
+**Fixed:** the create branch catches `IntegrityError`, rolls back and resolves once more — by then the winner has committed, so step 1 finds their rows. Retried exactly once, since a second failure is not a race.
+
+`tests/test_identity_concurrency.py` proves it, and proves it can fail: with the retry removed, `test_neither_request_errors` fails. These tests commit real rows (a race cannot exist inside a rolled-back transaction) and clean up after themselves.
+
+Also applied:
+
+- **`_by_email` orders by `created_at`.** `user.email` is indexed but not unique; an arbitrary `.first()` was deciding whose financial records a sign-in attaches to.
+- **`CLAUDE.md` now records two non-obvious properties**: that `current_household` writes and commits even on GETs, and that `auth_user_id` must never be used as a lookup key.
+
+## Open questions / follow-ups
 - **One flaky failure was observed and not reproduced.** In one full-suite run, `test_the_conflict_does_not_merge_or_duplicate_anything` failed; it then passed in three subsequent runs, including two full-suite runs. Recorded rather than dismissed — if it recurs, suspect shared-connection contention against a cross-region database.
 - **The database-backed suite takes about ten minutes**, against ~0.4s for the 121 that need no database. **Ticket #15** must keep them as separate CI jobs, or fast feedback disappears.
 - **`app/auth.py` has no direct tests.** It is exercised indirectly and was not changed here, but the 401 behaviour is asserted nowhere. Worth a small ticket.

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import AuthenticatedUser
@@ -95,7 +96,16 @@ async def _by_phone(session: AsyncSession, phone: str) -> User | None:
 
 
 async def _by_email(session: AsyncSession, email: str) -> User | None:
-    result = await session.execute(select(User).where(User.email == email))
+    """Oldest match wins.
+
+    `user.email` is indexed but **not unique** — two rows sharing one should be
+    impossible, since this very lookup prevents it, but "impossible" plus an
+    arbitrary pick is a bad combination for something that decides whose
+    financial records a sign-in attaches to. Ordering makes it deterministic.
+    """
+    result = await session.execute(
+        select(User).where(User.email == email).order_by(User.created_at.asc())
+    )
     return result.scalars().first()
 
 
@@ -185,6 +195,39 @@ async def resolve_user(
         return ResolvedIdentity(user=linked, household=household, created=False)
 
     # 4. Someone new.
+    try:
+        return await _create(session, caller, provider, provider_user_id)
+    except IntegrityError:
+        # Two first requests for the same account arrived together and the other
+        # one won. `user.auth_user_id` is UNIQUE, so this insert lost the race —
+        # which is what protects the data, but on its own it would surface as a
+        # 500 on someone's very first authenticated request.
+        #
+        # The winner has committed by now, so resolving again finds their rows
+        # at step 1. Retried exactly once: a second failure is not a race.
+        await session.rollback()
+
+    user = await _by_provider_identity(session, provider, provider_user_id)
+    if user is None:
+        # The winner created the user but its identity row is not visible, so
+        # fall back to the unique column the race was actually decided on.
+        result = await session.execute(
+            select(User).where(User.auth_user_id == provider_user_id)
+        )
+        user = result.scalar_one()
+        await _link_identity(session, user, provider, provider_user_id)
+        await session.flush()
+
+    household = await session.get(Household, user.household_id)
+    return ResolvedIdentity(user=user, household=household, created=False)
+
+
+async def _create(
+    session: AsyncSession,
+    caller: AuthenticatedUser,
+    provider: AuthProvider,
+    provider_user_id: str,
+) -> ResolvedIdentity:
     household = Household(country_code=None)  # never guessed; see PRD §4.6
     session.add(household)
     await session.flush()

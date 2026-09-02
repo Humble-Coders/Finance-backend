@@ -35,6 +35,16 @@ Python 3.11+ · FastAPI · SQLAlchemy 2 (async) · Alembic · Supabase Postgres 
   from model recall.
 
 ### Auth & access
+
+- **`current_household` performs a write.** It resolves the caller's token to a
+  user and household, **creating them on first call**, and commits — so every
+  endpoint depending on it writes before its body runs, including GETs. This is
+  deliberate (it saves clients a bootstrap round trip) but surprising, so do not
+  assume a read-only handler is read-only.
+- **Never look a user up by `auth_user_id`.** It records only the *first*
+  Supabase account seen for a person; when a second provider is linked by phone,
+  that `sub` lives in `user_identity`. Resolution goes through `user_identity`,
+  or it silently fails for anyone using more than one provider.
 - Clients authenticate against **Supabase Auth**; this service only verifies the JWT
   (`app/auth.py`). No custom auth.
 - The `service_role` key exists only in this service's environment. It must never reach

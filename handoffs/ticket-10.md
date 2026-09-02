@@ -37,7 +37,7 @@ Four defects surfaced during the work, three of which would have blocked the nex
 ### Infrastructure
 | File | Why |
 |---|---|
-| `app/db.py` | Naming convention on the metadata — set **before** the first migration, or constraint names are unstable and `downgrade()` cannot drop them |
+| `app/db.py` | Naming convention on the metadata — set **before** the first migration, or constraint names are unstable and `downgrade()` cannot drop them. Engine and sessionmaker created **lazily**, so importing models needs no configuration |
 | `app/config.py` | `MIGRATION_DATABASE_URL` + `migration_dsn`, falling back to `DATABASE_URL` |
 | `alembic/env.py` | Imports models for autogenerate; uses `migration_dsn` |
 | `alembic/versions/.gitkeep` | The directory did not survive a clone (see Deviations) |
@@ -142,12 +142,14 @@ Two further gaps were found and closed, both about tests failing to catch *futur
 4. **RLS coverage would have degraded silently.** The RLS migration hardcodes an 18-table list, so a table added by a future migration gets none — and nothing caught it. Metadata tests structurally cannot: RLS is database state, not schema metadata. Added `TestRowLevelSecurity`, which asserts every public table has `relrowsecurity` and that no permissive policy exists. For a defence-in-depth control, "we remembered last time" is not a mechanism.
 5. **The household-scoping test silently exempted three tables.** `user`, `subscription_entitlement` and `category` all carry `household_id`, but sat in one exclusion set alongside genuinely unscoped tables — so the FK-and-index assertion skipped them while reading as though it covered everything. Split into `NO_HOUSEHOLD` / `HOUSEHOLD_VIA_PARENT` / `HOUSEHOLD_NULLABLE`, plus a test asserting the exclusion lists are honest.
 
+6. **The "needs no database" tests could not run without a database configured.** `app/db.py` built the engine at **import time**, so importing the ORM models triggered `Settings` validation and raised `ValidationError: database_url Field required` before a single test was collected. The claim that 117 tests need no database was therefore false as written — they need no *connection*, but did need config. Worse, ticket #13 would have gone red on its first run, and the obvious "fix" would have been dummy env vars in the workflow, papering over an import-time side effect. The engine is now created lazily on first use. Verified by running the suite with `.env` removed and the variables unset: **117 passed, 13 skipped, 0.24s**. A side benefit: the full suite dropped from ~195s to ~56s, because the engine is no longer rebuilt repeatedly.
+
 **The test fixture was also rebuilt.** It opened a fresh connection per test, which exhausted the pooler once the suite grew (`ECHECKOUTTIMEOUT`, then `authentication did not complete`). It now shares one connection for the whole session, wrapped in a per-test transaction that always rolls back — and uses the **runtime** DSN rather than the migration one, since these tests only do DML and the small session pool is needed for migrations. A side benefit: the tests now exercise the same connection path the application uses.
 
 ## Open questions / follow-ups
 
 - **`describe_dsn` reports a host SQLAlchemy is not using** when a password contains `@`. `urlsplit` splits userinfo at the last `@` per RFC 3986; SQLAlchemy's `make_url` splits at the first. The diagnostic built to debug connection problems lied during exactly such a problem. Deliberately not fixed here to keep this PR to the schema — worth its own small ticket.
-- **The integration suite takes about three minutes** against a cross-region database, while the 117 unit tests run in 0.23s. Ticket #15 should keep them as separate jobs so a slow database check never gates fast feedback.
+- **The integration suite takes about a minute** against a cross-region database, while the 117 unit tests run in 0.23s. Ticket #15 should keep them as separate jobs so a slow database check never gates fast feedback.
 - **CI cannot run the constraint tests.** Thirteen tests skip without a database, so the ticket's most important criteria are unproven in CI. Ticket #15 adds Postgres to CI and should also add `MIGRATION_DATABASE_URL` (or rely on the fallback).
 - **Migrations still run against production** — there is no staging. It was safe here because there is no user data, and the destructive round trip was run deliberately while that is still true. That window is closing.
 - **`transaction.normalized_description` is part of the dedup key** but nothing produces it yet. Ticket #11/M3 must normalize deterministically, or dedup silently stops working.

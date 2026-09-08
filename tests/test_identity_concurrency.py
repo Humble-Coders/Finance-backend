@@ -19,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import AuthenticatedUser
-from app.services.identity import resolve_user
+from app.services.identity import PhoneAlreadyLinkedError, resolve_user
 from tests.conftest import requires_db
 
 pytestmark = [
@@ -29,18 +29,18 @@ pytestmark = [
 ]
 
 
-def _caller(sub: str) -> AuthenticatedUser:
+def _caller(sub: str, phone: str | None = None) -> AuthenticatedUser:
     return AuthenticatedUser(
         user_id=sub,
         email=None,
-        phone=None,
+        phone=phone,
         claims={"app_metadata": {"provider": "google"}},
     )
 
 
-async def _resolve_and_commit(engine, sub: str):
+async def _resolve_and_commit(engine, sub: str, phone: str | None = None):
     async with AsyncSession(engine, expire_on_commit=False) as session:
-        resolved = await resolve_user(session, _caller(sub))
+        resolved = await resolve_user(session, _caller(sub, phone))
         await session.commit()
         return resolved
 
@@ -125,3 +125,37 @@ class TestConcurrentFirstRequest:
             assert identities == 1, "the losing request must not orphan an identity row"
         finally:
             await _cleanup(engine, sub)
+
+
+class TestConcurrentPhoneCollision:
+    """Two DIFFERENT people racing on the same number.
+
+    An easy case to get wrong, because it raises the same `IntegrityError` as
+    the same-account race — but means something entirely different. Answering it
+    with the retry meant for that race looked for rows that do not exist and
+    produced a 500, where the non-concurrent path correctly returns 409.
+    """
+
+    async def test_the_loser_gets_the_same_typed_error_as_the_sequential_path(self):
+        from app.db import get_engine
+
+        engine = get_engine()
+        phone = "+1416555" + str(uuid.uuid4().int)[:4]
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        try:
+            results = await asyncio.gather(
+                _resolve_and_commit(engine, first, phone),
+                _resolve_and_commit(engine, second, phone),
+                return_exceptions=True,
+            )
+            errors = [r for r in results if isinstance(r, BaseException)]
+            succeeded = [r for r in results if not isinstance(r, BaseException)]
+
+            assert len(succeeded) == 1, "exactly one signup should win the number"
+            assert len(errors) == 1
+            assert isinstance(
+                errors[0], PhoneAlreadyLinkedError
+            ), f"expected PhoneAlreadyLinkedError (-> 409), got {type(errors[0]).__name__}"
+        finally:
+            for sub in (first, second):
+                await _cleanup(engine, sub)

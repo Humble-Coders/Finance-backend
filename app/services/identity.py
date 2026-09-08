@@ -20,6 +20,7 @@ anyone using more than one provider.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -30,6 +31,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import AuthenticatedUser
 from app.models.enums import AuthProvider
 from app.models.identity import Household, User, UserIdentity
+
+# Constraint names from the core schema migration. Branching on the name is what
+# lets a concurrent failure be answered correctly: the two constraints below mean
+# entirely different things, and `IntegrityError` alone does not distinguish them.
+AUTH_USER_ID_UNIQUE = "uq_user_auth_user_id"
+PHONE_UNIQUE = "uq_user_phone"
 
 __all__ = [
     "PhoneAlreadyLinkedError",
@@ -50,6 +57,21 @@ class PhoneAlreadyLinkedError(Exception):
     def __init__(self, phone: str) -> None:
         super().__init__("phone already linked to another user")
         self.phone = phone
+
+
+def _violated_constraint(error: IntegrityError) -> str | None:
+    """Which unique constraint an IntegrityError broke, if we can tell.
+
+    asyncpg carries `constraint_name`, but SQLAlchemy's wrapping does not always
+    preserve it, so fall back to the message — which always names it.
+    """
+    original = getattr(error, "orig", None)
+    for candidate in (original, getattr(original, "__cause__", None)):
+        name = getattr(candidate, "constraint_name", None)
+        if name:
+            return str(name)
+    match = re.search(r'unique constraint "([^"]+)"', str(error))
+    return match.group(1) if match else None
 
 
 @dataclass(frozen=True)
@@ -197,15 +219,32 @@ async def resolve_user(
     # 4. Someone new.
     try:
         return await _create(session, caller, provider, provider_user_id)
-    except IntegrityError:
-        # Two first requests for the same account arrived together and the other
-        # one won. `user.auth_user_id` is UNIQUE, so this insert lost the race —
-        # which is what protects the data, but on its own it would surface as a
-        # 500 on someone's very first authenticated request.
-        #
-        # The winner has committed by now, so resolving again finds their rows
-        # at step 1. Retried exactly once: a second failure is not a race.
+    except IntegrityError as exc:
+        # Two inserts collided. WHICH constraint broke decides the answer, and
+        # IntegrityError alone does not say — so read it before reacting.
+        constraint = _violated_constraint(exc)
+
+        # Rolls back the caller's transaction. The service does not own this
+        # session, but there is no other way to continue after a failed flush;
+        # `current_identity` commits afterwards, and the test fixture's savepoint
+        # mode tolerates it.
         await session.rollback()
+
+        if constraint == PHONE_UNIQUE:
+            # A DIFFERENT person already holds this number. Same meaning as the
+            # sequential path, so give the same answer — a 409 the client can
+            # act on, not a retry designed for a different race.
+            raise PhoneAlreadyLinkedError(caller.phone or "") from exc
+
+        if constraint is not None and constraint != AUTH_USER_ID_UNIQUE:
+            # Some other constraint we have no recovery for. Raising beats
+            # retrying blindly and reporting a misleading outcome.
+            raise
+
+        # Same account, two simultaneous first requests. `auth_user_id` is
+        # UNIQUE, which is what protected the data; the winner has committed, so
+        # resolving again finds their rows. Retried exactly once — a second
+        # failure is not a race.
 
     user = await _by_provider_identity(session, provider, provider_user_id)
     if user is None:
@@ -214,7 +253,14 @@ async def resolve_user(
         result = await session.execute(
             select(User).where(User.auth_user_id == provider_user_id)
         )
-        user = result.scalar_one()
+        user = result.scalar_one_or_none()
+        if user is None:
+            # Neither lookup found the winner. Not a race we understand, so fail
+            # loudly rather than inventing a second household for this person.
+            raise RuntimeError(
+                "identity resolution retried after an integrity error but found "
+                f"no user for provider_user_id={provider_user_id!r}"
+            )
         await _link_identity(session, user, provider, provider_user_id)
         await session.flush()
 

@@ -97,10 +97,23 @@ households created: 1
 
 `tests/test_identity_concurrency.py` proves it, and proves it can fail: with the retry removed, `test_neither_request_errors` fails. These tests commit real rows (a race cannot exist inside a rolled-back transaction) and clean up after themselves.
 
+**Second review pass** found the retry answered the *wrong question* for one case. `IntegrityError` does not say which constraint broke, and the create path can break two:
+
+| Constraint | Meaning | Correct answer |
+|---|---|---|
+| `uq_user_auth_user_id` | Same person, two simultaneous requests | Retry — the winner's rows exist |
+| `uq_user_phone` | **Two different people, same number** | **409 `phone_already_linked`** |
+
+The handler assumed the first and retried for both — so a phone collision between concurrent signups went looking for rows that do not exist and produced a **500**, where the non-concurrent path correctly returns 409.
+
+**Fixed:** the handler now reads the constraint name (structured attribute where asyncpg preserves it, message otherwise) and branches. Anything unrecognised is re-raised rather than retried blindly. Verified live — one signup succeeds, the other raises `PhoneAlreadyLinkedError` — and the test fails when the branch is removed.
+
 Also applied:
 
 - **`_by_email` orders by `created_at`.** `user.email` is indexed but not unique; an arbitrary `.first()` was deciding whose financial records a sign-in attaches to.
 - **`CLAUDE.md` now records two non-obvious properties**: that `current_household` writes and commits even on GETs, and that `auth_user_id` must never be used as a lookup key.
+- **`scalar_one()` → `scalar_one_or_none()`** in the retry path, with an explicit failure. It previously raised an opaque `NoResultFound`; now an unrecoverable state says so rather than looking like a missing row.
+- **The caller-owned `session.rollback()` is documented** where it happens — the service does not own that session, and there is no other way to continue after a failed flush.
 
 ## Open questions / follow-ups
 - **One flaky failure was observed and not reproduced.** In one full-suite run, `test_the_conflict_does_not_merge_or_duplicate_anything` failed; it then passed in three subsequent runs, including two full-suite runs. Recorded rather than dismissed — if it recurs, suspect shared-connection contention against a cross-region database.

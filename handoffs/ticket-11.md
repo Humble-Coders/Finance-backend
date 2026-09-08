@@ -108,6 +108,21 @@ The handler assumed the first and retried for both — so a phone collision betw
 
 **Fixed:** the handler now reads the constraint name (structured attribute where asyncpg preserves it, message otherwise) and branches. Anything unrecognised is re-raised rather than retried blindly. Verified live — one signup succeeds, the other raises `PhoneAlreadyLinkedError` — and the test fails when the branch is removed.
 
+**Third review pass** found the same bug a third time — in the flow the ticket is actually about.
+
+The two earlier fixes both landed on the **create** path. The two **update** paths were untouched and had the identical defect: `_assert_phone_not_taken` (or `_by_phone`) is a check, `_absorb_claims` is the write, and the flush between them was unprotected. Two Google users completing the phone step with the same number simultaneously produced:
+
+```
+-> ok
+-> IntegrityError        # should be PhoneAlreadyLinkedError -> 409
+```
+
+**The pattern is the finding.** Three rounds, one bug, because each fix landed where the problem was *found* rather than where the class of problem *lives*.
+
+**Fixed structurally:** `_flush_translating_conflicts` is now the single place a phone collision becomes `PhoneAlreadyLinkedError`, used by both update paths; the create path reaches the same translation through its own handler, which additionally has to decide whether to retry. Anything that writes `user.phone` in future inherits this instead of reimplementing it.
+
+Two more tests cover the update-path race, and `test_the_loser_gets_409_not_500` fails when the translation is removed — checked, not assumed.
+
 Also applied:
 
 - **`_by_email` orders by `created_at`.** `user.email` is indexed but not unique; an arbitrary `.first()` was deciding whose financial records a sign-in attaches to.

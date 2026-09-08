@@ -59,6 +59,33 @@ class PhoneAlreadyLinkedError(Exception):
         self.phone = phone
 
 
+async def _flush_translating_conflicts(
+    session: AsyncSession, caller: AuthenticatedUser
+) -> None:
+    """Flush, turning a phone collision into the error the client understands.
+
+    **Every write that can set `user.phone` must go through here.** The checks
+    that precede those writes are check-then-act: another transaction can claim
+    the number between the SELECT and the flush, and then `uq_user_phone` raises
+    a raw IntegrityError. Without translation that surfaces as a 500, where the
+    same situation without a race correctly returns 409.
+
+    This exists as one helper rather than three copies because the same bug was
+    fixed twice in different places before anyone noticed it was one bug: the
+    fixes landed where the problem was found, not where the class of problem
+    lives. Anything that touches a phone number should inherit this, not
+    reimplement it.
+    """
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        constraint = _violated_constraint(exc)
+        await session.rollback()
+        if constraint == PHONE_UNIQUE:
+            raise PhoneAlreadyLinkedError(caller.phone or "") from exc
+        raise
+
+
 def _violated_constraint(error: IntegrityError) -> str | None:
     """Which unique constraint an IntegrityError broke, if we can tell.
 
@@ -198,7 +225,9 @@ async def resolve_user(
         # IntegrityError before the friendly, client-actionable error can.
         await _assert_phone_not_taken(session, user, caller)
         _absorb_claims(user, caller)
-        await session.flush()
+        # The check above is check-then-act; the flush is where a concurrent
+        # claim on the same number actually surfaces.
+        await _flush_translating_conflicts(session, caller)
         household = await session.get(Household, user.household_id)
         return ResolvedIdentity(user=user, household=household, created=False)
 
@@ -212,7 +241,7 @@ async def resolve_user(
     if linked is not None:
         await _link_identity(session, linked, provider, provider_user_id)
         _absorb_claims(linked, caller)
-        await session.flush()
+        await _flush_translating_conflicts(session, caller)
         household = await session.get(Household, linked.household_id)
         return ResolvedIdentity(user=linked, household=household, created=False)
 
@@ -231,9 +260,10 @@ async def resolve_user(
         await session.rollback()
 
         if constraint == PHONE_UNIQUE:
-            # A DIFFERENT person already holds this number. Same meaning as the
-            # sequential path, so give the same answer — a 409 the client can
-            # act on, not a retry designed for a different race.
+            # A DIFFERENT person already holds this number — same meaning as the
+            # sequential path, so the same answer. (Kept here as well as in
+            # _flush_translating_conflicts because this path must also decide
+            # whether to retry, which the helper cannot know.)
             raise PhoneAlreadyLinkedError(caller.phone or "") from exc
 
         if constraint is not None and constraint != AUTH_USER_ID_UNIQUE:

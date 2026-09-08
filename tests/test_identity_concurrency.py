@@ -160,3 +160,70 @@ class TestConcurrentPhoneCollision:
         finally:
             for sub in (first, second):
                 await _cleanup(engine, sub)
+
+
+class TestConcurrentPhoneCollisionOnUpdate:
+    """The same collision on the UPDATE path, not create.
+
+    Two Google users already exist without phones; both then complete the phone
+    step with the same number at the same moment. This is the flow the ticket is
+    actually about, and it was unprotected for two review rounds because each
+    earlier fix landed where the bug was found rather than where the class of
+    bug lives.
+    """
+
+    async def _google_user_without_a_phone(self, engine, sub: str) -> None:
+        await _resolve_and_commit(engine, sub)
+
+    async def test_the_loser_gets_409_not_500(self):
+        from app.db import get_engine
+
+        engine = get_engine()
+        phone = "+1416555" + str(uuid.uuid4().int)[:4]
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        try:
+            # Both exist already, neither has a phone.
+            await self._google_user_without_a_phone(engine, first)
+            await self._google_user_without_a_phone(engine, second)
+
+            results = await asyncio.gather(
+                _resolve_and_commit(engine, first, phone),
+                _resolve_and_commit(engine, second, phone),
+                return_exceptions=True,
+            )
+            errors = [r for r in results if isinstance(r, BaseException)]
+            succeeded = [r for r in results if not isinstance(r, BaseException)]
+
+            assert len(succeeded) == 1, "exactly one should claim the number"
+            assert len(errors) == 1
+            actual = type(errors[0]).__name__
+            assert isinstance(
+                errors[0], PhoneAlreadyLinkedError
+            ), f"expected PhoneAlreadyLinkedError (-> 409), got {actual}"
+        finally:
+            for sub in (first, second):
+                await _cleanup(engine, sub)
+
+    async def test_the_number_belongs_to_exactly_one_user(self):
+        from app.db import get_engine
+
+        engine = get_engine()
+        phone = "+1416555" + str(uuid.uuid4().int)[:4]
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        try:
+            await self._google_user_without_a_phone(engine, first)
+            await self._google_user_without_a_phone(engine, second)
+            await asyncio.gather(
+                _resolve_and_commit(engine, first, phone),
+                _resolve_and_commit(engine, second, phone),
+                return_exceptions=True,
+            )
+            async with AsyncSession(engine) as session:
+                holders = await session.scalar(
+                    text('SELECT count(*) FROM "user" WHERE phone = :phone'),
+                    {"phone": phone},
+                )
+            assert holders == 1
+        finally:
+            for sub in (first, second):
+                await _cleanup(engine, sub)

@@ -153,9 +153,10 @@ class TestConcurrentPhoneCollision:
 
             assert len(succeeded) == 1, "exactly one signup should win the number"
             assert len(errors) == 1
+            actual = type(errors[0]).__name__
             assert isinstance(
                 errors[0], PhoneAlreadyLinkedError
-            ), f"expected PhoneAlreadyLinkedError (-> 409), got {type(errors[0]).__name__}"
+            ), f"expected PhoneAlreadyLinkedError (-> 409), got {actual}"
         finally:
             for sub in (first, second):
                 await _cleanup(engine, sub)

@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import AuthenticatedUser
 from app.models.enums import AuthProvider
-from app.models.identity import Household, User, UserIdentity
+from app.models.identity import Household, User, UserIdentity, UserPhoneChange
 
 # Constraint names from the core schema migration. Branching on the name is what
 # lets a concurrent failure be answered correctly: the two constraints below mean
@@ -145,7 +145,16 @@ async def _by_phone(session: AsyncSession, phone: str) -> User | None:
 
 
 async def _by_email(session: AsyncSession, email: str) -> User | None:
-    """Oldest match wins.
+    """Oldest match wins, and only for users who have no phone yet.
+
+    Once someone has a verified phone, that is the authoritative key and email
+    adds only risk: an address can be reassigned, and matching one the person no
+    longer controls is the same hazard as matching a recycled phone number —
+    which linking already refuses to do.
+
+    Email earns its place in exactly one window: someone signs up with Google,
+    abandons the phone step, and returns later with Apple. Bounding it to
+    phone-less users keeps that and closes the rest.
 
     `user.email` is indexed but **not unique** — two rows sharing one should be
     impossible, since this very lookup prevents it, but "impossible" plus an
@@ -153,7 +162,9 @@ async def _by_email(session: AsyncSession, email: str) -> User | None:
     financial records a sign-in attaches to. Ordering makes it deterministic.
     """
     result = await session.execute(
-        select(User).where(User.email == email).order_by(User.created_at.asc())
+        select(User)
+        .where(User.email == email, User.phone.is_(None))
+        .order_by(User.created_at.asc())
     )
     return result.scalars().first()
 
@@ -180,25 +191,41 @@ async def _link_identity(
     )
 
 
-def _absorb_claims(user: User, caller: AuthenticatedUser) -> None:
-    """Fill in what the token knows, without ever erasing what it does not.
+def _absorb_claims(
+    session: AsyncSession, user: User, caller: AuthenticatedUser
+) -> None:
+    """Apply what the token knows. Two different rules, deliberately.
 
-    Apple returns the email and name **only on the first authorization**; every
-    later sign-in omits them. A naive assignment would overwrite stored values
-    with nulls on the second sign-in and lose them permanently. So each field is
-    only ever filled, never cleared.
+    **email and name — first value wins, never changes.** Apple returns them
+    *only on the first authorization*; every later sign-in omits them. Freezing
+    them means no later sign-in can degrade what was captured then — a stronger
+    guarantee than merely refusing to overwrite with null, and the reason a
+    relay address that arrives later cannot displace a real one.
 
-    A `…@privaterelay.appleid.com` address is a real, deliverable address and is
+    **phone — updates when it changes.** It is the identity key, and a stale key
+    is what silently produces a second household: a future provider carrying the
+    user's *current* number would not match the old one we stored, and would be
+    treated as a new person. A changed `phone` claim means Supabase has already
+    OTP-verified the new number.
+
+    A `…@privaterelay.appleid.com` address is real and deliverable, and is
     stored like any other.
     """
     if caller.email and not user.email:
         user.email = caller.email
-    if caller.phone and not user.phone:
-        user.phone = caller.phone
 
     name = (caller.claims.get("user_metadata") or {}).get("full_name")
     if name and not user.display_name:
         user.display_name = name
+
+    if caller.phone and caller.phone != user.phone:
+        # Audit-only; see UserPhoneChange on why this is never matched against.
+        session.add(
+            UserPhoneChange(
+                user_id=user.id, previous_phone=user.phone, new_phone=caller.phone
+            )
+        )
+        user.phone = caller.phone
 
 
 async def resolve_user(
@@ -224,7 +251,7 @@ async def resolve_user(
         # that autoflushes during the lookup below, so Postgres raises a raw
         # IntegrityError before the friendly, client-actionable error can.
         await _assert_phone_not_taken(session, user, caller)
-        _absorb_claims(user, caller)
+        _absorb_claims(session, user, caller)
         # The check above is check-then-act; the flush is where a concurrent
         # claim on the same number actually surfaces.
         await _flush_translating_conflicts(session, caller)
@@ -240,7 +267,7 @@ async def resolve_user(
 
     if linked is not None:
         await _link_identity(session, linked, provider, provider_user_id)
-        _absorb_claims(linked, caller)
+        _absorb_claims(session, linked, caller)
         await _flush_translating_conflicts(session, caller)
         household = await session.get(Household, linked.household_id)
         return ResolvedIdentity(user=linked, household=household, created=False)

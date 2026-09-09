@@ -15,7 +15,12 @@ from app.models.enums import (
     TransactionDirection,
     TransactionSource,
 )
-from app.models.identity import Household, User, UserIdentity
+from app.models.identity import (
+    Household,
+    User,
+    UserIdentity,
+    UserPhoneChange,
+)
 from app.models.money import Account, DocumentUpload, Transaction
 from app.models.planning import Budget, BudgetLine, Debt, Goal
 from app.models.platform import (
@@ -29,6 +34,7 @@ __all__ = [
     "Household",
     "User",
     "UserIdentity",
+    "UserPhoneChange",
     "Account",
     "Transaction",
     "DocumentUpload",

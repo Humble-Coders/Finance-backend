@@ -145,6 +145,133 @@ class TestLinkingAcrossProviders:
         assert resolved.user.email == "abc@privaterelay.appleid.com"
 
 
+class TestPhoneIsUpdatable:
+    """The identity key must change when the user's number does.
+
+    A stale key is what silently produces a second household: a future provider
+    carrying the user's current number would not match the old one we stored.
+    """
+
+    async def test_a_changed_number_replaces_the_old_one(self, db_session):
+        sub = str(uuid.uuid4())
+        await resolve_user(db_session, caller(sub=sub, phone="+14165560001"))
+        second = await resolve_user(db_session, caller(sub=sub, phone="+14165560002"))
+        assert second.user.phone == "+14165560002"
+
+    async def test_the_change_is_recorded_for_audit(self, db_session):
+        from sqlalchemy import select
+
+        from app.models.identity import UserPhoneChange
+
+        sub = str(uuid.uuid4())
+        first = await resolve_user(db_session, caller(sub=sub, phone="+14165560003"))
+        await resolve_user(db_session, caller(sub=sub, phone="+14165560004"))
+
+        rows = (
+            (
+                await db_session.execute(
+                    select(UserPhoneChange).where(
+                        UserPhoneChange.user_id == first.user.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [(r.previous_phone, r.new_phone) for r in rows] == [
+            ("+14165560003", "+14165560004")
+        ]
+
+    async def test_an_old_number_no_longer_links(self, db_session):
+        """The security property. Carriers recycle numbers.
+
+        If a released number still matched, whoever is assigned it next would be
+        linked into the previous owner's household and financial records.
+        """
+        sub = str(uuid.uuid4())
+        original = await resolve_user(db_session, caller(sub=sub, phone="+14165560005"))
+        await resolve_user(db_session, caller(sub=sub, phone="+14165560006"))
+
+        # Someone else is assigned the released number and signs up.
+        newcomer = await resolve_user(
+            db_session, caller(provider="google", phone="+14165560005")
+        )
+        assert newcomer.created is True
+        assert newcomer.user.id != original.user.id
+
+    async def test_taking_a_number_someone_else_holds_still_fails(self, db_session):
+        await resolve_user(db_session, caller(phone="+14165560007"))
+        other = str(uuid.uuid4())
+        await resolve_user(
+            db_session, caller(sub=other, provider="google", email="x@example.com")
+        )
+
+        with pytest.raises(PhoneAlreadyLinkedError):
+            await resolve_user(
+                db_session, caller(sub=other, provider="google", phone="+14165560007")
+            )
+
+
+class TestEmailAndNameAreFrozen:
+    """First value wins. Never changed by a later sign-in.
+
+    A stronger guarantee than "don't overwrite with null": no later token can
+    degrade what Apple gave us on the one authorization that carried it.
+    """
+
+    async def test_a_changed_email_is_ignored(self, db_session):
+        sub = str(uuid.uuid4())
+        await resolve_user(db_session, caller(sub=sub, email="first@example.com"))
+        second = await resolve_user(
+            db_session, caller(sub=sub, email="second@example.com")
+        )
+        assert second.user.email == "first@example.com"
+
+    async def test_a_changed_name_is_ignored(self, db_session):
+        sub = str(uuid.uuid4())
+        await resolve_user(db_session, caller(sub=sub, full_name="Ada Lovelace"))
+        second = await resolve_user(
+            db_session, caller(sub=sub, full_name="Someone Else")
+        )
+        assert second.user.display_name == "Ada Lovelace"
+
+    async def test_a_relay_address_cannot_displace_a_real_one(self, db_session):
+        sub = str(uuid.uuid4())
+        await resolve_user(
+            db_session, caller(sub=sub, provider="apple", email="real@example.com")
+        )
+        second = await resolve_user(
+            db_session,
+            caller(sub=sub, provider="apple", email="relay@privaterelay.appleid.com"),
+        )
+        assert second.user.email == "real@example.com"
+
+
+class TestEmailLinkingIsBounded:
+    async def test_email_links_only_while_the_user_has_no_phone(self, db_session):
+        """The window it exists for: Google, abandoned phone step, later Apple."""
+        first = await resolve_user(
+            db_session, caller(provider="google", email="window@example.com")
+        )
+        second = await resolve_user(
+            db_session, caller(provider="apple", email="window@example.com")
+        )
+        assert second.user.id == first.user.id
+
+    async def test_email_does_not_link_once_a_phone_is_verified(self, db_session):
+        """Past that window the phone is authoritative and email adds only risk."""
+        await resolve_user(
+            db_session,
+            caller(
+                provider="google", email="settled@example.com", phone="+14165560008"
+            ),
+        )
+        newcomer = await resolve_user(
+            db_session, caller(provider="apple", email="settled@example.com")
+        )
+        assert newcomer.created is True
+
+
 class TestAppleClaimsArriveOnlyOnce:
     async def test_a_later_sign_in_does_not_erase_email_or_name(self, db_session):
         """Apple sends email and name on the first authorization only.

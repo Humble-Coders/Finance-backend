@@ -130,6 +130,33 @@ Also applied:
 - **`scalar_one()` → `scalar_one_or_none()`** in the retry path, with an explicit failure. It previously raised an opaque `NoResultFound`; now an unrecoverable state says so rather than looking like a missing row.
 - **The caller-owned `session.rollback()` is documented** where it happens — the service does not own that session, and there is no other way to continue after a failed flush.
 
+## Identity-key staleness — fixed in this PR
+
+A fourth review pass found that a **changed phone or email never propagated**: `_absorb_claims` only ever filled empty fields.
+
+```
+first sign-in : ('+14165558194', 'old@example.com')
+after change  : ('+14165558194', 'old@example.com')   <- token carried the new ones
+```
+
+That mattered because **the phone is the identity key**. A user who changed their number kept the old one forever, so a later sign-in with a new provider carrying their *current* number would not match — and would create the second household this ticket exists to prevent, arriving by a different route.
+
+**Resolved with two deliberately different rules:**
+
+| Field | Rule | Why |
+|---|---|---|
+| **phone** | Updates when it changes | Stale identity key ⇒ duplicate households. A changed claim means Supabase already OTP-verified it |
+| **email**, **name** | **First value wins, never changes** | Manager's decision. Stronger than "don't overwrite with null": no later sign-in can degrade what Apple gave us on the one authorization that carried it |
+
+**Supporting changes:**
+
+- **`user_phone_change`** records every change to the identity key — new migration `b046276164da`, with **RLS enabled explicitly** (the RLS migration hardcodes a table list, so a new table ships unprotected unless it says otherwise; `TestRowLevelSecurity` would have caught it, and this is the gap flagged when reviewing #10).
+- **History is never used for linking.** Carriers recycle numbers, typically a few months after disconnection — matching a released number would attach whoever is assigned it next to the previous owner's household and financial records. Linking uses `user.phone` and nothing else. `test_an_old_number_no_longer_links` is the security test.
+- **Email linking is bounded to users with no verified phone.** Past that point the phone is authoritative and email adds only risk, since an address can be reassigned too. It still covers the one window it earns: sign up with Google, abandon the phone step, return with Apple.
+- Conflicts are unchanged: claiming a number someone else holds is still a 409, on every path.
+
+**The metadata tests from #10 caught the new table immediately** — `user_phone_change` has no `household_id`, so `TestHouseholdScoping` failed until it was classified as reached-via-parent. That is the test working as designed: a new table must be classified deliberately, not silently.
+
 ## Open questions / follow-ups
 - **One flaky failure was observed and not reproduced.** In one full-suite run, `test_the_conflict_does_not_merge_or_duplicate_anything` failed; it then passed in three subsequent runs, including two full-suite runs. Recorded rather than dismissed — if it recurs, suspect shared-connection contention against a cross-region database.
 - **The database-backed suite takes about ten minutes**, against ~0.4s for the 121 that need no database. **Ticket #15** must keep them as separate CI jobs, or fast feedback disappears.

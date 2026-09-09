@@ -117,3 +117,17 @@ The comment on the `pack is None` branch claimed it covered "known but unlaunche
 - **`onboarding_required` keys off `country_code`, not a verified phone**, though the ticket's criterion is phrased in terms of the phone. They coincide only because nothing else sets the region today. Region-from-timezone has been discussed; the moment it lands, `country_code` goes non-NULL without a phone and this list silently empties while the phone step is still outstanding. Needs either a direct phone check or the coupling written down as a deliberate invariant — worth doing in **2.1**, which owns region resolution.
 - **`_plan_for` ignores `expires_at`**, while the model docstring says history is kept "by leaving expired rows in place rather than updating them". If nothing flips `is_active`, an expired entitlement keeps granting its plan. M7 owns billing; the two should be reconciled there rather than left to a webhook nobody has written.
 - `_mount` in `test_capabilities_endpoint.py` adds routes to the global `app` and never removes them; the table grows for the life of the session. Harmless now, untidy later.
+
+### A note on CI, from this round
+
+The first push of these fixes carried a broken test — `PlanTier.premium`, which
+does not exist (the tiers are `free`, `personal`, `family`). **CI went green on
+it anyway**, because CI runs only the 123 tests that need no database and every
+test added here is an integration test. The failure only surfaced locally, after
+the ~16-minute database run.
+
+That is a concrete argument for **#15**: right now a change that touches nothing
+but database-backed behaviour can go green in CI while broken, and the only thing
+standing between that and `main` is whether someone remembered to run the slow
+suite by hand. Worth pairing with branch protection, which is still unconfigured
+— CI is advisory on this repo today.

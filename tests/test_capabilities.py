@@ -310,12 +310,24 @@ class TestScopeUniqueness:
                 )
 
     async def test_different_scopes_still_coexist(self, db_session):
-        """The index must not over-constrain — precedence needs these rows."""
-        key = f"scopes_{uuid.uuid4().hex[:8]}"
-        await _feature(db_session, key, enabled=False)
-        await _feature(db_session, key, country="CA", enabled=True)
-        await _feature(db_session, key, plan=PlanTier.premium, enabled=True)
-        await _feature(db_session, key, country="CA", plan=PlanTier.premium)
+        """The index must not over-constrain — precedence needs all four rows.
 
+        The household is entitled to `personal` so every row actually competes;
+        on `free` the two plan-scoped rows would not match the query at all, and
+        the test would pass without proving anything about them.
+        """
+        key = f"scopes_{uuid.uuid4().hex[:8]}"
         household = await _household(db_session, "CA")
-        assert (await resolve(db_session, household)).features[key].enabled is True
+        await _entitle(db_session, household, PlanTier.personal)
+
+        await _feature(db_session, key, enabled=True)
+        await _feature(db_session, key, country="CA", enabled=True)
+        await _feature(db_session, key, plan=PlanTier.personal, enabled=True)
+        # The most specific row, and the only one that disagrees — so it winning
+        # is visible rather than coincidental.
+        await _feature(
+            db_session, key, country="CA", plan=PlanTier.personal, enabled=False
+        )
+
+        result = await resolve(db_session, household)
+        assert result.features[key].enabled is False

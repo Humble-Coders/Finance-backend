@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.models.enums import PlanTier
 from app.models.identity import Household
@@ -122,15 +123,67 @@ class TestUnknownRegion:
         result = await resolve(db_session, household)
         assert result.features[key].enabled is False
 
-    async def test_an_unlaunched_country_keeps_its_code_but_has_no_content(
+    async def test_an_unconfigured_country_keeps_its_code_but_has_no_content(
         self, db_session
     ):
-        household = await _household(db_session, "ZZ")  # no pack exists
+        """A country we have never configured — no pack row at all."""
+        household = await _household(db_session, "ZZ")
         result = await resolve(db_session, household)
 
         assert result.region == "ZZ"
         assert result.onboarding_required == []
         assert result.content == {}
+
+
+class TestUnlaunchedMarket:
+    """A pack can exist before its market opens; is_launched decides.
+
+    Previously untested — the test that looked like this one used a country with
+    no pack row, which is a different case. A staged pack was served as fully
+    launched, disclaimer version and all.
+    """
+
+    async def test_a_staged_market_serves_no_content(self, db_session):
+        db_session.add(
+            CountryPack(
+                country_code="DE",
+                currency="EUR",
+                locale="de-DE",
+                tax_accounts=["Riester"],
+                disclaimer_version="de-v1",
+                is_launched=False,
+            )
+        )
+        await db_session.flush()
+
+        household = await _household(db_session, "DE")
+        result = await resolve(db_session, household)
+
+        assert result.region == "DE"
+        # The disclaimer is the point: unapproved legal copy must not ship.
+        assert result.content == {}
+        assert result.currency == UNKNOWN_REGION_CURRENCY
+
+    async def test_launching_it_is_one_column(self, db_session):
+        """Nothing else changes — flipping the flag opens the market."""
+        pack = CountryPack(
+            country_code="DE",
+            currency="EUR",
+            locale="de-DE",
+            tax_accounts=["Riester"],
+            disclaimer_version="de-v1",
+            is_launched=False,
+        )
+        db_session.add(pack)
+        household = await _household(db_session, "DE")
+        assert (await resolve(db_session, household)).content == {}
+
+        pack.is_launched = True
+        await db_session.flush()
+
+        result = await resolve(db_session, household)
+        assert result.currency == "EUR"
+        assert result.content["disclaimer_version"] == "de-v1"
 
 
 class TestPrecedence:
@@ -224,3 +277,45 @@ class TestAddingACountryIsDataOnly:
         assert result.currency == "GBP"
         assert result.locale == "en-GB"
         assert result.content["tax_accounts"] == ["ISA", "SIPP"]
+
+
+class TestScopeUniqueness:
+    """Two rows of equal specificity must be impossible.
+
+    Regression for c3a91e7d4b28. The original index covered the bare columns,
+    and NULL means "any" here — so Postgres, treating NULLs as distinct, only
+    ever constrained the country+plan scope. The other three accepted a second,
+    contradicting row, and resolution then depended on physical row order: the
+    same two rows resolved differently after a vacuum moved one.
+    """
+
+    @pytest.mark.parametrize(
+        ("country", "plan"),
+        [
+            (None, None),  # global
+            ("CA", None),  # this market, any plan
+            (None, PlanTier.free),  # any market, this plan
+            ("CA", PlanTier.free),  # exact — the only scope covered before
+        ],
+        ids=["global", "country_only", "plan_only", "country_and_plan"],
+    )
+    async def test_a_duplicate_scope_is_rejected(self, db_session, country, plan):
+        key = f"dupe_{uuid.uuid4().hex[:8]}"
+        await _feature(db_session, key, country=country, plan=plan, enabled=True)
+
+        with pytest.raises(IntegrityError):
+            async with db_session.begin_nested():
+                await _feature(
+                    db_session, key, country=country, plan=plan, enabled=False
+                )
+
+    async def test_different_scopes_still_coexist(self, db_session):
+        """The index must not over-constrain — precedence needs these rows."""
+        key = f"scopes_{uuid.uuid4().hex[:8]}"
+        await _feature(db_session, key, enabled=False)
+        await _feature(db_session, key, country="CA", enabled=True)
+        await _feature(db_session, key, plan=PlanTier.premium, enabled=True)
+        await _feature(db_session, key, country="CA", plan=PlanTier.premium)
+
+        household = await _household(db_session, "CA")
+        assert (await resolve(db_session, household)).features[key].enabled is True

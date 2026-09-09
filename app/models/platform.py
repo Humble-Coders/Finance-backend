@@ -16,6 +16,7 @@ from sqlalchemy import (
     Index,
     String,
     Text,
+    text,
 )
 from sqlalchemy import (
     Enum as SAEnum,
@@ -103,8 +104,33 @@ class FeatureAvailability(UUIDMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "feature_availability"
+    # NULL means "any" here, and Postgres treats NULLs as distinct — so the
+    # first index below constrains only the scope where both columns are set.
+    # The three partial ones cover the rest (c3a91e7d4b28); without them two
+    # contradicting rows could share a scope, and resolution would then depend
+    # on physical row order.
     __table_args__ = (
         Index("uq_feature_scope", "feature_key", "country_code", "plan", unique=True),
+        Index(
+            "uq_feature_scope_global",
+            "feature_key",
+            unique=True,
+            postgresql_where=text("country_code IS NULL AND plan IS NULL"),
+        ),
+        Index(
+            "uq_feature_scope_country",
+            "feature_key",
+            "country_code",
+            unique=True,
+            postgresql_where=text("country_code IS NOT NULL AND plan IS NULL"),
+        ),
+        Index(
+            "uq_feature_scope_plan",
+            "feature_key",
+            "plan",
+            unique=True,
+            postgresql_where=text("country_code IS NULL AND plan IS NOT NULL"),
+        ),
     )
 
     feature_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)

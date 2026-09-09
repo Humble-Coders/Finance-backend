@@ -49,6 +49,10 @@ UNKNOWN_REGION_LOCALE = "en-CA"
 REASON_REGION_UNKNOWN = "region_unknown"
 REASON_REGION_UNSUPPORTED = "region_unsupported"
 REASON_NOT_IN_PLAN = "not_in_plan"
+# A feature_key with no row at all. Distinct from the reasons above because it
+# is a bug in our code, not a fact about the caller — reporting it as
+# "region_unsupported" sends whoever debugs it looking at country packs.
+REASON_UNKNOWN_FEATURE = "unknown_feature"
 
 ONBOARDING_PHONE = "phone"
 
@@ -75,7 +79,8 @@ async def _feature_rows(
 ) -> dict[str, Feature]:
     """Every feature, resolved to the single row that governs it."""
     result = await session.execute(
-        select(FeatureAvailability).where(
+        select(FeatureAvailability)
+        .where(
             or_(
                 FeatureAvailability.country_code.is_(None),
                 FeatureAvailability.country_code == country_code,
@@ -85,14 +90,19 @@ async def _feature_rows(
                 FeatureAvailability.plan == plan,
             ),
         )
+        # Belt to uq_feature_scope's braces. That index is what actually stops
+        # two rows of equal specificity existing; this makes the answer stable
+        # regardless — without it "first seen" means "whatever order Postgres
+        # returned", which changes with physical row order after a vacuum, so a
+        # feature could silently flip on or off.
+        .order_by(FeatureAvailability.id)
     )
 
     winner: dict[str, FeatureAvailability] = {}
     for row in result.scalars():
         current = winner.get(row.feature_key)
-        # Strictly greater, so ties keep the first seen rather than depending on
-        # query order — a tie means two rows of equal specificity, which the
-        # uq_feature_scope index already prevents.
+        # Strictly greater, so an equal-specificity row keeps the first seen —
+        # which the ORDER BY above makes a fixed choice rather than a race.
         if current is None or _specificity(row) > _specificity(current):
             winner[row.feature_key] = row
 
@@ -130,7 +140,13 @@ async def resolve(session: AsyncSession, household: Household) -> Capabilities:
     if household.country_code:
         result = await session.execute(
             select(CountryPack).where(
-                CountryPack.country_code == household.country_code
+                CountryPack.country_code == household.country_code,
+                # A pack can exist before its market opens — that is what
+                # is_launched is for. Staging one must not start serving its
+                # content: disclaimer_version points at legal copy that has not
+                # been approved yet, and shipping unapproved disclaimer text is
+                # the exact risk the flag guards (Appendix A).
+                CountryPack.is_launched.is_(True),
             )
         )
         pack = result.scalar_one_or_none()
@@ -138,8 +154,9 @@ async def resolve(session: AsyncSession, household: Household) -> Capabilities:
     features = await _feature_rows(session, household.country_code, plan)
 
     if pack is None:
-        # No market configuration — the region is either unknown, or known but
-        # unlaunched.
+        # No launched market — the region is unknown (NULL), unconfigured (no
+        # pack row), or configured but not yet launched. All three mean the same
+        # thing to a client: no market content to render.
         #
         # Deliberately does NOT force features off. An earlier version did, and
         # it disabled document_upload for every user: a household's region is
@@ -192,7 +209,7 @@ def require_feature(feature_key: str):
                 detail={
                     "code": "feature_unavailable",
                     "feature": feature_key,
-                    "reason": feature.reason if feature else REASON_REGION_UNSUPPORTED,
+                    "reason": feature.reason if feature else REASON_UNKNOWN_FEATURE,
                 },
             )
 

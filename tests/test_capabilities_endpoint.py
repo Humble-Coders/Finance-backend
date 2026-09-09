@@ -121,4 +121,8 @@ class TestRequireFeature:
         await api_client.get("/me")
 
         path = self._mount(f"never_defined_{uuid.uuid4().hex[:6]}")
-        assert (await api_client.get(path)).status_code == 403
+        response = await api_client.get(path)
+        assert response.status_code == 403
+        # Names our missing row rather than the caller's region — the reason is
+        # the first thing whoever debugs this reads.
+        assert response.json()["detail"]["reason"] == "unknown_feature"

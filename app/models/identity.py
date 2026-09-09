@@ -17,7 +17,7 @@ from app.models.enums import AuthProvider
 if TYPE_CHECKING:
     pass
 
-__all__ = ["Household", "User", "UserIdentity"]
+__all__ = ["Household", "User", "UserIdentity", "UserPhoneChange"]
 
 
 class Household(UUIDMixin, TimestampMixin, Base):
@@ -94,3 +94,26 @@ class UserIdentity(UUIDMixin, TimestampMixin, Base):
     provider_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
 
     user: Mapped[User] = relationship(back_populates="identities")
+
+
+class UserPhoneChange(UUIDMixin, TimestampMixin, Base):
+    """Audit trail for changes to the identity key.
+
+    **Never used for linking.** Carriers recycle phone numbers, typically a few
+    months after disconnection — so matching a sign-in against a number someone
+    used to hold could attach a stranger to their household and their financial
+    records. Linking uses `user.phone` and nothing else; this table exists so a
+    change to the identity key is auditable, not so it can be matched.
+    """
+
+    __tablename__ = "user_phone_change"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # NULL for the first number a user ever sets.
+    previous_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    new_phone: Mapped[str] = mapped_column(String(32), nullable=False)

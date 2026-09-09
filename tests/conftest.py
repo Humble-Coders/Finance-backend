@@ -82,3 +82,58 @@ async def db(_connection):
         yield _connection
     finally:
         await transaction.rollback()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def db_session():
+    """An AsyncSession whose work is rolled back when the test ends.
+
+    Bound to an explicit connection with an outer transaction, and joined with
+    `create_savepoint`, so code under test may call `session.commit()` — which
+    `current_identity` does — without escaping the rollback. Nothing reaches the
+    real database permanently.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db import get_engine
+
+    engine = get_engine()
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            yield session
+        finally:
+            await session.close()
+            await transaction.rollback()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def api_client(db_session):
+    """An HTTP client against the real app, with two dependencies overridden.
+
+    `get_session` points at the rolled-back test session. `current_user` is
+    overridden per-test via `authenticate_as`, so these tests exercise identity
+    resolution rather than re-testing signature verification — `app/auth.py`
+    is covered separately and needs no live Supabase token here.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from app.auth import current_user
+    from app.db import get_session
+    from app.main import app
+
+    async def _session_override():
+        yield db_session
+
+    app.dependency_overrides[get_session] = _session_override
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        client.app = app  # so tests can install their own current_user override
+        yield client
+    app.dependency_overrides.pop(get_session, None)
+    app.dependency_overrides.pop(current_user, None)

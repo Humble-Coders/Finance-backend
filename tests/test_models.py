@@ -27,9 +27,10 @@ NO_HOUSEHOLD = {
 
 # Reached through a parent, or scoped by a nullable column: these DO carry
 # household_id (except where noted) but not via HouseholdScopedMixin.
-#   user_identity -> user      budget_line -> budget
-#   category       -> nullable, because system rows are shared by everyone
-HOUSEHOLD_VIA_PARENT = {"user_identity", "budget_line"}
+#   user_identity      -> user      budget_line -> budget
+#   user_phone_change  -> user
+#   category           -> nullable, because system rows are shared by everyone
+HOUSEHOLD_VIA_PARENT = {"user_identity", "budget_line", "user_phone_change"}
 HOUSEHOLD_NULLABLE = {"category"}
 
 

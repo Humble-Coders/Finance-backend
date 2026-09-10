@@ -83,8 +83,6 @@ jobs:
       # Required by Settings, never contacted: the tests override current_user.
       # .invalid is a reserved TLD, so it cannot resolve even by accident.
       SUPABASE_URL: https://ci.invalid
-      # pg_dump and psql run inside the container; see scripts/check_migrations.sh.
-      PG_CONTAINER: ${{ job.services.postgres.id }}
       # A missing database must fail this job, not skip every test in it.
       REQUIRE_DB: "1"
     steps:
@@ -101,6 +99,12 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Migrations apply, reverse and re-apply
+        env:
+          # pg_dump and psql run inside the container; see the script. Set here
+          # rather than in the job-level env because the `job` context is only
+          # available inside steps — at job level GitHub rejects the whole file
+          # as invalid and runs nothing.
+          PG_CONTAINER: ${{ job.services.postgres.id }}
         run: scripts/check_migrations.sh
 
       - name: Database tests

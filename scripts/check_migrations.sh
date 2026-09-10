@@ -62,8 +62,11 @@ PY
 read -r DB_USER DB_NAME <<<"$target"
 echo "ok: runtime and migration DSNs are both local (user=$DB_USER, db=$DB_NAME)"
 
+# No -i: psql -c never reads stdin, and an attached stdin would swallow
+# whatever the caller is feeding this script — a heredoc-driven run once lost
+# the rest of its commands that way.
 psql_c() {
-  docker exec -i "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAX -v ON_ERROR_STOP=1 -c "$1"
+  docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAX -v ON_ERROR_STOP=1 -c "$1"
 }
 
 # pg_dump runs inside the container, so the runner's own client version cannot

@@ -9,7 +9,7 @@ CI gains a `database` job that starts a throwaway Postgres 17 + pgmq 1.5.1 conta
 
 The script is shared by CI and local rehearsal. Because it drops every table and a developer `.env` points at production, it refuses to run unless its connection string names `localhost`, carries no host override, and reaches the *same server* as the container it inspects — compared by Postgres's system identifier, not by hostname. `REQUIRE_DB` makes a missing database fail the job instead of skipping every test, because a fully skipped suite reports green.
 
-On CI the whole thing takes **48s**, running alongside the existing 23s `test` job — well inside the ticket's five-minute budget. It validates migration **correctness**, not survival of Supabase's transaction pooler; the workflow says so explicitly.
+On CI the whole thing takes **50s**, running alongside the existing 27s `test` job — well inside the ticket's five-minute budget. It validates migration **correctness**, not survival of Supabase's transaction pooler; the workflow says so explicitly.
 
 ## Files changed
 
@@ -42,7 +42,7 @@ On CI the whole thing takes **48s**, running alongside the existing 23s `test` j
 
 ```bash
 git checkout ticket-15-migration-ci
-docker run -d --name finai-pg -e POSTGRES_PASSWORD=postgres -p 55432:5432 ghcr.io/pgmq/pg17-pgmq:v1.5.1
+docker run -d --name finai-pg -e POSTGRES_PASSWORD=postgres -p 55432:5432 ghcr.io/pgmq/pg17-pgmq:v1.5.1@sha256:e6f893a793751ed30c89f5f88e95aa52b77c1a03440b7d118a996866489ac0c6
 export DATABASE_URL=postgresql://postgres:postgres@localhost:55432/postgres
 PG_CONTAINER=finai-pg PYTHON=.venv/bin/python scripts/check_migrations.sh
 REQUIRE_DB=1 .venv/bin/python -m pytest -q -m integration     # expect 85 passed
@@ -63,12 +63,12 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:55432/postgres PG_CONTAINE
 | Criterion | Status | Evidence |
 |---|---|---|
 | Opening a pull request runs the migration job automatically | ✅ Met | `on: pull_request`; run [34458642174](https://github.com/Humble-Coders/Finance-backend/actions/runs/34458642174) triggered by `pull_request` |
-| `upgrade head` → `downgrade base` → `upgrade head` completes green | ✅ Met | Final run [34459157610](https://github.com/Humble-Coders/Finance-backend/actions/runs/34459157610): `All migration checks passed in 6s` |
+| `upgrade head` → `downgrade base` → `upgrade head` completes green | ✅ Met | Run [34460812452](https://github.com/Humble-Coders/Finance-backend/actions/runs/34460812452) on `8e31e5a`, the last change to code: `All migration checks passed in 5s`, `85 passed`. Later commits touch only documentation and comments; CI runs on every push |
 | Running `upgrade head` twice is a no-op the second time | ✅ Met | Script compares the revision **and** a schema dump before and after the second run |
-| A deliberately broken `downgrade()` makes CI red (verify once, then revert) | ✅ Met | `4729850` → run [34458832633](https://github.com/Humble-Coders/Finance-backend/actions/runs/34458832633) red: `index "uq_does_not_exist" does not exist`; reverted in `e20eb37` |
-| Two divergent migration heads make CI red | ✅ Met | `35e82a8` → run [34459005058](https://github.com/Humble-Coders/Finance-backend/actions/runs/34459005058) red: `expected one head, found 2`; removed in `9407d51` |
+| A deliberately broken `downgrade()` makes CI red (verify once, then revert) | ✅ Met | `4729850` → run [34458832633](https://github.com/Humble-Coders/Finance-backend/actions/runs/34458832633) red: `index "uq_does_not_exist" does not exist`; reverted in `e20eb37`. Made before the review round rewrote the guard; the same breakage re-verified locally after it |
+| Two divergent migration heads make CI red | ✅ Met | `35e82a8` → run [34459005058](https://github.com/Humble-Coders/Finance-backend/actions/runs/34459005058) red: `expected one head, found 2`; removed in `9407d51`. Same caveat — re-verified locally after the rewrite |
 | The job needs no repository secrets | ✅ Met | The job's env holds a literal localhost URL, a placeholder `SUPABASE_URL` and `REQUIRE_DB`; no `secrets.` reference anywhere in the workflow |
-| Total CI time stays under about five minutes | ✅ Met | `database` 48s, `test` 23s, in parallel |
+| Total CI time stays under about five minutes | ✅ Met | `database` 50s, `test` 27s, in parallel (run 34460812452) |
 
 Both red runs failed in the `database` job at the migration step, with the `test` job green — so each red is attributable to its one cause. The same breakages were also rehearsed locally first, plus a third the ticket does not ask for: a downgrade that drops its tables but leaves enum types behind (the #10 bug) is caught by the leftover check.
 
@@ -78,7 +78,7 @@ Both red runs failed in the `database` job at the migration step, with the `test
 
 **2. No pgvector.** The ticket asks for `pgmq` and `vector`. No migration uses `vector` yet, so the image carries only pgmq; the workflow notes that the first migration needing it must change the image. Production has pgvector 0.8.2.
 
-**3. The image matches production's major version, not its patch.** `pg17-pgmq:v1.5.1` runs Postgres **17.4**; production runs **17.6**, both with pgmq 1.5.1. Pinned by tag and content digest, so it cannot drift silently.
+**3. The image matches production's major version, not its patch.** `pg17-pgmq:v1.5.1` runs Postgres **17.4**; production runs **17.6**, both with pgmq 1.5.1. Pinned by tag and content digest — in CI and in the local-rehearsal instructions alike — so neither can drift silently.
 
 **4. Stronger checks than the criteria require.** "`upgrade head` twice is a no-op" is nearly vacuous on its own — the second run finds the database at head and executes nothing. So the script also dumps the schema after each stage, fails if `downgrade base` leaves any table, enum, sequence, view or function behind, and fails if the round trip does not reproduce the first schema exactly. The round trip is where the queue migration actually meets an existing queue — the guard production depends on — because its `downgrade()` deliberately leaves the queue in place.
 
@@ -122,6 +122,10 @@ Both red runs failed in the `database` job at the migration step, with the `test
 | Broken `downgrade()` / forked chain / leftover enums | still red, each with its own message |
 
 **Also corrected:** this report, `CLAUDE.md` and the script header all said the script "refuses any non-localhost database". A hostname was all it checked, and even that was bypassable. They now say what is actually verified. The header's line counts are gone too — they went stale with this report's own commit.
+
+### Second review
+
+No correctness or security issues in the round-1 fixes: CI confirmed the identity check (`the DSN reaches the same server as …`), the TCP health check and the digest pull, and a failed login does not echo the password into the output. Two corrections: the local-rehearsal instructions still used the image by tag alone, so a local run could drift from CI's digest-pinned image — now pinned in both places; and this report's evidence cited runs from before the fixes — refreshed to run 34460812452 on `8e31e5a`.
 
 ## Open questions / follow-ups
 

@@ -5,7 +5,7 @@
 # locally with the same image:
 #
 #   docker run -d --name finai-pg -e POSTGRES_PASSWORD=postgres -p 55432:5432 \
-#     ghcr.io/pgmq/pg17-pgmq:v1.5.1
+#     ghcr.io/pgmq/pg17-pgmq:v1.5.1@sha256:e6f893a793751ed30c89f5f88e95aa52b77c1a03440b7d118a996866489ac0c6
 #   DATABASE_URL=postgresql://postgres:postgres@localhost:55432/postgres \
 #     PG_CONTAINER=finai-pg PYTHON=.venv/bin/python scripts/check_migrations.sh
 #   docker rm -f finai-pg

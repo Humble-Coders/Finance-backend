@@ -19,7 +19,11 @@ from app.models.platform import (
     FeatureAvailability,
     SubscriptionEntitlement,
 )
-from app.services.capabilities import UNKNOWN_REGION_CURRENCY, resolve
+from app.services.capabilities import (
+    UNKNOWN_REGION_CURRENCY,
+    _plan_for,
+    resolve,
+)
 from tests.conftest import requires_db
 
 pytestmark = [
@@ -361,3 +365,40 @@ class TestScopeUniqueness:
 
         result = await resolve(db_session, household)
         assert result.features[key].enabled is False
+
+
+class TestOneActiveEntitlement:
+    """A household's plan must not depend on insertion order.
+
+    Regression for d47f2b91c6ae. The model docstring always claimed one active
+    row per household, but ix_entitlement_household_active is a plain lookup
+    index — two active rows were accepted. _plan_for tie-breaks on
+    created_at.desc(), which cannot discriminate between them: created_at
+    defaults to now(), and Postgres now() is transaction start time, so rows
+    written in one transaction carry identical timestamps. The plan was decided
+    by whichever row happened to come back first.
+    """
+
+    async def test_a_second_active_row_is_rejected(self, db_session):
+        household = await _household(db_session, "CA")
+        await _entitle(db_session, household, PlanTier.personal)
+
+        with pytest.raises(IntegrityError):
+            async with db_session.begin_nested():
+                await _entitle(db_session, household, PlanTier.family)
+
+    async def test_history_may_keep_many_inactive_rows(self, db_session):
+        """The index is partial for this reason — superseded rows accumulate."""
+        household = await _household(db_session, "CA")
+        for plan in (PlanTier.free, PlanTier.personal, PlanTier.family):
+            db_session.add(
+                SubscriptionEntitlement(
+                    household_id=household.id, plan=plan, is_active=False
+                )
+            )
+        await db_session.flush()
+        await _entitle(db_session, household, PlanTier.personal)
+
+        # Three inactive plus one active resolve unambiguously.
+        assert (await resolve(db_session, household)).features is not None
+        assert await _plan_for(db_session, household) == PlanTier.personal

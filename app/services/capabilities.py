@@ -128,7 +128,15 @@ async def _plan_for(session: AsyncSession, household: Household) -> PlanTier:
             SubscriptionEntitlement.household_id == household.id,
             SubscriptionEntitlement.is_active.is_(True),
         )
-        .order_by(SubscriptionEntitlement.created_at.desc())
+        # uq_entitlement_one_active means at most one row comes back, so this
+        # sort should never decide anything. It is here as a backstop and is
+        # tie-broken on id, because created_at alone cannot: it defaults to
+        # now(), and Postgres now() is transaction start time, so rows written
+        # together carry identical timestamps and the order would be arbitrary.
+        .order_by(
+            SubscriptionEntitlement.created_at.desc(),
+            SubscriptionEntitlement.id,
+        )
     )
     entitlement = result.scalars().first()
     return entitlement.plan if entitlement else PlanTier.free

@@ -45,13 +45,25 @@ __all__ = [
 class SubscriptionEntitlement(UUIDMixin, TimestampMixin, Base):
     """What a household is currently entitled to.
 
-    One active row per household; history is kept by leaving expired rows in
-    place rather than updating them.
+    One active row per household — enforced by `uq_entitlement_one_active`, not
+    merely intended. History is kept by leaving superseded rows in place with
+    `is_active` false rather than deleting them, so many inactive rows may share
+    a household and the unique index is partial.
     """
 
     __tablename__ = "subscription_entitlement"
     __table_args__ = (
         Index("ix_entitlement_household_active", "household_id", "is_active"),
+        # Without this the "one active row" above was a comment rather than a
+        # rule, and _plan_for's created_at tie-break could not settle it:
+        # created_at defaults to now(), which in Postgres is transaction start
+        # time, so rows written together are indistinguishable (d47f2b91c6ae).
+        Index(
+            "uq_entitlement_one_active",
+            "household_id",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
     )
 
     household_id: Mapped[uuid.UUID] = mapped_column(

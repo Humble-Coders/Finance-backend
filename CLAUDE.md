@@ -105,6 +105,11 @@ Python 3.11+ · FastAPI · SQLAlchemy 2 (async) · Alembic · Supabase Postgres 
   negatives, and precision edges. These are the highest-value tests here.
 - `/healthz` must not touch the database (a DB blip would cycle the service);
   `/readyz` may.
+- Migrations must apply, reverse and re-apply cleanly. CI's `database` job runs
+  `scripts/check_migrations.sh` against Postgres 17 + pgmq, then the database tests.
+  To rehearse locally see the script header. It drops every table and a developer
+  `.env` points at production, so it refuses unless the DSN names localhost *and*
+  reaches the same server as the container it inspects.
 
 ## Workflow
 

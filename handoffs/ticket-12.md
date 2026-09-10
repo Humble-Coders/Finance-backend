@@ -1,7 +1,7 @@
 # Handoff — ticket #12
 
 **Ticket:** [#12 — \[M1\] Back /capabilities with the database](https://github.com/Humble-Coders/Finance-backend/issues/12)
-**Branch:** `ticket-12-capabilities-from-database` · **Base:** `main` · 6 files, +661 / −50
+**Branch:** `ticket-12-capabilities-from-database` · **Base:** `main` · 9 files
 
 ## Summary
 
@@ -9,7 +9,8 @@
 
 Country packs, feature availability and plan entitlements all compose in **one resolver**, per PRD §4.6. Adding a market is now an `INSERT`, proven by a test that inserts a second country pack and resolves against it with no code change.
 
-197 tests pass; **123 need no database** and run in ~0.5s.
+206 tests; **123 need no database** and run in ~0.5s. The other 83 need one — see
+the note on CI below.
 
 ## Files changed
 
@@ -19,7 +20,7 @@ Country packs, feature availability and plan entitlements all compose in **one r
 | `app/schemas/capabilities.py` *(new)* | Response models moved out of the route, matching `schemas/identity.py` |
 | `app/api/capabilities.py` | Rewritten thin: `current_household` → `resolve` → response |
 | `alembic/versions/b56e4dda349a_…` *(new)* | Seeds the six feature rows the clients know about |
-| `tests/test_capabilities.py`, `tests/test_capabilities_endpoint.py` *(new)* | 22 tests: precedence, plan gating, unknown region, enforcement, new-market-is-data-only |
+| `tests/test_capabilities.py`, `tests/test_capabilities_endpoint.py` *(new)* | precedence, plan gating, unknown region, unlaunched markets, scope uniqueness, enforcement, new-market-is-data-only |
 
 ## How to test
 
@@ -28,7 +29,8 @@ git checkout ticket-12-capabilities-from-database
 source .venv/bin/activate && alembic upgrade head && pytest -q
 ```
 
-Expect **197 passed** with `.env`; **123 passed, 74 skipped** without one.
+Expect **123 passed** without `.env`. The database half needs a stable connection —
+see the CI note.
 
 By hand:
 
@@ -131,3 +133,48 @@ but database-backed behaviour can go green in CI while broken, and the only thin
 standing between that and `main` is whether someone remembered to run the slow
 suite by hand. Worth pairing with branch protection, which is still unconfigured
 — CI is advisory on this repo today.
+
+## Review round 2 — fixes applied
+
+Round 1's `is_launched` fix over-corrected, and reintroduced the defect it was
+fixing. Both addressed here.
+
+**1. An unlaunched market now keeps its own currency and locale.**
+
+Round 1 gated the whole pack on `is_launched`, so a German user with a staged
+`DE` pack got `currency: "CAD"`, `locale: "en-CA"`. A pack holds two different
+kinds of field:
+
+| field | kind | gated? |
+|---|---|---|
+| `currency`, `locale` | facts about the market, already configured | no |
+| `tax_accounts`, `disclaimer_version` | content we publish | **yes** |
+
+`is_launched` exists to gate the second kind — `disclaimer_version` points at
+legal copy that must be approved before anyone sees it (Appendix A). Gating all
+four did not leave the currency *unknown*, it made it *wrong*, and
+`capabilities.currency` is the only currency any client ever receives
+(`Household` has no currency column), so every amount in the app would have been
+misdenominated. Users in unlaunched markets are real: PRD §4.6 hard-blocks
+signup on nothing — features are gated, account creation is not.
+
+Now split: `_content()` returns `{}` until launch; currency and locale come from
+the pack either way. `test_it_still_serves_the_right_currency` pins it.
+
+**2. The comment on `UNKNOWN_REGION_CURRENCY` was false again.**
+
+It said "used only while the region is genuinely unknown" while round 1's fix
+had started serving it for markets whose region we knew completely. That is the
+same failure mode as both round 1 findings — a comment asserting behaviour the
+code does not have is *why* nobody re-checks it. Rewritten to state the two
+cases it actually covers, and to say explicitly that a staged pack is not one.
+
+**3. Feature rows deliberately ignore launch state.** `resolve()` passes the
+country code, not the pack, to `_feature_rows`, so a market-specific feature
+applies in a staged market — which is where you would switch one on to test it.
+Previously undocumented; now commented and covered by
+`test_a_market_specific_feature_still_applies`.
+
+**4. `CLAUDE.md` pointed the resolver at `app/api/capabilities.py`**, which this
+ticket reduced to a thin route. Corrected, and the precedence rule and the
+`is_launched` semantics added so neither has to be rediscovered from the code.

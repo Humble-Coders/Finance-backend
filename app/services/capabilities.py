@@ -39,10 +39,17 @@ __all__ = [
     "require_feature",
 ]
 
-# Used only while the region is genuinely unknown — the window between a
-# Google/Apple sign-in and the phone step. Deliberately a documented default
-# rather than a guess: guessing a country shows someone the wrong tax accounts
-# and the wrong disclaimer (PRD §4.6).
+# Used when no country pack is available to say otherwise, which is two cases:
+# the region is still NULL (the window between a Google/Apple sign-in and the
+# phone step), or we hold a country code we have never configured. In both we
+# genuinely do not know the currency.
+#
+# A pack that exists but is not launched is NOT one of these — its currency and
+# locale are configured and correct, so they are served from the pack. Only the
+# publishable content is withheld. See `_content`.
+#
+# Deliberately a documented default rather than a guess: guessing a country
+# shows someone the wrong tax accounts and the wrong disclaimer (PRD §4.6).
 UNKNOWN_REGION_CURRENCY = "CAD"
 UNKNOWN_REGION_LOCALE = "en-CA"
 
@@ -127,6 +134,24 @@ async def _plan_for(session: AsyncSession, household: Household) -> PlanTier:
     return entitlement.plan if entitlement else PlanTier.free
 
 
+def _content(pack: CountryPack) -> dict[str, object]:
+    """The publishable half of a country pack — empty until the market opens.
+
+    `is_launched` gates content, not the whole pack. `disclaimer_version` points
+    at legal copy that has to be approved before anyone sees it, and tax account
+    names are educational content for a market we have not opened; shipping
+    either from a staged pack is the risk the flag exists to prevent
+    (Appendix A). Currency and locale are facts rather than published content,
+    so they are served regardless — see `resolve`.
+    """
+    if not pack.is_launched:
+        return {}
+    return {
+        "tax_accounts": pack.tax_accounts or [],
+        "disclaimer_version": pack.disclaimer_version,
+    }
+
+
 async def resolve(session: AsyncSession, household: Household) -> Capabilities:
     """The resolved payload for one household.
 
@@ -140,23 +165,22 @@ async def resolve(session: AsyncSession, household: Household) -> Capabilities:
     if household.country_code:
         result = await session.execute(
             select(CountryPack).where(
-                CountryPack.country_code == household.country_code,
-                # A pack can exist before its market opens — that is what
-                # is_launched is for. Staging one must not start serving its
-                # content: disclaimer_version points at legal copy that has not
-                # been approved yet, and shipping unapproved disclaimer text is
-                # the exact risk the flag guards (Appendix A).
-                CountryPack.is_launched.is_(True),
+                CountryPack.country_code == household.country_code
             )
         )
         pack = result.scalar_one_or_none()
 
+    # Note the country code, not the pack, decides which feature rows apply — so
+    # a market-specific feature row takes effect in a market that is configured
+    # but not yet launched. That is intended: features and packs are separate
+    # axes, and a staged market is exactly where you would switch one on to test
+    # it. Covered by TestUnlaunchedMarket.
     features = await _feature_rows(session, household.country_code, plan)
 
     if pack is None:
-        # No launched market — the region is unknown (NULL), unconfigured (no
-        # pack row), or configured but not yet launched. All three mean the same
-        # thing to a client: no market content to render.
+        # No pack at all — the region is either unknown (NULL, the window before
+        # the phone step) or a country code we have never configured. Either way
+        # there is no currency to serve but the documented default.
         #
         # Deliberately does NOT force features off. An earlier version did, and
         # it disabled document_upload for every user: a household's region is
@@ -178,15 +202,17 @@ async def resolve(session: AsyncSession, household: Household) -> Capabilities:
             ),
         )
 
+    # Currency and locale come from the pack whether or not the market is open:
+    # they are facts about it, and they are already configured. Substituting the
+    # fallback here would not leave the currency unknown, it would make it wrong
+    # — a German user's spending rendered in Canadian dollars — and this is the
+    # only currency any client ever receives.
     return Capabilities(
         region=pack.country_code,
         currency=pack.currency,
         locale=pack.locale,
         features=features,
-        content={
-            "tax_accounts": pack.tax_accounts or [],
-            "disclaimer_version": pack.disclaimer_version,
-        },
+        content=_content(pack),
     )
 
 

@@ -135,8 +135,22 @@ class TestUnknownRegion:
         assert result.content == {}
 
 
+async def _staged_pack(session, country="DE") -> CountryPack:
+    pack = CountryPack(
+        country_code=country,
+        currency="EUR",
+        locale="de-DE",
+        tax_accounts=["Riester"],
+        disclaimer_version="de-v1",
+        is_launched=False,
+    )
+    session.add(pack)
+    await session.flush()
+    return pack
+
+
 class TestUnlaunchedMarket:
-    """A pack can exist before its market opens; is_launched decides.
+    """A pack can exist before its market opens; is_launched gates its content.
 
     Previously untested — the test that looked like this one used a country with
     no pack row, which is a different case. A staged pack was served as fully
@@ -144,46 +158,62 @@ class TestUnlaunchedMarket:
     """
 
     async def test_a_staged_market_serves_no_content(self, db_session):
-        db_session.add(
-            CountryPack(
-                country_code="DE",
-                currency="EUR",
-                locale="de-DE",
-                tax_accounts=["Riester"],
-                disclaimer_version="de-v1",
-                is_launched=False,
-            )
-        )
-        await db_session.flush()
+        """The disclaimer is the point: unapproved legal copy must not ship."""
+        await _staged_pack(db_session)
+        household = await _household(db_session, "DE")
+
+        result = await resolve(db_session, household)
+
+        assert result.region == "DE"
+        assert result.content == {}
+
+    async def test_it_still_serves_the_right_currency(self, db_session):
+        """Withholding these would not leave the currency unknown — it would
+        make it wrong. The pack already says EUR, and this is the only currency
+        any client ever receives, so a fallback here misdenominates every amount
+        in the app.
+        """
+        await _staged_pack(db_session)
+        household = await _household(db_session, "DE")
+
+        result = await resolve(db_session, household)
+
+        assert result.currency == "EUR"
+        assert result.locale == "de-DE"
+        assert result.currency != UNKNOWN_REGION_CURRENCY
+
+    async def test_a_market_specific_feature_still_applies(self, db_session):
+        """Features and packs are separate axes.
+
+        A staged market is exactly where you would switch a feature on to test
+        it, so the country code drives feature rows regardless of launch state.
+        """
+        key = f"staged_{uuid.uuid4().hex[:8]}"
+        await _staged_pack(db_session)
+        await _feature(db_session, key, enabled=False, reason="coming_soon")
+        await _feature(db_session, key, country="DE", enabled=True)
 
         household = await _household(db_session, "DE")
         result = await resolve(db_session, household)
 
-        assert result.region == "DE"
-        # The disclaimer is the point: unapproved legal copy must not ship.
-        assert result.content == {}
-        assert result.currency == UNKNOWN_REGION_CURRENCY
+        assert result.features[key].enabled is True
 
     async def test_launching_it_is_one_column(self, db_session):
-        """Nothing else changes — flipping the flag opens the market."""
-        pack = CountryPack(
-            country_code="DE",
-            currency="EUR",
-            locale="de-DE",
-            tax_accounts=["Riester"],
-            disclaimer_version="de-v1",
-            is_launched=False,
-        )
-        db_session.add(pack)
+        """Flipping the flag opens the market; nothing else changes."""
+        pack = await _staged_pack(db_session)
         household = await _household(db_session, "DE")
-        assert (await resolve(db_session, household)).content == {}
+        before = await resolve(db_session, household)
+        assert before.content == {}
 
         pack.is_launched = True
         await db_session.flush()
 
-        result = await resolve(db_session, household)
-        assert result.currency == "EUR"
-        assert result.content["disclaimer_version"] == "de-v1"
+        after = await resolve(db_session, household)
+        assert after.content["disclaimer_version"] == "de-v1"
+        assert after.content["tax_accounts"] == ["Riester"]
+        # Unchanged by launching — they were already correct.
+        assert after.currency == before.currency == "EUR"
+        assert after.locale == before.locale == "de-DE"
 
 
 class TestPrecedence:

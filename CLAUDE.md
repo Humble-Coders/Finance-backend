@@ -53,12 +53,18 @@ Python 3.11+ · FastAPI · SQLAlchemy 2 (async) · Alembic · Supabase Postgres 
   service is the only database caller.
 
 ### Region & entitlements
-- One resolver composes plan + region + rollout flags (`app/api/capabilities.py`).
-  Not three parallel systems.
+- One resolver composes plan + region + rollout flags (`app/services/capabilities.py`;
+  `app/api/capabilities.py` is a thin route over it). Not three parallel systems.
 - The capabilities payload controls what clients **show**; every gated endpoint must
-  independently re-check what is **allowed**. A hidden feature is not a secured feature.
+  independently re-check what is **allowed** via `require_feature`. A hidden feature is
+  not a secured feature.
 - Country-specific data (tax accounts, disclaimers, pricing) lives in database country
   packs — adding a market is a data operation, not a deploy.
+- `country_pack.is_launched` gates a pack's **content**, not the pack. A staged market
+  still serves its own currency and locale; only the publishable content waits.
+- Feature precedence is most-specific-wins: `country+plan` > `country` > `plan` >
+  global. Country outranks plan, so a paid plan cannot unlock what a market does not
+  offer.
 
 ### Async work
 - Anything long-running, retry-heavy, or LLM-dependent belongs in the **worker**, not a

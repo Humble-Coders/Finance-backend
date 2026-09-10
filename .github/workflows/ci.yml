@@ -63,17 +63,21 @@ jobs:
     services:
       postgres:
         # Matches production: Postgres 17 with pgmq 1.5.1 (checked 2026-09-10).
-        # Pinned rather than :latest so CI cannot drift away from production
-        # unnoticed — bump it when production is upgraded. No pgvector: no
+        # Pinned by digest as well as tag: a tag can be re-pointed at different
+        # content, a digest cannot, so CI cannot drift away from production
+        # unnoticed. Bump both when production is upgraded. No pgvector: no
         # migration uses it yet (production has 0.8.2); the first that does
         # needs an image that provides it.
-        image: ghcr.io/pgmq/pg17-pgmq:v1.5.1
+        image: ghcr.io/pgmq/pg17-pgmq:v1.5.1@sha256:e6f893a793751ed30c89f5f88e95aa52b77c1a03440b7d118a996866489ac0c6
         env:
           POSTGRES_PASSWORD: postgres
         ports:
           - 5432:5432
+        # Over TCP, not the socket. During first boot the image runs a
+        # temporary socket-only server (listen_addresses='') for initdb, then
+        # restarts; a socket check can report healthy before that restart.
         options: >-
-          --health-cmd "pg_isready -U postgres"
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 2s
           --health-timeout 5s
           --health-retries 30

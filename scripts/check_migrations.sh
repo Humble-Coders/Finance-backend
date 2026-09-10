@@ -11,9 +11,15 @@
 #   docker rm -f finai-pg
 #
 # DESTRUCTIVE: it downgrades to base, which drops every table. A developer's
-# .env points at PRODUCTION, so this refuses to run unless both the runtime and
-# the migration DSN — as the app's own settings resolve them, .env included —
-# point at localhost.
+# .env points at PRODUCTION, so before touching anything it checks, through the
+# app's own settings (.env included), that:
+#   - both the runtime and the migration DSN name localhost, and neither
+#     overrides that with a host= / hostaddr= query parameter;
+#   - both reach the SAME server as PG_CONTAINER, compared by Postgres's system
+#     identifier. The checks below run inside PG_CONTAINER while Alembic
+#     connects through the DSN; without this they could inspect one database
+#     while migrating another, and a port-forward to production on localhost
+#     would pass a hostname check.
 #
 # What it proves is migration CORRECTNESS on Postgres 17. It does not prove the
 # migrations survive Supabase's transaction pooler; see the database job in
@@ -39,28 +45,63 @@ fail() {
   exit 1
 }
 
-step "Refusing any database that is not on localhost"
+step "Refusing anything but the throwaway database in PG_CONTAINER"
 # Resolved through Settings rather than by parsing the variable: the question
-# is which database the app and Alembic will actually connect to.
+# is which database the app and Alembic will actually connect to. And it
+# connects, rather than trusting the hostname — see the header.
 target="$("$PYTHON" - <<'PY'
+import asyncio
 import sys
 
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 
+LOCAL = {"localhost", "127.0.0.1", "::1"}
+
+
+async def system_identifier(dsn: str) -> int:
+    # The same URL-to-connection path Alembic takes, so a query-string host is
+    # followed here exactly as it would be there.
+    engine = create_async_engine(
+        dsn,
+        poolclass=NullPool,
+        connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},
+    )
+    try:
+        async with engine.connect() as conn:
+            result = await conn.execute(text("SELECT system_identifier FROM pg_control_system()"))
+            return result.scalar_one()
+    finally:
+        await engine.dispose()
+
+
 settings = get_settings()
-local = {"localhost", "127.0.0.1", "::1"}
+identifiers = set()
 for label, dsn in (("runtime", settings.database_dsn), ("migration", settings.migration_dsn)):
-    host = make_url(dsn).host
-    if host not in local:
-        sys.exit(f"{label} DSN points at {host!r}, not localhost — refusing to drop its tables")
+    url = make_url(dsn)
+    overrides = sorted({"host", "hostaddr"} & set(url.query))
+    if overrides:
+        sys.exit(
+            f"{label} DSN sets {', '.join(overrides)} in its query string, which overrides "
+            "the host it names — refusing"
+        )
+    if url.host not in LOCAL:
+        sys.exit(f"{label} DSN points at {url.host!r}, not localhost — refusing to drop its tables")
+    try:
+        identifiers.add(asyncio.run(system_identifier(dsn)))
+    except Exception as exc:
+        sys.exit(f"cannot query the server behind the {label} DSN: {exc}")
+if len(identifiers) != 1:
+    sys.exit("the runtime and migration DSNs reach different servers — refusing")
 url = make_url(settings.migration_dsn)
-print(url.username, url.database)
+print(url.username, url.database, identifiers.pop())
 PY
 )"
-read -r DB_USER DB_NAME <<<"$target"
-echo "ok: runtime and migration DSNs are both local (user=$DB_USER, db=$DB_NAME)"
+read -r DB_USER DB_NAME DSN_SERVER <<<"$target"
 
 # No -i: psql -c never reads stdin, and an attached stdin would swallow
 # whatever the caller is feeding this script — a heredoc-driven run once lost
@@ -68,6 +109,15 @@ echo "ok: runtime and migration DSNs are both local (user=$DB_USER, db=$DB_NAME)
 psql_c() {
   docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAX -v ON_ERROR_STOP=1 -c "$1"
 }
+
+# Captured by assignment, never tested inline: a failing $(...) inside [ ]
+# does not trip set -e, so an unreachable container would read as a match or
+# as "empty". An assignment fails closed.
+container_server="$(psql_c "SELECT system_identifier FROM pg_control_system()")" ||
+  fail "cannot query PG_CONTAINER ($PG_CONTAINER) — is it running?"
+[ "$container_server" = "$DSN_SERVER" ] ||
+  fail "the DSN reaches server $DSN_SERVER but PG_CONTAINER ($PG_CONTAINER) is server $container_server — the checks would inspect one database while Alembic migrates another"
+echo "ok: localhost, no host override, and the DSN reaches the same server as $PG_CONTAINER ($DSN_SERVER)"
 
 # pg_dump runs inside the container, so the runner's own client version cannot
 # disagree with the server. Patched pg_dump (17.6+) brackets its output with
@@ -101,13 +151,15 @@ SELECT kind || ' ' || name FROM (
 ) leftovers ORDER BY 1"
 
 step "Starting from an empty database"
-[ -z "$(psql_c "$LEFTOVERS_SQL")" ] || fail "the database is not empty — start from a fresh container"
+initial="$(psql_c "$LEFTOVERS_SQL")" || fail "cannot inspect the database in $PG_CONTAINER"
+[ -z "$initial" ] || fail "the database is not empty — start from a fresh container:
+$initial"
 
 step "Enabling pgmq, as production has it"
 # The image makes pgmq available; this makes it installed. The queue migration
 # checks pg_extension, so without this its real path would be skipped here.
 psql_c "CREATE EXTENSION IF NOT EXISTS pgmq" >/dev/null ||
-  fail "this image does not provide pgmq — the queue migration's real path would go untested"
+  fail "could not enable pgmq (psql's error is above) — without it the queue migration's real path goes untested"
 
 step "Exactly one migration head"
 heads="$("${ALEMBIC[@]}" heads 2>&1)"

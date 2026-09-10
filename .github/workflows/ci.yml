@@ -6,9 +6,14 @@ on:
   push:
     branches: [main]
 
-# A newer push to the same branch makes the older run irrelevant.
+# On a pull request, a newer push makes the older run irrelevant — cancel it. A
+# push to main gets a group of its own (its commit), so no merge ever cancels
+# another and every commit on main is verified. (cancel-in-progress: false would
+# not be enough: by default GitHub keeps one pending run per group and cancels
+# the older one when another arrives; queue: max would hold them, but GitHub
+# rejects it alongside cancel-in-progress: true, which PRs need.)
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 
 jobs:

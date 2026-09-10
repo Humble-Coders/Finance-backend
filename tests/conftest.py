@@ -1,12 +1,14 @@
 """Fixtures for database-backed tests.
 
 Every test runs inside a transaction that is **always rolled back**, so the
-suite can be pointed at a real database — including production, which is where
-it has to run until a staging environment exists — without leaving anything
-behind.
+suite can be pointed at any database without leaving anything behind — CI's
+throwaway container (the `database` job, #15), or production, which is still
+where a developer's .env points.
 """
 
 from __future__ import annotations
+
+import os
 
 import pytest
 import pytest_asyncio
@@ -32,6 +34,22 @@ requires_db = pytest.mark.skipif(
     not _database_is_configured(),
     reason="no database configured (set DATABASE_URL in .env or the environment)",
 )
+
+
+def pytest_configure(config):
+    """Turn a silent skip into a hard failure wherever a database is expected.
+
+    CI's `database` job sets REQUIRE_DB. Without this, a missing or malformed
+    setting there would make every database test skip — and a fully skipped
+    suite still reports green, which is how these tests once went unrun without
+    anyone noticing.
+    """
+    if os.environ.get("REQUIRE_DB") and not _database_is_configured():
+        raise pytest.UsageError(
+            "REQUIRE_DB is set but no database is configured — every database "
+            "test would skip. Set DATABASE_URL (and SUPABASE_URL, which "
+            "Settings also requires)."
+        )
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")

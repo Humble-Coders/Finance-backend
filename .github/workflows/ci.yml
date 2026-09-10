@@ -40,6 +40,69 @@ jobs:
 
       - name: Test
         # No secrets and no database. The engine is created lazily, so importing
-        # the ORM models needs no configuration; the 13 tests that do need a
-        # database skip themselves. See tests/conftest.py.
+        # the ORM models needs no configuration; the database tests skip
+        # themselves here and run in the `database` job below.
         run: pytest -q
+
+  database:
+    # Migrations and database tests against a throwaway Postgres (ticket #15).
+    #
+    # There is no staging environment, so without this job production is the
+    # first place any migration ever runs.
+    #
+    # What a green run proves: every migration applies to an empty database,
+    # every downgrade() reverses cleanly, and the round trip reproduces the
+    # schema exactly. What it does NOT prove: that the migrations survive
+    # Supabase's transaction pooler. A plain container has no pooler, and
+    # production needed prepared_statement_name_func before it worked at all.
+    # /readyz on the deployed service remains the check for that. Do not read a
+    # green run here as evidence about pooler behaviour.
+    runs-on: ubuntu-latest
+    # A dead database connection once hung a local run for hours. Fail instead.
+    timeout-minutes: 10
+    services:
+      postgres:
+        # Matches production: Postgres 17 with pgmq 1.5.1 (checked 2026-09-10).
+        # Pinned rather than :latest so CI cannot drift away from production
+        # unnoticed — bump it when production is upgraded. No pgvector: no
+        # migration uses it yet (production has 0.8.2); the first that does
+        # needs an image that provides it.
+        image: ghcr.io/pgmq/pg17-pgmq:v1.5.1
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      # Local to the runner and gone when the job ends — not a secret.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      # Required by Settings, never contacted: the tests override current_user.
+      # .invalid is a reserved TLD, so it cannot resolve even by accident.
+      SUPABASE_URL: https://ci.invalid
+      # pg_dump and psql run inside the container; see scripts/check_migrations.sh.
+      PG_CONTAINER: ${{ job.services.postgres.id }}
+      # A missing database must fail this job, not skip every test in it.
+      REQUIRE_DB: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Migrations apply, reverse and re-apply
+        run: scripts/check_migrations.sh
+
+      - name: Database tests
+        # Runs against the schema the previous step left at head.
+        run: pytest -q -m integration

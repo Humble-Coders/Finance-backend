@@ -64,4 +64,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(INDEX, table_name="subscription_entitlement")
+    op.drop_index("uq_does_not_exist", table_name="subscription_entitlement")

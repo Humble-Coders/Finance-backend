@@ -12,11 +12,15 @@ from app.models.enums import (
     DocumentStatus,
     GoalHorizon,
     PlanTier,
+    PolicyKind,
+    RegionSource,
     TransactionDirection,
     TransactionSource,
 )
 from app.models.identity import (
+    ConsentEvent,
     Household,
+    HouseholdRegionChange,
     User,
     UserIdentity,
     UserPhoneChange,
@@ -35,6 +39,8 @@ __all__ = [
     "User",
     "UserIdentity",
     "UserPhoneChange",
+    "HouseholdRegionChange",
+    "ConsentEvent",
     "Account",
     "Transaction",
     "DocumentUpload",
@@ -55,6 +61,8 @@ __all__ = [
     "DocumentStatus",
     "GoalHorizon",
     "PlanTier",
+    "PolicyKind",
+    "RegionSource",
     "TransactionDirection",
     "TransactionSource",
 ]

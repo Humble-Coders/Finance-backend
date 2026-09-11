@@ -36,12 +36,13 @@ def authenticate_as(*, sub=None, provider="phone", email=None, phone=None) -> No
 class TestEndpoint:
     async def test_a_phone_user_gets_their_region(self, api_client):
         authenticate_as(phone="+14165570001")
-        # /me establishes the household; region stays NULL until 2.1 derives it.
+        # /me establishes the household, and derives its region from the phone (#24).
         await api_client.get("/me")
 
         response = await api_client.get("/capabilities")
         assert response.status_code == 200
         body = response.json()
+        assert body["region"] == "CA"
         assert "features" in body and body["features"]
 
     async def test_an_unknown_region_still_returns_200(self, api_client):
@@ -53,7 +54,7 @@ class TestEndpoint:
         assert response.status_code == 200
         body = response.json()
         assert body["region"] is None
-        assert body["onboarding_required"] == ["phone"]
+        assert body["onboarding_required"] == ["phone", "consent"]
 
     async def test_features_are_never_absent(self, api_client):
         """A client cannot tell "feature missing" from "feature off"."""

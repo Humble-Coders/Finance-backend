@@ -11,13 +11,20 @@ from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
-from app.models.base import TimestampMixin, UUIDMixin
-from app.models.enums import AuthProvider
+from app.models.base import HouseholdScopedMixin, TimestampMixin, UUIDMixin
+from app.models.enums import AuthProvider, RegionSource
 
 if TYPE_CHECKING:
     pass
 
-__all__ = ["Household", "User", "UserIdentity", "UserPhoneChange"]
+__all__ = [
+    "ConsentEvent",
+    "Household",
+    "HouseholdRegionChange",
+    "User",
+    "UserIdentity",
+    "UserPhoneChange",
+]
 
 
 class Household(UUIDMixin, TimestampMixin, Base):
@@ -117,3 +124,56 @@ class UserPhoneChange(UUIDMixin, TimestampMixin, Base):
     # NULL for the first number a user ever sets.
     previous_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     new_phone: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class HouseholdRegionChange(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
+    """Audit trail for a household's region (PRD §4.6: region changes are logged).
+
+    The region decides currency, content and which features exist, so every
+    change — derived from the phone or chosen by the user — leaves a row.
+    Append-only: nothing updates or deletes these.
+    """
+
+    __tablename__ = "household_region_change"
+
+    # NULL for the first region a household is ever given.
+    previous_country_code: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    new_country_code: Mapped[str] = mapped_column(String(2), nullable=False)
+    source: Mapped[RegionSource] = mapped_column(
+        SAEnum(RegionSource, name="region_source"), nullable=False
+    )
+    # SET NULL rather than CASCADE: the household's history outlives the member
+    # who made the change (a Family Plan household keeps its log).
+    changed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
+class ConsentEvent(UUIDMixin, TimestampMixin, Base):
+    """A user agreed to a specific version of the account terms (PRD Appendix A.5).
+
+    Consent must be provable after the text changes, so each row names the exact
+    `disclaimer_version` agreed to, and that row cannot be deleted while
+    consents reference it (RESTRICT).
+
+    **Append-only in code.** Nothing updates or deletes these. There is no
+    database trigger enforcing it, deliberately: account deletion (Appendix A.5)
+    must be able to remove a user's rows, and CASCADE from `user` does that.
+    """
+
+    __tablename__ = "consent_event"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    disclaimer_version_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("disclaimer_version.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )

@@ -68,9 +68,15 @@ class TestFirstSignIn:
         assert resolved.created is True
         assert resolved.user.household_id == resolved.household.id
 
-    async def test_country_code_is_left_null(self, db_session):
-        """Never guessed — the region comes from the phone in ticket 2.1."""
+    async def test_the_region_comes_from_the_phone(self, db_session):
+        """Ticket 2.1 (#24): derived from the verified number, never guessed."""
         resolved = await resolve_user(db_session, caller(phone="+14165550002"))
+        assert resolved.household.country_code == "CA"
+
+    async def test_without_a_phone_the_region_is_never_guessed(self, db_session):
+        resolved = await resolve_user(
+            db_session, caller(provider="google", email="a@example.com")
+        )
         assert resolved.household.country_code is None
 
     async def test_a_google_user_without_a_phone_still_gets_a_household(

@@ -13,18 +13,24 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import current_household
+from app.api.deps import current_identity
 from app.db import get_session
-from app.models.identity import Household
 from app.schemas.capabilities import Capabilities
 from app.services.capabilities import resolve
+from app.services.identity import ResolvedIdentity
+from app.services.onboarding import onboarding_state
 
 router = APIRouter(tags=["capabilities"])
 
 
 @router.get("/capabilities", response_model=Capabilities)
 async def get_capabilities(
-    household: Household = Depends(current_household),
+    identity: ResolvedIdentity = Depends(current_identity),
     session: AsyncSession = Depends(get_session),
 ) -> Capabilities:
-    return await resolve(session, household)
+    payload = await resolve(session, identity.household)
+    # The same rule /me uses (app/services/onboarding.py). The two endpoints once
+    # decided separately and disagreed; they must not be able to again.
+    state = await onboarding_state(session, identity.user, identity.household)
+    payload.onboarding_required = state.steps
+    return payload

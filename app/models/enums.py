@@ -17,6 +17,8 @@ __all__ = [
     "AuthProvider",
     "GoalHorizon",
     "PlanTier",
+    "PolicyKind",
+    "RegionSource",
 ]
 
 
@@ -75,3 +77,22 @@ class PlanTier(enum.Enum):
     free = "free"
     personal = "personal"
     family = "family"
+
+
+class RegionSource(enum.Enum):
+    """What set a household's region — recorded in its audit trail."""
+
+    phone = "phone"  # derived from the verified phone number
+    user = "user"  # the user chose it (onboarding or settings)
+
+
+class PolicyKind(enum.Enum):
+    """Which kind of legal copy a `disclaimer_version` row holds.
+
+    Consent is logged against the account terms; the regional disclaimer is what
+    a country pack's `disclaimer_version` points at. They version independently,
+    so one table needs to tell them apart.
+    """
+
+    account_terms = "account_terms"
+    regional_disclaimer = "regional_disclaimer"

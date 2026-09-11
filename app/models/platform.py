@@ -32,7 +32,7 @@ from app.models.base import (
     currency_check,
     money_currency,
 )
-from app.models.enums import PlanTier
+from app.models.enums import PlanTier, PolicyKind
 
 __all__ = [
     "SubscriptionEntitlement",
@@ -161,7 +161,11 @@ class DisclaimerVersion(UUIDMixin, TimestampMixin, Base):
     """Versioned legal copy.
 
     Consent is logged against a version (Appendix A), so the text a user agreed
-    to must remain retrievable after it changes.
+    to must remain retrievable after it changes. Change the text by adding a new
+    version, never by editing a row someone may already have agreed to.
+
+    `kind` separates the account terms (what signup consent is given to) from a
+    country's regional disclaimer (what a country pack points at).
     """
 
     __tablename__ = "disclaimer_version"
@@ -171,6 +175,9 @@ class DisclaimerVersion(UUIDMixin, TimestampMixin, Base):
 
     country_code: Mapped[str | None] = mapped_column(String(2), nullable=True)
     version: Mapped[str] = mapped_column(String(32), nullable=False)
+    kind: Mapped[PolicyKind] = mapped_column(
+        SAEnum(PolicyKind, name="policy_kind"), nullable=False
+    )
     body: Mapped[str] = mapped_column(Text, nullable=False)
     effective_from: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

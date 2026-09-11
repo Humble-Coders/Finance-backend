@@ -1,7 +1,7 @@
 # Handoff — ticket #24
 
 **Ticket:** [#24 — \[M2\] Resolve the household's region from the verified phone](https://github.com/Humble-Coders/Finance-backend/issues/24)
-**Branch:** `ticket-24-region-from-phone` · **Base:** `main` (`3ad842a`) · **Implementation:** `3b68f32` · 23 files
+**Branch:** `ticket-24-region-from-phone` · **Base:** `main` (`3ad842a`) · **Implementation:** `3b68f32` · **PR:** #27 · 23 files
 
 ## Summary
 
@@ -9,7 +9,7 @@ A household's region is now derived **server-side from the verified phone** with
 
 `/me` and `/capabilities` now read **one onboarding rule** — `phone`, then `region`, then `consent` — which ends the disagreement seen live in Humble-Coders/FinAI-Mobile-2026#6. **Signup consent** is recorded against a specific terms version (`consent_event`, `POST /me/consent`, `GET /legal/terms`). Migration `5b2e9f7c1d34` adds the tables, a `kind` column on `disclaimer_version`, and DRAFT seed rows that back the CA `ca-v1` disclaimer and `terms-v1`.
 
-Tests go from 208 to **255**, all passing against the CI Postgres image locally; the migration round-trips cleanly.
+Tests go from 208 to **259**, all passing against the CI Postgres image locally; the migration round-trips cleanly.
 
 ## Files changed
 
@@ -37,13 +37,13 @@ Tests go from 208 to **255**, all passing against the CI Postgres image locally;
 | `app/models/identity.py` | `HouseholdRegionChange` (household-scoped; `source` phone/user; `changed_by_user_id` SET NULL) and `ConsentEvent` (user CASCADE; `disclaimer_version` RESTRICT) |
 | `app/models/platform.py` | `DisclaimerVersion.kind` (`account_terms` / `regional_disclaimer`) |
 | `app/models/enums.py`, `app/models/__init__.py` | `RegionSource`, `PolicyKind`; exports |
-| `alembic/versions/5b2e9f7c1d34_region_resolution_and_consent.py` *(new)* | Both tables with indexes and RLS; `kind` added NOT NULL through a temporary default; two DRAFT seed rows with deterministic ids, `ON CONFLICT DO NOTHING`; downgrade reverses everything, enum types included |
+| `alembic/versions/5b2e9f7c1d34_region_resolution_and_consent.py` *(new)* | Both tables with indexes and RLS, and a unique `(user_id, disclaimer_version_id)` on `consent_event`; `kind` added NOT NULL through a temporary default; two DRAFT seed rows with deterministic ids, `ON CONFLICT DO NOTHING`; downgrade reverses everything, enum types included |
 
 ### Tests
 | File | Why |
 |---|---|
 | `tests/test_region.py` *(new)* | 25 unit tests: the `+1` matrix (CA, US, JM, PR) plus GB, IN, AU; the `+` optional; the Supabase test number; never-guess cases; `normalize_region` |
-| `tests/test_onboarding_endpoint.py` *(new)* | 16 integration tests, one or more per acceptance criterion |
+| `tests/test_onboarding_endpoint.py` *(new)* | 20 integration tests: one or more per acceptance criterion, plus the database refusing a duplicate consent and which terms version is in force |
 | `tests/test_identity_resolution.py` | A pre-#24 test asserted the region stays `NULL` for a phone sign-in; split into "the region comes from the phone" and "without a phone it is never guessed" |
 | `tests/test_me_endpoint.py`, `tests/test_capabilities_endpoint.py` | Onboarding assertions now include `consent`; a phone user's capabilities now carry `region: "CA"` |
 | `tests/test_capabilities.py` | Removed the resolver's onboarding test — the rule moved out of the resolver |
@@ -61,7 +61,7 @@ export L=postgresql://postgres:postgres@localhost:55432/postgres
 DATABASE_URL=$L MIGRATION_DATABASE_URL=$L SUPABASE_URL=http://localhost:54321 \
   PG_CONTAINER=finai-pg PYTHON=.venv/bin/python scripts/check_migrations.sh   # → "All migration checks passed"
 REQUIRE_DB=1 DATABASE_URL=$L MIGRATION_DATABASE_URL=$L SUPABASE_URL=http://localhost:54321 \
-  .venv/bin/pytest -q                                                          # → 255 passed
+  .venv/bin/pytest -q                                                          # → 259 passed
 .venv/bin/ruff check . && .venv/bin/ruff format --check .                      # → clean
 docker rm -f finai-pg
 ```
@@ -77,9 +77,9 @@ docker rm -f finai-pg
 | Every region change has a `household_region_change` row | ✅ Met | The derived change (`source = phone`, acting user recorded) and the override are both asserted; repeat calls log once |
 | `/me` and `/capabilities` return the same `onboarding_required` in every state | ✅ Met | `test_me_and_capabilities_agree_in_every_state` — no phone, phone without region, consent pending, complete |
 | A number that cannot be placed leaves the region NULL, reports `["region"]`, and the override completes onboarding | ✅ Met | `test_a_number_that_cannot_be_placed_asks_for_a_region` (`+800` freephone) — `["region", "consent"]`, then `["consent"]` after the override |
-| Consent recorded with its policy version, append-only, and `consent` outstanding until accepted | ✅ Met — *append-only in code* | `TestConsent`: recorded against `terms-v1`; a version not in force → 409 `terms_version_mismatch`; accepting twice records once. No update/delete path exists; not database-enforced (Deviation 3) |
+| Consent recorded with its policy version, append-only, and `consent` outstanding until accepted | ✅ Met | `TestConsent`: recorded against `terms-v1`; a version not in force → 409 `terms_version_mismatch`; accepting twice records once. **The database refuses a duplicate** (unique constraint; `test_the_database_refuses_a_duplicate_consent`). No update/delete path exists; deletion is not blocked by the database (Deviation 3) |
 | A `disclaimer_version` row backs `ca-v1` | ✅ Met | `test_the_ca_pack_disclaimer_is_backed` |
-| Migrations apply, reverse, re-apply in CI's `database` job; `pytest` passes; CI green | ⚠️ Met locally — CI pending the PR | `check_migrations.sh` passes against the CI image locally; 255 passed; ruff clean. CI runs when the PR opens |
+| Migrations apply, reverse, re-apply in CI's `database` job; `pytest` passes; CI green | ✅ Met | CI on #27: run 34566535924 (`test`, `database`), and again on the review fixes. Locally: `check_migrations.sh` and `alembic check` clean, 259 passed, ruff clean |
 | No endpoint reads or writes another household's data | ✅ Met — by construction | The new endpoints act only on `identity.user` / `identity.household` from `current_identity`; nothing takes a household id from the client. No dedicated cross-household test was added |
 
 ## Deviations / decisions
@@ -92,7 +92,17 @@ docker rm -f finai-pg
 6. **`/capabilities` depends on `current_identity` instead of `current_household`** — the same resolution and commit (`current_household` is built on it), needed because the rule reads the user.
 7. **The resolver no longer computes `onboarding_required`**; the route sets it from the shared rule.
 8. **The `+` is optional.** Real Supabase tokens carry numbers without it; the fixtures use it. Both give the same answer, and tests cover both forms.
-9. **"Terms in force"** = the newest global `account_terms` row whose `effective_from` has passed (NULL counts as effective). Per-market terms would add a country match in `current_terms`.
+9. **"Terms in force"** = the newest global `account_terms` row whose `effective_from` has passed; an undated row is a draft, not in force. Per-market terms would add a country match in `current_terms`.
+
+## Review round — fixes applied
+
+From the manager review of #27:
+
+1. **Consent is deduplicated by the database.** `POST /me/consent` checked `has_accepted` and then inserted, so two simultaneous accepts could both write — and `consent_event` had no unique index (`CLAUDE.md`: dedup belongs in constraints). Now `UniqueConstraint(user_id, disclaimer_version_id)` in the (still unreleased) migration and on the model, and the endpoint inserts with `ON CONFLICT DO NOTHING`, as `_link_identity` does. The redundant `ix_consent_event_user_id` is gone — the constraint's index leads with `user_id`.
+2. **The region override locks the household row** (`SELECT … FOR UPDATE`) before reading the current value, so simultaneous changes queue and each audit row names the region it actually replaced.
+3. **Only a dated terms version whose date has passed is in force.** An undated row previously counted as in force but ranked below dated ones — ignored while `terms-v1` existed, current if ever alone. Now it is a draft until it is given a date.
+
+Checked beyond the tests: `alembic check` reports no drift between the models and the migration; the RLS test covers every public table, the two new ones included; without a token all three new endpoints return `403 Not authenticated`, as `/me` does.
 
 ## Open questions / follow-ups
 

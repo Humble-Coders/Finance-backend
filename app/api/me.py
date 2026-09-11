@@ -12,6 +12,7 @@ the client routes on the response without another call.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_identity
@@ -79,6 +80,9 @@ async def set_region(
         )
 
     household = identity.household
+    # Lock the row first, so two simultaneous changes queue up: each audit row
+    # then names the region it actually replaced.
+    await session.refresh(household, ["country_code"], with_for_update=True)
     if household.country_code != region:
         session.add(
             HouseholdRegionChange(
@@ -121,8 +125,12 @@ async def accept_terms(
         )
 
     if not state.terms_accepted:
-        session.add(
-            ConsentEvent(user_id=identity.user.id, disclaimer_version_id=terms.id)
+        # Two simultaneous accepts both get here; the unique constraint keeps the
+        # log to one row, and the loser's insert quietly does nothing.
+        await session.execute(
+            pg_insert(ConsentEvent)
+            .values(user_id=identity.user.id, disclaimer_version_id=terms.id)
+            .on_conflict_do_nothing(index_elements=["user_id", "disclaimer_version_id"])
         )
         await session.commit()
 

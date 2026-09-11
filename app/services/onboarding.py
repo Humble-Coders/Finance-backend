@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import PolicyKind
@@ -56,6 +56,10 @@ class OnboardingState:
 async def current_terms(session: AsyncSession) -> DisclaimerVersion | None:
     """The account terms in force: the newest version that has taken effect.
 
+    Only a dated version whose date has passed is in force. An undated row is a
+    draft: it can be loaded and reviewed without anyone being asked to accept
+    it, and it becomes the terms only when it is given a date.
+
     Global in v1 (`country_code` NULL). Per-market terms would add a country
     match here; nothing else would change.
     """
@@ -64,13 +68,11 @@ async def current_terms(session: AsyncSession) -> DisclaimerVersion | None:
         .where(
             DisclaimerVersion.kind == PolicyKind.account_terms,
             DisclaimerVersion.country_code.is_(None),
-            or_(
-                DisclaimerVersion.effective_from.is_(None),
-                DisclaimerVersion.effective_from <= func.now(),
-            ),
+            DisclaimerVersion.effective_from.is_not(None),
+            DisclaimerVersion.effective_from <= func.now(),
         )
         .order_by(
-            DisclaimerVersion.effective_from.desc().nulls_last(),
+            DisclaimerVersion.effective_from.desc(),
             DisclaimerVersion.created_at.desc(),
         )
         .limit(1)

@@ -85,10 +85,13 @@ def upgrade() -> None:
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['disclaimer_version_id'], ['disclaimer_version.id'], name=op.f('fk_consent_event_disclaimer_version_id_disclaimer_version'), ondelete='RESTRICT'),
     sa.ForeignKeyConstraint(['user_id'], ['user.id'], name=op.f('fk_consent_event_user_id_user'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_consent_event'))
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_consent_event')),
+    # One row per user and terms version, enforced here rather than by a
+    # check-then-insert that two simultaneous accepts can both pass. Its index
+    # leads with user_id, so it serves per-user lookups too.
+    sa.UniqueConstraint('user_id', 'disclaimer_version_id', name=op.f('uq_consent_event_user_id_disclaimer_version_id'))
     )
     op.create_index(op.f('ix_consent_event_disclaimer_version_id'), 'consent_event', ['disclaimer_version_id'], unique=False)
-    op.create_index(op.f('ix_consent_event_user_id'), 'consent_event', ['user_id'], unique=False)
 
     # Defence in depth, as for every table (7ce291039fe7): RLS on, no policies.
     op.execute('ALTER TABLE "household_region_change" ENABLE ROW LEVEL SECURITY')
@@ -109,7 +112,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute('ALTER TABLE "consent_event" DISABLE ROW LEVEL SECURITY')
-    op.drop_index(op.f('ix_consent_event_user_id'), table_name='consent_event')
     op.drop_index(op.f('ix_consent_event_disclaimer_version_id'), table_name='consent_event')
     op.drop_table('consent_event')
 

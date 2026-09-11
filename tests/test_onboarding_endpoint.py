@@ -7,9 +7,11 @@ and signup consent (#24).
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.auth import AuthenticatedUser, current_user
 from app.models.enums import PolicyKind, RegionSource
@@ -242,6 +244,63 @@ class TestConsent:
             .where(ConsentEvent.user_id == uuid.UUID(me["user"]["id"]))
         )
         assert count == 1
+
+
+class TestConsentIsDedupedByTheDatabase:
+    async def test_the_database_refuses_a_duplicate_consent(
+        self, api_client, db_session
+    ):
+        """Not just the endpoint's check: two simultaneous accepts both pass that."""
+        authenticate_as(phone="+14165550115")
+        me = (await api_client.get("/me")).json()
+        user_id = uuid.UUID(me["user"]["id"])
+        terms = await db_session.scalar(
+            select(DisclaimerVersion).where(DisclaimerVersion.version == "terms-v1")
+        )
+
+        db_session.add(ConsentEvent(user_id=user_id, disclaimer_version_id=terms.id))
+        await db_session.flush()
+        db_session.add(ConsentEvent(user_id=user_id, disclaimer_version_id=terms.id))
+        with pytest.raises(IntegrityError):
+            await db_session.flush()
+
+
+class TestTermsInForce:
+    async def _terms(self, session, version, effective_from):
+        session.add(
+            DisclaimerVersion(
+                country_code=None,
+                version=version,
+                kind=PolicyKind.account_terms,
+                body="test",
+                effective_from=effective_from,
+            )
+        )
+        await session.flush()
+
+    async def test_an_undated_version_is_a_draft_not_the_terms(
+        self, api_client, db_session
+    ):
+        await self._terms(db_session, "terms-draft", None)
+        authenticate_as(phone="+14165550116")
+        assert (await api_client.get("/legal/terms")).json()["version"] == "terms-v1"
+
+    async def test_a_future_version_is_not_in_force_yet(self, api_client, db_session):
+        await self._terms(db_session, "terms-future", func.now() + timedelta(days=30))
+        authenticate_as(phone="+14165550117")
+        assert (await api_client.get("/legal/terms")).json()["version"] == "terms-v1"
+
+    async def test_a_newer_version_in_force_asks_for_consent_again(
+        self, api_client, db_session
+    ):
+        authenticate_as(phone="+14165550118")
+        await api_client.get("/me")
+        await api_client.post("/me/consent", json={"version": "terms-v1"})
+
+        await self._terms(db_session, "terms-v2", func.now())
+        body = (await api_client.get("/me")).json()
+        assert body["terms"] == {"version": "terms-v2", "accepted": False}
+        assert body["onboarding_required"] == ["consent"]
 
 
 class TestSeeds:

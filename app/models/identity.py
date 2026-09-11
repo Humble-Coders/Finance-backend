@@ -161,15 +161,20 @@ class ConsentEvent(UUIDMixin, TimestampMixin, Base):
     **Append-only in code.** Nothing updates or deletes these. There is no
     database trigger enforcing it, deliberately: account deletion (Appendix A.5)
     must be able to remove a user's rows, and CASCADE from `user` does that.
+
+    **One row per user and version, enforced by the database** — two simultaneous
+    accepts (a double tap, a retry) both pass any check-then-insert, so the
+    endpoint inserts with ON CONFLICT DO NOTHING against this constraint. Its
+    index leads with `user_id`, so it also serves per-user lookups.
     """
 
     __tablename__ = "consent_event"
+    __table_args__ = (UniqueConstraint("user_id", "disclaimer_version_id"),)
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("user.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
     disclaimer_version_id: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True),

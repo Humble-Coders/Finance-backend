@@ -29,8 +29,14 @@ NO_HOUSEHOLD = {
 # household_id (except where noted) but not via HouseholdScopedMixin.
 #   user_identity      -> user      budget_line -> budget
 #   user_phone_change  -> user
+#   consent_event      -> user
 #   category           -> nullable, because system rows are shared by everyone
-HOUSEHOLD_VIA_PARENT = {"user_identity", "budget_line", "user_phone_change"}
+HOUSEHOLD_VIA_PARENT = {
+    "user_identity",
+    "budget_line",
+    "user_phone_change",
+    "consent_event",
+}
 HOUSEHOLD_NULLABLE = {"category"}
 
 

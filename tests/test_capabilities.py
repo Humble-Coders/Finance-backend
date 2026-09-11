@@ -98,11 +98,6 @@ class TestUnknownRegion:
         assert result.region is None
         assert result.currency == UNKNOWN_REGION_CURRENCY
 
-    async def test_tells_the_client_what_is_outstanding(self, db_session):
-        household = await _household(db_session, None)
-        result = await resolve(db_session, household)
-        assert result.onboarding_required == ["phone"]
-
     async def test_region_independent_features_still_work(self, db_session):
         """The bug this replaced: forcing everything off disabled uploads.
 

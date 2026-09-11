@@ -11,7 +11,7 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict
 
-__all__ = ["HouseholdOut", "UserOut", "MeOut"]
+__all__ = ["ConsentIn", "HouseholdOut", "MeOut", "RegionIn", "TermsStatus", "UserOut"]
 
 
 class HouseholdOut(BaseModel):
@@ -31,11 +31,31 @@ class UserOut(BaseModel):
     display_name: str | None
 
 
+class TermsStatus(BaseModel):
+    # The account-terms version in force, and whether this user has accepted it.
+    # `version` is None only when no terms are configured.
+    version: str | None
+    accepted: bool
+
+
 class MeOut(BaseModel):
     user: UserOut
     household: HouseholdOut
 
-    # What the client must still collect. Empty once nothing is outstanding.
-    # The request is never blocked on it — the client reads this and routes to
-    # the phone step (PRD §4.6).
+    # What the client must still collect, in routing order: "phone", "region",
+    # "consent". Empty once nothing is outstanding. Never blocks the request —
+    # the client reads it and routes (app/services/onboarding.py).
     onboarding_required: list[str] = []
+
+    terms: TermsStatus
+
+
+class RegionIn(BaseModel):
+    # ISO 3166-1 alpha-2, any case. Validated against libphonenumber's region
+    # list in the endpoint, so an unknown code gets a coded 422.
+    country_code: str
+
+
+class ConsentIn(BaseModel):
+    # The terms version the user was shown. Must be the one in force.
+    version: str

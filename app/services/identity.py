@@ -23,14 +23,22 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.auth import AuthenticatedUser
-from app.models.enums import AuthProvider
-from app.models.identity import Household, User, UserIdentity, UserPhoneChange
+from app.models.enums import AuthProvider, RegionSource
+from app.models.identity import (
+    Household,
+    HouseholdRegionChange,
+    User,
+    UserIdentity,
+    UserPhoneChange,
+)
+from app.services.region import region_for_phone
 
 # Constraint names from the core schema migration. Branching on the name is what
 # lets a concurrent failure be answered correctly: the two constraints below mean
@@ -255,8 +263,7 @@ async def resolve_user(
         # The check above is check-then-act; the flush is where a concurrent
         # claim on the same number actually surfaces.
         await _flush_translating_conflicts(session, caller)
-        household = await session.get(Household, user.household_id)
-        return ResolvedIdentity(user=user, household=household, created=False)
+        return await _resolved(session, user, created=False)
 
     # 2/3. A person we already know, arriving via a new provider.
     linked: User | None = None
@@ -269,8 +276,7 @@ async def resolve_user(
         await _link_identity(session, linked, provider, provider_user_id)
         _absorb_claims(session, linked, caller)
         await _flush_translating_conflicts(session, caller)
-        household = await session.get(Household, linked.household_id)
-        return ResolvedIdentity(user=linked, household=household, created=False)
+        return await _resolved(session, linked, created=False)
 
     # 4. Someone new.
     try:
@@ -321,8 +327,62 @@ async def resolve_user(
         await _link_identity(session, user, provider, provider_user_id)
         await session.flush()
 
+    return await _resolved(session, user, created=False)
+
+
+async def _resolved(
+    session: AsyncSession, user: User, *, created: bool
+) -> ResolvedIdentity:
+    """Load the household and give it a region if it has earned one."""
     household = await session.get(Household, user.household_id)
-    return ResolvedIdentity(user=user, household=household, created=False)
+    await _derive_region(session, user, household)
+    await session.flush()
+    return ResolvedIdentity(user=user, household=household, created=created)
+
+
+async def _derive_region(
+    session: AsyncSession, user: User, household: Household
+) -> None:
+    """Give a household its region from the verified phone — once (PRD §4.6).
+
+    Only while the region is still unknown. A later phone change never moves it:
+    someone who keeps or ports a number after moving would otherwise have their
+    currency and content switched under them. Changing a region someone already
+    has is their decision, through `PUT /me/region`.
+
+    The UPDATE only applies while the region is still NULL, and the audit row is
+    written only when it changed a row — so two first requests racing each other
+    cannot both record having set it.
+    """
+    if household.country_code is not None or not user.phone:
+        return
+    region = region_for_phone(user.phone)
+    if region is None:
+        # Not a number we can place; onboarding asks the user instead.
+        return
+
+    result = await session.execute(
+        update(Household)
+        .where(Household.id == household.id, Household.country_code.is_(None))
+        .values(country_code=region)
+        .returning(Household.id)
+        .execution_options(synchronize_session=False)
+    )
+    if result.scalar_one_or_none() is None:
+        # Another request set it first; take theirs.
+        await session.refresh(household, ["country_code"])
+        return
+
+    set_committed_value(household, "country_code", region)
+    session.add(
+        HouseholdRegionChange(
+            household_id=household.id,
+            previous_country_code=None,
+            new_country_code=region,
+            source=RegionSource.phone,
+            changed_by_user_id=user.id,
+        )
+    )
 
 
 async def _create(
@@ -346,6 +406,8 @@ async def _create(
     await session.flush()
 
     await _link_identity(session, user, provider, provider_user_id)
+    await session.flush()
+    await _derive_region(session, user, household)
     await session.flush()
     return ResolvedIdentity(user=user, household=household, created=True)
 

@@ -61,8 +61,6 @@ REASON_NOT_IN_PLAN = "not_in_plan"
 # "region_unsupported" sends whoever debugs it looking at country packs.
 REASON_UNKNOWN_FEATURE = "unknown_feature"
 
-ONBOARDING_PHONE = "phone"
-
 
 def _specificity(row: FeatureAvailability) -> int:
     """How closely a row matches, for "most specific wins".
@@ -205,9 +203,6 @@ async def resolve(session: AsyncSession, household: Household) -> Capabilities:
             locale=UNKNOWN_REGION_LOCALE,
             features=features,
             content={},
-            onboarding_required=(
-                [ONBOARDING_PHONE] if household.country_code is None else []
-            ),
         )
 
     # Currency and locale come from the pack whether or not the market is open:

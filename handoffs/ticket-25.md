@@ -1,0 +1,87 @@
+# Handoff — ticket #25
+
+**Ticket:** [#25 — \[M2\] Persist the financial setup wizard](https://github.com/Humble-Coders/Finance-backend/issues/25)
+**Branch:** `ticket-25-financial-setup` · **Base:** `main` (`eaa9e3c`) · **Implementation:** `54bf10c` · 10 files
+
+## Summary
+
+The setup wizard (PRD F1) now has somewhere to save: monthly income, debts, investments and monthly obligations, so M4 can seed a dashboard before a user has uploaded anything. `GET`, `PUT` and `POST /financial-setup(/skip)` read it, replace it, and mark it skipped.
+
+A save **replaces what the wizard owns, in one transaction**, which is what makes it resumable: the client sends the whole wizard after every step, and sending it twice changes nothing. Debts are shared with M3's statement import, so only rows flagged `entered_via_setup` are replaced; a debt from a statement survives a wizard save.
+
+Money crosses the boundary exactly once — decimal strings on the wire, integer minor units in Postgres, converted by `app/core/money.py` alone (PRD §4.4). Every amount is converted **before** anything is deleted, so a bad figure in the last row cannot leave a household with half a wizard, and the 422 names the field (`debts.0.balance`) so the client can highlight the row the user typed.
+
+All three endpoints refuse with 409 until onboarding is complete: without a region there is no currency to denominate in (#24).
+
+## Files changed
+
+### Data model and migration
+| File | Why |
+|---|---|
+| `app/models/setup.py` *(new)* | `FinancialProfile` (one per household: income — nullable, since every step is skippable — the currency those amounts are in, and the two timestamps status is **derived** from, so a status cannot disagree with them), `Obligation`, `Investment` |
+| `app/models/planning.py` | `Debt.entered_via_setup` — the flag that lets the wizard replace its own debts without touching M3's |
+| `app/models/__init__.py` | Exports |
+| `alembic/versions/a3f7c2e91b84_financial_setup.py` *(new)* | The three tables with their indexes, currency checks and RLS; the debt flag added NOT NULL through a temporary default; downgrade reverses everything |
+
+### API
+| File | Why |
+|---|---|
+| `app/services/financial_setup.py` *(new)* | The logic: read, replace-in-one-transaction, skip; amount and rate conversion with a named field on failure; status derived from the timestamps |
+| `app/api/financial_setup.py` *(new)* | The three endpoints, thin over that service, with the onboarding gate |
+| `app/schemas/financial_setup.py` *(new)* | Request/response shapes; amounts are decimal strings both ways; lists capped at 20; names 1–255 |
+| `app/services/capabilities.py` | `currency_for(session, household)` — the country pack's currency, or the documented default; reused rather than resolving a whole capabilities payload |
+| `app/main.py` | Registers the router |
+
+### Tests
+| File | Why |
+|---|---|
+| `tests/test_financial_setup.py` *(new)* | 15 tests (22 cases with parametrisation), one or more per acceptance criterion |
+
+## How to test
+
+Your `.env` points at **production**. The variables below redirect everything to a local container — never run the suite without them.
+
+```bash
+docker run -d --name finai-pg -e POSTGRES_PASSWORD=postgres -p 55432:5432 \
+  ghcr.io/pgmq/pg17-pgmq:v1.5.1@sha256:e6f893a793751ed30c89f5f88e95aa52b77c1a03440b7d118a996866489ac0c6
+export L=postgresql://postgres:postgres@localhost:55432/postgres
+DATABASE_URL=$L MIGRATION_DATABASE_URL=$L SUPABASE_URL=http://localhost:54321 \
+  PG_CONTAINER=finai-pg PYTHON=.venv/bin/python scripts/check_migrations.sh   # → All migration checks passed
+DATABASE_URL=$L MIGRATION_DATABASE_URL=$L SUPABASE_URL=http://localhost:54321 \
+  .venv/bin/alembic check                                                     # → No new upgrade operations detected
+REQUIRE_DB=1 DATABASE_URL=$L MIGRATION_DATABASE_URL=$L SUPABASE_URL=http://localhost:54321 \
+  .venv/bin/pytest -q                                                         # → 293 passed
+.venv/bin/ruff check . && .venv/bin/ruff format --check .                     # → clean
+docker rm -f finai-pg
+```
+
+## Acceptance criteria
+
+| Criterion | Status | Evidence |
+|---|---|---|
+| Amounts round-trip exactly (`"1200"` → `120000` → `"1200.00"`); no float in the path | ✅ Met | `test_saves_and_returns_every_part_exactly`, `test_stores_integer_minor_units` reads `balance_minor_units == 120000` straight from the database. Conversion happens only in `app/core/money.py`; `test_models.py` already fails the build on any floating-point column |
+| Negative amounts, excess precision, non-numeric strings and oversized lists → 422 naming the field | ✅ Met | `TestValidation` — 8 parametrised cases asserting `detail.field` (`income`, `debts.0.balance`, `debts.0.interest_rate_percent`, `investments.0.amount`, `obligations.0.monthly_amount`), plus the 21-item list and an empty name |
+| Two identical `PUT`s leave identical data; a `PUT` with fewer debts drops the rest | ✅ Met | `test_two_identical_saves_leave_identical_data`, `test_a_save_with_fewer_debts_drops_the_rest` |
+| A `PUT` never touches a debt with `entered_via_setup = false` | ✅ Met | `test_never_touches_a_debt_it_does_not_own` — a statement-style debt survives two wizard saves, including one that empties the list |
+| `status`: `not_started` → `completed` with `finished: true`; → `skipped` with skip; data before a skip is kept | ✅ Met | `TestStatus` — four tests, including that a later save does not un-complete it |
+| Before onboarding is complete, all three endpoints return 409 with `onboarding_required` | ✅ Met | `test_all_three_endpoints_refuse_until_onboarding_is_done` |
+| A household can never read or write another household's setup | ✅ Met | `test_one_household_never_sees_another`; every endpoint resolves its own household through `current_identity` and nothing accepts a household id from the client |
+| Migrations apply, reverse, re-apply in CI's `database` job; `pytest` passes; CI green | ⚠️ Met locally — CI pending the PR | `check_migrations.sh` round-trips on the CI image; `alembic check` reports no drift; 293 passed (259 on `main`); ruff clean. CI runs when the PR opens |
+
+## Deviations / decisions
+
+1. **The response also returns `currency`** (manager-confirmed), so the wizard can render amounts without a second call to `/capabilities`.
+2. **Investments and obligations are wholly wizard-owned**, so a save replaces all of them; only debts need the flag, because statements will create debts later.
+3. **Status is derived from the two timestamps** rather than stored as its own column — it cannot then disagree with them. Completed outranks skipped, and a later save never un-completes.
+4. **Negative amounts are refused** even though `app/core/money.py` supports them (refunds, debts): nothing the wizard asks for can be negative.
+5. **Interest is sent as a percentage string** (`"5.25"`), capped at 100, stored as basis points — the integer form `debt.interest_rate_bps` already uses.
+6. **`currency_for` was added to the capabilities service** rather than resolving a whole payload for one field; the resolver is untouched.
+7. **The whole request is converted before anything is deleted**, so a rejected amount leaves the previous data intact.
+8. **The models live in `app/models/setup.py`**, not in `planning.py` with budgets and goals.
+
+## Open questions / follow-ups
+
+- **Not deployed.** Render has both services suspended, so this cannot be verified against the live API; it needs no Render to build, test or merge. `finai-worker` stays suspended deliberately until M3.
+- **A region change after saving** does not reinterpret stored amounts: `financial_profile.currency` records what they were denominated in (PRD §4.6 — historical records keep their currency). M4 should read that column rather than assume the household's current currency.
+- **Nothing reads these figures yet.** The budget generator and health score (M4) are their first consumer, and `FinAI-Mobile-2026#17` is the UI.
+- **No per-item ordering.** Lists come back in insertion order (`created_at`, then name); if the wizard ever needs user-defined ordering, that is a column, not a client-side sort.

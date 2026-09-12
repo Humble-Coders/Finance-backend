@@ -47,6 +47,7 @@ def upgrade() -> None:
     sa.Column('name', sa.String(length=255), nullable=False),
     sa.Column('monthly_amount_minor_units', sa.BigInteger(), nullable=False),
     sa.Column('currency', sa.String(length=3), nullable=False),
+    sa.Column('position', sa.Integer(), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
@@ -61,6 +62,7 @@ def upgrade() -> None:
     sa.Column('name', sa.String(length=255), nullable=False),
     sa.Column('amount_minor_units', sa.BigInteger(), nullable=False),
     sa.Column('currency', sa.String(length=3), nullable=False),
+    sa.Column('position', sa.Integer(), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
@@ -75,6 +77,8 @@ def upgrade() -> None:
     # The default is temporary — the model carries no server default.
     op.add_column('debt', sa.Column('entered_via_setup', sa.Boolean(), nullable=False, server_default=sa.text('false')))
     op.alter_column('debt', 'entered_via_setup', server_default=None)
+    # NULL for debts from statements (M3): they have no wizard position.
+    op.add_column('debt', sa.Column('position', sa.Integer(), nullable=True))
 
     # Defence in depth, as for every table (7ce291039fe7): RLS on, no policies.
     for table in ('financial_profile', 'obligation', 'investment'):
@@ -85,6 +89,7 @@ def downgrade() -> None:
     for table in ('investment', 'obligation', 'financial_profile'):
         op.execute(f'ALTER TABLE "{table}" DISABLE ROW LEVEL SECURITY')
 
+    op.drop_column('debt', 'position')
     op.drop_column('debt', 'entered_via_setup')
 
     op.drop_index(op.f('ix_investment_household_id'), table_name='investment')

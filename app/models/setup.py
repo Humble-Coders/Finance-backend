@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, UniqueConstraint
+from sqlalchemy import DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -72,6 +72,11 @@ class Obligation(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     )
     currency: Mapped[str] = money_currency()
 
+    # The order the user typed. Rows are rewritten on every save and share one
+    # created_at (Postgres now() is transaction time), so without this the list
+    # would come back alphabetically and reshuffle under the user mid-wizard.
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
 
 class Investment(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     """An investment holding, **amount only** in v1.
@@ -86,3 +91,6 @@ class Investment(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     amount_minor_units: Mapped[int] = money_amount("amount_minor_units", nullable=False)
     currency: Mapped[str] = money_currency()
+
+    # The order the user typed — see Obligation.position.
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

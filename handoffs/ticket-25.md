@@ -1,7 +1,7 @@
 # Handoff — ticket #25
 
 **Ticket:** [#25 — \[M2\] Persist the financial setup wizard](https://github.com/Humble-Coders/Finance-backend/issues/25)
-**Branch:** `ticket-25-financial-setup` · **Base:** `main` (`eaa9e3c`) · **Implementation:** `54bf10c` · 10 files
+**Branch:** `ticket-25-financial-setup` · **Base:** `main` (`eaa9e3c`) · **Implementation:** `54bf10c` · **PR:** #28 · 10 files
 
 ## Summary
 
@@ -35,7 +35,7 @@ All three endpoints refuse with 409 until onboarding is complete: without a regi
 ### Tests
 | File | Why |
 |---|---|
-| `tests/test_financial_setup.py` *(new)* | 15 tests (22 cases with parametrisation), one or more per acceptance criterion |
+| `tests/test_financial_setup.py` *(new)* | 17 tests (24 cases with parametrisation), one or more per acceptance criterion, including that each list keeps the order it was sent in |
 
 ## How to test
 
@@ -50,7 +50,7 @@ DATABASE_URL=$L MIGRATION_DATABASE_URL=$L SUPABASE_URL=http://localhost:54321 \
 DATABASE_URL=$L MIGRATION_DATABASE_URL=$L SUPABASE_URL=http://localhost:54321 \
   .venv/bin/alembic check                                                     # → No new upgrade operations detected
 REQUIRE_DB=1 DATABASE_URL=$L MIGRATION_DATABASE_URL=$L SUPABASE_URL=http://localhost:54321 \
-  .venv/bin/pytest -q                                                         # → 293 passed
+  .venv/bin/pytest -q                                                         # → 295 passed
 .venv/bin/ruff check . && .venv/bin/ruff format --check .                     # → clean
 docker rm -f finai-pg
 ```
@@ -61,12 +61,12 @@ docker rm -f finai-pg
 |---|---|---|
 | Amounts round-trip exactly (`"1200"` → `120000` → `"1200.00"`); no float in the path | ✅ Met | `test_saves_and_returns_every_part_exactly`, `test_stores_integer_minor_units` reads `balance_minor_units == 120000` straight from the database. Conversion happens only in `app/core/money.py`; `test_models.py` already fails the build on any floating-point column |
 | Negative amounts, excess precision, non-numeric strings and oversized lists → 422 naming the field | ✅ Met | `TestValidation` — 8 parametrised cases asserting `detail.field` (`income`, `debts.0.balance`, `debts.0.interest_rate_percent`, `investments.0.amount`, `obligations.0.monthly_amount`), plus the 21-item list and an empty name |
-| Two identical `PUT`s leave identical data; a `PUT` with fewer debts drops the rest | ✅ Met | `test_two_identical_saves_leave_identical_data`, `test_a_save_with_fewer_debts_drops_the_rest` |
+| Two identical `PUT`s leave identical data; a `PUT` with fewer debts drops the rest | ✅ Met | `test_two_identical_saves_leave_identical_data`, `test_a_save_with_fewer_debts_drops_the_rest`; order is kept too — `TestOrdering` |
 | A `PUT` never touches a debt with `entered_via_setup = false` | ✅ Met | `test_never_touches_a_debt_it_does_not_own` — a statement-style debt survives two wizard saves, including one that empties the list |
 | `status`: `not_started` → `completed` with `finished: true`; → `skipped` with skip; data before a skip is kept | ✅ Met | `TestStatus` — four tests, including that a later save does not un-complete it |
 | Before onboarding is complete, all three endpoints return 409 with `onboarding_required` | ✅ Met | `test_all_three_endpoints_refuse_until_onboarding_is_done` |
 | A household can never read or write another household's setup | ✅ Met | `test_one_household_never_sees_another`; every endpoint resolves its own household through `current_identity` and nothing accepts a household id from the client |
-| Migrations apply, reverse, re-apply in CI's `database` job; `pytest` passes; CI green | ⚠️ Met locally — CI pending the PR | `check_migrations.sh` round-trips on the CI image; `alembic check` reports no drift; 293 passed (259 on `main`); ruff clean. CI runs when the PR opens |
+| Migrations apply, reverse, re-apply in CI's `database` job; `pytest` passes; CI green | ✅ Met | CI on #28: run 34672574938, and again on the review fixes. Locally: `check_migrations.sh` and `alembic check` clean, 295 passed (259 on `main`), ruff clean |
 
 ## Deviations / decisions
 
@@ -79,9 +79,19 @@ docker rm -f finai-pg
 7. **The whole request is converted before anything is deleted**, so a rejected amount leaves the previous data intact.
 8. **The models live in `app/models/setup.py`**, not in `planning.py` with budgets and goals.
 
+## Review round — fixes applied
+
+From the manager review of #28:
+
+1. **The wizard's list order was not preserved.** `_payload` ordered by `created_at` then name, but every row written in one save shares that timestamp (Postgres `now()` is transaction time), so **name** decided the order: sending `Visa, Car loan, Student loan` returned `Car loan, Student loan, Visa`. The client saves after each step, so a user would have watched their rows reshuffle mid-wizard; the single-item tests could not catch it. Now a `position` column on `obligation`, `investment` and `debt` records the order sent and orders the reads. On `debt` it is nullable — statement-derived rows (M3) have no wizard position. The migration was **amended rather than stacked**: it has not reached production, which is still at `5b2e9f7c1d34`.
+2. **Two concurrent saves could duplicate rows, or 500.** The save deleted and re-inserted with no lock, so overlapping saves could each delete what they saw and both insert; on a household's first save, both would insert a `financial_profile` and the loser would hit the unique constraint as a 500. `save_setup` and `skip_setup` now take a row lock on the household first, so they queue.
+3. **Nits.** The `exponent_for(currency)` guard only rejected malformed codes and would have surfaced as a 500 — removed. One `Field(...)` instance was shared by three schema models, which pydantic v2 discourages — each field now declares its own.
+
+**Left open for the Product Owner:** resuming after a skip still reports `skipped` — nothing clears `setup_skipped_at`, so someone who skipped and came back could be routed past a wizard they are actively filling in. Changing it is a product call, not a defect to fix silently.
+
 ## Open questions / follow-ups
 
 - **Not deployed.** Render has both services suspended, so this cannot be verified against the live API; it needs no Render to build, test or merge. `finai-worker` stays suspended deliberately until M3.
 - **A region change after saving** does not reinterpret stored amounts: `financial_profile.currency` records what they were denominated in (PRD §4.6 — historical records keep their currency). M4 should read that column rather than assume the household's current currency.
 - **Nothing reads these figures yet.** The budget generator and health score (M4) are their first consumer, and `FinAI-Mobile-2026#17` is the UI.
-- **No per-item ordering.** Lists come back in insertion order (`created_at`, then name); if the wizard ever needs user-defined ordering, that is a column, not a client-side sort.
+- **Ordering is a stored column.** Each list keeps the order it was sent in, via `position` — see the review round below for why `created_at` could not do that job.

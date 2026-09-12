@@ -146,6 +146,45 @@ class TestValidation:
         assert (await api_client.put(SETUP, json=body)).status_code == 422
 
 
+class TestOrdering:
+    """The order the user typed, kept.
+
+    Rows are rewritten on every save and share one `created_at` (Postgres now()
+    is transaction time), so ordering on that alone came back alphabetical — the
+    list reshuffled under the user between steps.
+    """
+
+    async def test_each_list_comes_back_in_the_order_it_was_sent(self, api_client):
+        await onboard(api_client, "+14165560015")
+        debts = ["Visa", "Car loan", "Student loan"]  # deliberately not alphabetical
+        investments = ["TFSA", "RRSP", "FHSA"]
+        obligations = ["Rent", "Phone", "Insurance"]
+        body = {
+            "debts": [a_debt(n) for n in debts],
+            "investments": [{"name": n, "amount": "100"} for n in investments],
+            "obligations": [{"name": n, "monthly_amount": "50"} for n in obligations],
+        }
+        saved = (await api_client.put(SETUP, json=body)).json()
+
+        assert [d["name"] for d in saved["debts"]] == debts
+        assert [i["name"] for i in saved["investments"]] == investments
+        assert [o["name"] for o in saved["obligations"]] == obligations
+        # And on the way back out, not just in the save's own response.
+        assert (await api_client.get(SETUP)).json() == saved
+
+    async def test_reordering_is_saved(self, api_client):
+        await onboard(api_client, "+14165560016")
+        await api_client.put(
+            SETUP, json={"debts": [a_debt("Visa"), a_debt("Car loan")]}
+        )
+        reordered = (
+            await api_client.put(
+                SETUP, json={"debts": [a_debt("Car loan"), a_debt("Visa")]}
+            )
+        ).json()
+        assert [d["name"] for d in reordered["debts"]] == ["Car loan", "Visa"]
+
+
 class TestReplaceSemantics:
     async def test_two_identical_saves_leave_identical_data(self, api_client):
         await onboard(api_client, "+14165560006")

@@ -23,11 +23,11 @@ __all__ = [
 ]
 
 MAX_ITEMS = 20
-Name = Field(min_length=1, max_length=255)
+NAME_MAX = 255
 
 
 class DebtIn(BaseModel):
-    name: str = Name
+    name: str = Field(min_length=1, max_length=NAME_MAX)
     balance: str
     minimum_payment: str | None = None
     # A percentage as typed, e.g. "5.25"; stored as basis points.
@@ -35,12 +35,12 @@ class DebtIn(BaseModel):
 
 
 class InvestmentIn(BaseModel):
-    name: str = Name
+    name: str = Field(min_length=1, max_length=NAME_MAX)
     amount: str
 
 
 class ObligationIn(BaseModel):
-    name: str = Name
+    name: str = Field(min_length=1, max_length=NAME_MAX)
     monthly_amount: str
 
 

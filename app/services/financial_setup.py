@@ -22,7 +22,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.money import MoneyError, exponent_for, from_minor_units, to_minor_units
+from app.core.money import MoneyError, from_minor_units, to_minor_units
 from app.models.identity import Household
 from app.models.planning import Debt
 from app.models.setup import FinancialProfile, Investment, Obligation
@@ -108,6 +108,21 @@ def _status(profile: FinancialProfile | None) -> str:
     return STATUS_NOT_STARTED
 
 
+async def _lock(session: AsyncSession, household: Household) -> None:
+    """Serialise writes for one household.
+
+    A save deletes the wizard's rows and inserts new ones. Two overlapping saves
+    — a double tap, or a retry after a slow response — would otherwise each
+    delete what they could see and then insert, leaving both sets behind; and on
+    a household's first save both would insert a `financial_profile`, making the
+    loser a 500 on the unique constraint. Locking the household row first makes
+    them queue instead.
+    """
+    await session.execute(
+        select(Household.id).where(Household.id == household.id).with_for_update()
+    )
+
+
 async def _profile(
     session: AsyncSession, household: Household
 ) -> FinancialProfile | None:
@@ -128,7 +143,7 @@ async def _payload(
                 .where(
                     Debt.household_id == household.id, Debt.entered_via_setup.is_(True)
                 )
-                .order_by(Debt.created_at, Debt.name)
+                .order_by(Debt.position, Debt.created_at, Debt.name)
             )
         )
         .scalars()
@@ -139,7 +154,7 @@ async def _payload(
             await session.execute(
                 select(Investment)
                 .where(Investment.household_id == household.id)
-                .order_by(Investment.created_at, Investment.name)
+                .order_by(Investment.position, Investment.created_at, Investment.name)
             )
         )
         .scalars()
@@ -150,7 +165,7 @@ async def _payload(
             await session.execute(
                 select(Obligation)
                 .where(Obligation.household_id == household.id)
-                .order_by(Obligation.created_at, Obligation.name)
+                .order_by(Obligation.position, Obligation.created_at, Obligation.name)
             )
         )
         .scalars()
@@ -210,7 +225,7 @@ async def save_setup(
     the last row cannot leave the household with half a wizard.
     """
     currency = await currency_for(session, household)
-    exponent_for(currency)  # fails loudly on a currency we cannot denominate
+    await _lock(session, household)
 
     income = (
         _amount(body.income, currency, "income")
@@ -232,6 +247,7 @@ async def save_setup(
             ),
             currency=currency,
             entered_via_setup=True,
+            position=i,
         )
         for i, d in enumerate(body.debts)
     ]
@@ -241,6 +257,7 @@ async def save_setup(
             name=v.name,
             amount_minor_units=_amount(v.amount, currency, f"investments.{i}.amount"),
             currency=currency,
+            position=i,
         )
         for i, v in enumerate(body.investments)
     ]
@@ -252,6 +269,7 @@ async def save_setup(
                 o.monthly_amount, currency, f"obligations.{i}.monthly_amount"
             ),
             currency=currency,
+            position=i,
         )
         for i, o in enumerate(body.obligations)
     ]
@@ -286,6 +304,7 @@ async def save_setup(
 async def skip_setup(session: AsyncSession, household: Household) -> FinancialSetupOut:
     """Mark the wizard skipped, keeping anything already saved."""
     currency = await currency_for(session, household)
+    await _lock(session, household)
     profile = await _profile(session, household)
     if profile is None:
         profile = FinancialProfile(household_id=household.id, currency=currency)

@@ -1,9 +1,15 @@
 """What the financial setup wizard collects (PRD F1).
 
-Typed in right after signup, before any statement exists, and **skippable at
-every step** — which is why almost everything here is nullable or may simply be
-absent. These figures seed the first dashboard (M4) so a new account is useful
-before its first upload.
+Typed in right after signup, before any statement exists. Part of it is
+**mandatory** — monthly income and monthly expense, which the onboarding rule
+holds the user at until both are saved (2.5, PRD §9) — and part is **optional**:
+debts, investments and the itemised obligations, which may be left blank and
+filled in later from the profile. These figures seed the first dashboard (M4) so
+a new account is useful before its first upload.
+
+**There is no wizard status.** An optional answer that was skipped and one that
+was never asked are the same fact — no row — so absence is the record, and
+nothing has to be kept in sync with it.
 
 Debts are not here: they go in `debt` (app/models/planning.py), which already
 holds exactly what the wizard asks and is what the payoff optimizer reads.
@@ -12,9 +18,7 @@ holds exactly what the wizard asks and is what the payoff optimizer reads.
 
 from __future__ import annotations
 
-from datetime import datetime
-
-from sqlalchemy import DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -31,12 +35,13 @@ __all__ = ["FinancialProfile", "Obligation", "Investment"]
 
 
 class FinancialProfile(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
-    """One row per household: the wizard's single-value answers and its state.
+    """One row per household: the wizard's single-value answers.
 
-    Income is nullable because that step, like every other, may be skipped.
-
-    Status is **derived** from the two timestamps rather than stored as its own
-    column, so a status can never disagree with the timestamps it summarises.
+    Income and monthly expense are the **mandatory** pair (PRD §9, 2026-09-12).
+    Both are nullable because the row exists before either is answered: the gate
+    lives in `app/services/onboarding.py`, which reports `financial_setup` until
+    both are set, rather than in a status column here that could disagree with
+    the figures it summarises.
 
     `currency` records what the amounts here are denominated in, taken from the
     household's region when they were saved. A later region change does not
@@ -50,14 +55,10 @@ class FinancialProfile(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     monthly_income_minor_units: Mapped[int | None] = money_amount(
         "monthly_income_minor_units", nullable=True
     )
+    monthly_expense_minor_units: Mapped[int | None] = money_amount(
+        "monthly_expense_minor_units", nullable=True
+    )
     currency: Mapped[str] = money_currency()
-
-    setup_completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    setup_skipped_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
 
 
 class Obligation(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):

@@ -100,11 +100,11 @@ class TestRegionFromPhone:
         body = (await api_client.get("/me")).json()
 
         assert body["household"]["country_code"] is None
-        assert body["onboarding_required"] == ["region", "consent"]
+        assert body["onboarding_required"] == ["region", "consent", "financial_setup"]
 
         fixed = (await api_client.put("/me/region", json={"country_code": "CA"})).json()
         assert fixed["household"]["country_code"] == "CA"
-        assert fixed["onboarding_required"] == ["consent"]
+        assert fixed["onboarding_required"] == ["consent", "financial_setup"]
 
 
 class TestRegionOverride:
@@ -160,19 +160,26 @@ class TestOneOnboardingRule:
             caps = (await api_client.get("/capabilities")).json()["onboarding_required"]
             return me, caps
 
+        setup = ["financial_setup"]
         sub = authenticate_as(provider="google", email="o1@example.com")
-        assert await both() == (["phone", "consent"], ["phone", "consent"])
+        assert await both() == (["phone", "consent"] + setup,) * 2
 
         authenticate_as(
             sub=sub, provider="google", email="o1@example.com", phone=UNPLACEABLE
         )
-        assert await both() == (["region", "consent"], ["region", "consent"])
+        assert await both() == (["region", "consent"] + setup,) * 2
 
         await api_client.put("/me/region", json={"country_code": "CA"})
-        assert await both() == (["consent"], ["consent"])
+        assert await both() == (["consent"] + setup,) * 2
 
         version = (await api_client.get("/legal/terms")).json()["version"]
         await api_client.post("/me/consent", json={"version": version})
+        # Consent done, but the figures are not: the wizard is the last step.
+        assert await both() == (setup, setup)
+
+        await api_client.put(
+            "/financial-setup", json={"income": "4000", "monthly_expense": "1800"}
+        )
         assert await both() == ([], [])
 
 
@@ -198,7 +205,7 @@ class TestConsent:
         assert response.status_code == 200
         body = response.json()
         assert body["terms"] == {"version": "terms-v1", "accepted": True}
-        assert body["onboarding_required"] == []
+        assert body["onboarding_required"] == ["financial_setup"]
 
         rows = (
             await db_session.execute(
@@ -300,7 +307,7 @@ class TestTermsInForce:
         await self._terms(db_session, "terms-v2", func.now())
         body = (await api_client.get("/me")).json()
         assert body["terms"] == {"version": "terms-v2", "accepted": False}
-        assert body["onboarding_required"] == ["consent"]
+        assert body["onboarding_required"] == ["consent", "financial_setup"]
 
 
 class TestSeeds:

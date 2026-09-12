@@ -54,7 +54,7 @@ class TestEndpoint:
         assert response.status_code == 200
         body = response.json()
         assert body["region"] is None
-        assert body["onboarding_required"] == ["phone", "consent"]
+        assert body["onboarding_required"] == ["phone", "consent", "financial_setup"]
 
     async def test_features_are_never_absent(self, api_client):
         """A client cannot tell "feature missing" from "feature off"."""

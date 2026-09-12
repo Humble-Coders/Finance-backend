@@ -11,12 +11,17 @@ whole wizard after every step, which is what makes it resumable: the same call
 repeated leaves the same rows. Debts are the exception that needs care —
 statements create debts too (M3), so only rows flagged `entered_via_setup` are
 replaced.
+
+**There is no status.** Income and monthly expense are mandatory and gated by
+the onboarding rule (app/services/onboarding.py), which reads those columns
+directly. The rest is optional, and for it a skipped answer and an unasked one
+are the same fact — no row — so absence is the record and nothing here tracks
+it (#29).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import delete, select
@@ -39,12 +44,7 @@ __all__ = [
     "SetupValidationError",
     "get_setup",
     "save_setup",
-    "skip_setup",
 ]
-
-STATUS_NOT_STARTED = "not_started"
-STATUS_SKIPPED = "skipped"
-STATUS_COMPLETED = "completed"
 
 # Basis points: 5.25% -> 525, an integer for the same reason money is.
 _BPS_PER_PERCENT = 100
@@ -95,17 +95,6 @@ def _rate_percent(bps: int | None) -> str | None:
     if bps is None:
         return None
     return f"{Decimal(bps) / _BPS_PER_PERCENT:.2f}"
-
-
-def _status(profile: FinancialProfile | None) -> str:
-    if profile is None:
-        return STATUS_NOT_STARTED
-    if profile.setup_completed_at is not None:
-        # Completed outranks skipped: finishing later is the stronger signal.
-        return STATUS_COMPLETED
-    if profile.setup_skipped_at is not None:
-        return STATUS_SKIPPED
-    return STATUS_NOT_STARTED
 
 
 async def _lock(session: AsyncSession, household: Household) -> None:
@@ -173,12 +162,18 @@ async def _payload(
     )
 
     stored_currency = profile.currency if profile else currency
+    income_units = profile.monthly_income_minor_units if profile else None
+    expense_units = profile.monthly_expense_minor_units if profile else None
     return FinancialSetupOut(
-        status=_status(profile),
         currency=stored_currency,
         income=(
-            from_minor_units(profile.monthly_income_minor_units, stored_currency)
-            if profile is not None and profile.monthly_income_minor_units is not None
+            from_minor_units(income_units, stored_currency)
+            if income_units is not None
+            else None
+        ),
+        monthly_expense=(
+            from_minor_units(expense_units, stored_currency)
+            if expense_units is not None
             else None
         ),
         debts=[
@@ -230,6 +225,11 @@ async def save_setup(
     income = (
         _amount(body.income, currency, "income")
         if body.income is not None and str(body.income).strip()
+        else None
+    )
+    monthly_expense = (
+        _amount(body.monthly_expense, currency, "monthly_expense")
+        if body.monthly_expense is not None and str(body.monthly_expense).strip()
         else None
     )
     debts = [
@@ -293,23 +293,8 @@ async def save_setup(
         profile = FinancialProfile(household_id=household.id, currency=currency)
         session.add(profile)
     profile.monthly_income_minor_units = income
+    profile.monthly_expense_minor_units = monthly_expense
     profile.currency = currency
-    if body.finished and profile.setup_completed_at is None:
-        profile.setup_completed_at = datetime.now(UTC)
 
-    await session.commit()
-    return await _payload(session, household, currency)
-
-
-async def skip_setup(session: AsyncSession, household: Household) -> FinancialSetupOut:
-    """Mark the wizard skipped, keeping anything already saved."""
-    currency = await currency_for(session, household)
-    await _lock(session, household)
-    profile = await _profile(session, household)
-    if profile is None:
-        profile = FinancialProfile(household_id=household.id, currency=currency)
-        session.add(profile)
-    if profile.setup_skipped_at is None:
-        profile.setup_skipped_at = datetime.now(UTC)
     await session.commit()
     return await _payload(session, household, currency)

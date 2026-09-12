@@ -79,7 +79,7 @@ Then, with `DATABASE_URL` and `MIGRATION_DATABASE_URL` both pinned to
 1. `PG_CONTAINER=finai-pg-t29 PYTHON=.venv/bin/python scripts/check_migrations.sh`
    → *All migration checks passed*.
 2. `SUPABASE_URL=https://example.supabase.co REQUIRE_DB=1 .venv/bin/python -m pytest -q`
-   → **304 passed**.
+   → **305 passed**.
 3. `docker rm -f finai-pg-t29`.
 
 The behaviour to read by hand is `TestTheWizardStaysReachable`: it is the one

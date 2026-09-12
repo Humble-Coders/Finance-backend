@@ -180,7 +180,14 @@ def wizard_prerequisites(state: OnboardingState) -> list[str]:
 
 
 def onboarding_conflict(steps: list[str]) -> HTTPException:
-    """409 naming what is still outstanding, so the client can route on it."""
+    """409 naming what is still outstanding, so the client can route on it.
+
+    `steps` is scoped to the gate that raised it, not always the whole list:
+    `require_onboarded` passes every outstanding step, while the wizard's own
+    endpoints pass only the ones that block *them* (`wizard_prerequisites`), so
+    a caller held there is never told to finish the step it exists to clear.
+    Either way the first entry is the step to route to.
+    """
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={

@@ -6,7 +6,7 @@ Started by Render as:
 
 from fastapi import FastAPI
 
-from app.api import capabilities, health, legal, me
+from app.api import capabilities, financial_setup, health, legal, me
 from app.config import get_settings
 
 settings = get_settings()
@@ -24,3 +24,4 @@ app.include_router(health.router)
 app.include_router(capabilities.router)
 app.include_router(me.router)
 app.include_router(legal.router)
+app.include_router(financial_setup.router)

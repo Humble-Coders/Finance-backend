@@ -33,6 +33,7 @@ from app.models.platform import (
     FeatureAvailability,
     SubscriptionEntitlement,
 )
+from app.models.setup import FinancialProfile, Investment, Obligation
 
 __all__ = [
     "Household",
@@ -50,6 +51,9 @@ __all__ = [
     "BudgetLine",
     "Goal",
     "Debt",
+    "FinancialProfile",
+    "Obligation",
+    "Investment",
     "HealthScoreSnapshot",
     "ChatConversation",
     "SubscriptionEntitlement",

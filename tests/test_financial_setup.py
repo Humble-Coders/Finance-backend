@@ -346,6 +346,21 @@ class TestTheWizardStaysReachable:
         assert (await api_client.get(SETUP)).status_code == 200
         assert (await api_client.put(SETUP, json=MANDATORY)).status_code == 200
 
+    async def test_a_step_invented_later_still_blocks_the_wizard(self):
+        """The gate is a denylist of one, not an allowlist of today's three.
+
+        A fifth onboarding step must block the wizard until someone decides it
+        should not — the reverse default would let it through in silence.
+        """
+        from app.services.onboarding import OnboardingState, wizard_prerequisites
+
+        state = OnboardingState(
+            steps=["phone", "selfie", "financial_setup"],
+            terms=None,
+            terms_accepted=False,
+        )
+        assert wizard_prerequisites(state) == ["phone", "selfie"]
+
     async def test_it_still_refuses_while_a_prerequisite_is_outstanding(
         self, api_client
     ):

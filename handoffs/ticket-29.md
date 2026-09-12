@@ -3,6 +3,11 @@
 **Ticket:** [#29 — \[M2\] Make the core financial setup mandatory](https://github.com/Humble-Coders/Finance-backend/issues/29)
 **Branch:** `ticket-29-mandatory-financial-setup` · **Base:** `main` (`45d7373`) · **Implementation:** `ffa66ed`, `28e0b63` · **PR:** #30 · 13 files (10 implementation, 3 documentation)
 
+> **Review round 1** — `wizard_prerequisites` was written as an allowlist of the
+> three prerequisites while documenting itself as "everything except
+> `financial_setup`". Identical behaviour today, fail-open the moment a fifth
+> step exists. Now a denylist of one, pinned by a test.
+
 ## Summary
 
 Monthly income and monthly expense become mandatory to reach the app. They are
@@ -120,6 +125,15 @@ that clears it.
   Render is still suspended. `a3f7c2e91b84` (#25) is also still unapplied, so
   production is two migrations behind and both must be applied before the merged
   code serves traffic.
+- **This migration is not backward-compatible in either direction, so apply it
+  while the service is suspended.** `c8d41a6f3b92` adds a column *and* drops
+  two, while `_profile()` selects `FinancialProfile`'s full column list — so
+  migrating before deploying breaks the old code on the dropped columns, and
+  deploying before migrating breaks the new code on the missing one. There is no
+  safe live ordering; the textbook fix would be to split it across two releases.
+  Moot here because the service has never served this code, but it means the
+  rollout is "apply both migrations while suspended, then resume", not the usual
+  migrate-then-deploy. Raised in the review of PR #30.
 - **A save still replaces everything the wizard owns**, so a client that omits
   `income` clears it and re-raises the gate. That is the documented contract and
   2.4 is written to send the whole wizard every time, but it is sharper now that

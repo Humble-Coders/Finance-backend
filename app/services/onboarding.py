@@ -64,14 +64,6 @@ ONBOARDING_FINANCIAL_SETUP = "financial_setup"
 # handle rather than one per endpoint.
 ONBOARDING_REQUIRED = "onboarding_required"
 
-# What the setup wizard itself needs before it can run: its amounts need a
-# currency, and the currency comes from the region the phone step establishes.
-#
-# `financial_setup` is deliberately absent. The wizard is how that step gets
-# cleared, so requiring it would lock the user out of the only endpoint that can
-# clear it — see `wizard_prerequisites`.
-WIZARD_PREREQUISITES = (ONBOARDING_PHONE, ONBOARDING_REGION, ONBOARDING_CONSENT)
-
 
 @dataclass(frozen=True)
 class OnboardingState:
@@ -175,9 +167,16 @@ async def needs_financial_setup(session: AsyncSession, household: Household) -> 
 def wizard_prerequisites(state: OnboardingState) -> list[str]:
     """The outstanding steps that block the setup wizard itself.
 
-    Everything except `financial_setup`, which the wizard exists to clear.
+    Everything except `financial_setup`, which the wizard exists to clear —
+    requiring that one would lock the user out of the only endpoint that can
+    clear it.
+
+    Deliberately a denylist of one rather than an allowlist of the other three.
+    A step added to `onboarding_state` later blocks the wizard until someone
+    decides otherwise, which is the safe default; an allowlist would let a new
+    step through silently, and nothing would fail to say so.
     """
-    return [step for step in state.steps if step in WIZARD_PREREQUISITES]
+    return [step for step in state.steps if step != ONBOARDING_FINANCIAL_SETUP]
 
 
 def onboarding_conflict(steps: list[str]) -> HTTPException:

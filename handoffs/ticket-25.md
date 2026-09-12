@@ -1,7 +1,7 @@
 # Handoff — ticket #25
 
 **Ticket:** [#25 — \[M2\] Persist the financial setup wizard](https://github.com/Humble-Coders/Finance-backend/issues/25)
-**Branch:** `ticket-25-financial-setup` · **Base:** `main` (`eaa9e3c`) · **Implementation:** `54bf10c` · **PR:** #28 · 10 files
+**Branch:** `ticket-25-financial-setup` · **Base:** `main` (`eaa9e3c`) · **Implementation:** `54bf10c` · **PR:** #28 · 13 files (10 implementation, 3 documentation)
 
 ## Summary
 
@@ -31,6 +31,13 @@ All three endpoints refuse with 409 until onboarding is complete: without a regi
 | `app/schemas/financial_setup.py` *(new)* | Request/response shapes; amounts are decimal strings both ways; lists capped at 20; names 1–255 |
 | `app/services/capabilities.py` | `currency_for(session, household)` — the country pack's currency, or the documented default; reused rather than resolving a whole capabilities payload |
 | `app/main.py` | Registers the router |
+
+### Documentation
+| File | Why |
+|---|---|
+| `docs/tickets/M2.2-financial-setup-persistence.md` | This ticket's own file, with a note that **2.5 supersedes its skip/status semantics** (manager decision, 2026-09-12: phone, region, monthly income and monthly expense become mandatory; debts, investments and itemised obligations stay optional) |
+| `docs/tickets/M2.5-mandatory-financial-setup.md` | Ticket 2.5's file (#29) — the mandatory gate that follows this ticket. Saved here because it only makes sense once this exists; it changes no behaviour in this PR |
+| `handoffs/ticket-25.md` | This report |
 
 ### Tests
 | File | Why |

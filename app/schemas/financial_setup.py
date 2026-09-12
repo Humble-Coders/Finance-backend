@@ -3,11 +3,12 @@
 Amounts are **decimal strings** in both directions (PRD §4.4). Pydantic checks
 shape here; amounts are converted — and refused — in the service, where the
 household's currency is known, so an error can name the exact field.
+
+`income` and `monthly_expense` are the mandatory pair the onboarding rule gates
+on (2.5); everything else is optional and editable later from the profile.
 """
 
 from __future__ import annotations
-
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -45,17 +46,26 @@ class ObligationIn(BaseModel):
 
 
 class FinancialSetupIn(BaseModel):
-    """Everything the wizard holds. Every part is optional — it is skippable.
+    """Everything the wizard holds.
 
-    Sent after each step and again at the end with `finished: true`, which is
-    what makes the wizard resumable: each save replaces what the wizard owns.
+    `income` and `monthly_expense` are the **mandatory** pair: the onboarding
+    rule reports `financial_setup` until both are stored (PRD §9). The lists are
+    optional and may stay empty — they are editable later from the profile.
+
+    **A save replaces what the wizard owns**, which is what makes it resumable:
+    the same call repeated leaves the same rows. So send the whole wizard every
+    time, including the figures already entered — omitting `income` clears it,
+    and that re-raises the onboarding gate.
+
+    Nullable rather than required, because a save arrives after each step and
+    the later steps are reached before the figures have both been typed.
     """
 
     income: str | None = None
+    monthly_expense: str | None = None
     debts: list[DebtIn] = Field(default_factory=list, max_length=MAX_ITEMS)
     investments: list[InvestmentIn] = Field(default_factory=list, max_length=MAX_ITEMS)
     obligations: list[ObligationIn] = Field(default_factory=list, max_length=MAX_ITEMS)
-    finished: bool = False
 
 
 class DebtOut(BaseModel):
@@ -76,11 +86,18 @@ class ObligationOut(BaseModel):
 
 
 class FinancialSetupOut(BaseModel):
-    status: Literal["not_started", "skipped", "completed"]
+    """What is saved.
+
+    No status field: the mandatory half is gated by the onboarding rule, and for
+    the optional half a skipped answer and an unasked one are the same fact — no
+    row — so absence is the record (#29).
+    """
+
     # What the amounts are denominated in, so the wizard can render them without
     # a second call to /capabilities.
     currency: str
     income: str | None
+    monthly_expense: str | None
     debts: list[DebtOut]
     investments: list[InvestmentOut]
     obligations: list[ObligationOut]

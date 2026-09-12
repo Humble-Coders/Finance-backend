@@ -1,8 +1,11 @@
-"""The financial setup wizard's persistence (#25).
+"""The financial setup wizard's persistence (#25) and its gate (#29).
 
 Every test rolls back. `current_user` is overridden as elsewhere; each test
-takes its caller through onboarding first, because these endpoints refuse until
-that is complete.
+takes its caller through onboarding first, because these endpoints refuse while
+a *prerequisite* step is outstanding.
+
+They do not refuse for `financial_setup` itself — saving here is how that step
+is cleared — so `onboard` leaves exactly that one step outstanding.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from sqlalchemy import select
 
 from app.auth import AuthenticatedUser, current_user
 from app.models.planning import Debt
+from app.models.setup import FinancialProfile
 from tests.conftest import requires_db
 
 pytestmark = [
@@ -40,13 +44,24 @@ def authenticate_as(*, sub=None, provider="phone", email=None, phone=None) -> st
 
 
 async def onboard(api_client, phone: str) -> dict:
-    """A caller who has finished onboarding: phone, region, accepted terms."""
+    """A caller past every prerequisite: phone, region, accepted terms.
+
+    `financial_setup` is deliberately still outstanding — that is the state the
+    wizard has to be usable in.
+    """
     authenticate_as(phone=phone)
     me = (await api_client.get("/me")).json()
     version = (await api_client.get("/legal/terms")).json()["version"]
     me = (await api_client.post("/me/consent", json={"version": version})).json()
-    assert me["onboarding_required"] == [], me["onboarding_required"]
+    assert me["onboarding_required"] == ["financial_setup"], me["onboarding_required"]
     return me
+
+
+MANDATORY = {"income": "4000", "monthly_expense": "1800"}
+
+
+async def steps(api_client) -> list[str]:
+    return (await api_client.get("/me")).json()["onboarding_required"]
 
 
 def a_debt(name="Visa", balance="2500.00", minimum="75", rate="19.99") -> dict:
@@ -235,35 +250,118 @@ class TestReplaceSemantics:
         assert names == ["From a statement"]
 
 
-class TestStatus:
-    async def test_starts_not_started(self, api_client):
+class TestMonthlyExpense:
+    """The second mandatory figure (#29), held to the same money rules."""
+
+    async def test_round_trips_exactly(self, api_client):
         await onboard(api_client, "+14165560009")
-        assert (await api_client.get(SETUP)).json()["status"] == "not_started"
+        saved = (await api_client.put(SETUP, json=MANDATORY)).json()
+        assert saved["monthly_expense"] == "1800.00"
+        assert (await api_client.get(SETUP)).json()["monthly_expense"] == "1800.00"
 
-    async def test_finishing_completes_it(self, api_client):
-        await onboard(api_client, "+14165560010")
-        saved = (
-            await api_client.put(SETUP, json={"income": "1", "finished": True})
-        ).json()
-        assert saved["status"] == "completed"
-        assert (await api_client.get(SETUP)).json()["status"] == "completed"
+    async def test_is_stored_as_minor_units(self, api_client, db_session):
+        me = await onboard(api_client, "+14165560010")
+        await api_client.put(SETUP, json=MANDATORY)
 
-    async def test_skipping_keeps_what_was_saved(self, api_client):
+        units = (
+            await db_session.execute(
+                select(FinancialProfile.monthly_expense_minor_units).where(
+                    FinancialProfile.household_id == uuid.UUID(me["household"]["id"])
+                )
+            )
+        ).scalar_one()
+        assert units == 180000
+
+    async def test_a_value_that_is_not_money_is_refused_by_name(self, api_client):
         await onboard(api_client, "+14165560011")
-        await api_client.put(SETUP, json={"income": "3000"})
-        skipped = (await api_client.post(f"{SETUP}/skip")).json()
-        assert skipped["status"] == "skipped"
-        assert skipped["income"] == "3000.00"
+        response = await api_client.put(
+            SETUP, json={"income": "4000", "monthly_expense": "not money"}
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"]["field"] == "monthly_expense"
 
-    async def test_a_later_save_does_not_un_complete_it(self, api_client):
+    async def test_a_negative_value_is_refused(self, api_client):
         await onboard(api_client, "+14165560012")
-        await api_client.put(SETUP, json={"finished": True})
-        after = (await api_client.put(SETUP, json={"income": "50"})).json()
-        assert after["status"] == "completed"
+        response = await api_client.put(
+            SETUP, json={"income": "4000", "monthly_expense": "-5"}
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"]["field"] == "monthly_expense"
+
+    async def test_absent_until_it_is_answered(self, api_client):
+        await onboard(api_client, "+14165560013")
+        assert (await api_client.get(SETUP)).json()["monthly_expense"] is None
 
 
-class TestOnboardingGate:
-    async def test_all_three_endpoints_refuse_until_onboarding_is_done(
+class TestFinancialSetupIsAnOnboardingStep:
+    """The gate itself: both figures, or the app stays out of reach."""
+
+    async def test_both_figures_clear_it(self, api_client):
+        await onboard(api_client, "+14165560014")
+        assert await steps(api_client) == ["financial_setup"]
+
+        await api_client.put(SETUP, json=MANDATORY)
+        assert await steps(api_client) == []
+
+    async def test_income_alone_is_not_enough(self, api_client):
+        await onboard(api_client, "+14165560015")
+        await api_client.put(SETUP, json={"income": "4000"})
+        assert await steps(api_client) == ["financial_setup"]
+
+    async def test_expense_alone_is_not_enough(self, api_client):
+        await onboard(api_client, "+14165560016")
+        await api_client.put(SETUP, json={"monthly_expense": "1800"})
+        assert await steps(api_client) == ["financial_setup"]
+
+    async def test_a_zero_figure_still_counts_as_answered(self, api_client):
+        """Nothing earned and nothing spent is a real answer, not a blank."""
+        await onboard(api_client, "+14165560017")
+        await api_client.put(SETUP, json={"income": "0", "monthly_expense": "0"})
+        assert await steps(api_client) == []
+
+    async def test_clearing_a_figure_raises_the_gate_again(self, api_client):
+        """A save replaces what the wizard owns, so omitting income clears it."""
+        await onboard(api_client, "+14165560018")
+        await api_client.put(SETUP, json=MANDATORY)
+        assert await steps(api_client) == []
+
+        await api_client.put(SETUP, json={"monthly_expense": "1800"})
+        assert await steps(api_client) == ["financial_setup"]
+
+
+class TestTheWizardStaysReachable:
+    """The circularity this ticket exists to avoid.
+
+    `financial_setup` is an onboarding step and the wizard is how it is cleared,
+    so the wizard must never be gated on it — or the user is locked out of the
+    only endpoint that can let them in.
+    """
+
+    async def test_it_works_while_financial_setup_is_the_only_step_left(
+        self, api_client
+    ):
+        await onboard(api_client, "+14165560019")
+        assert await steps(api_client) == ["financial_setup"]
+
+        assert (await api_client.get(SETUP)).status_code == 200
+        assert (await api_client.put(SETUP, json=MANDATORY)).status_code == 200
+
+    async def test_a_step_invented_later_still_blocks_the_wizard(self):
+        """The gate is a denylist of one, not an allowlist of today's three.
+
+        A fifth onboarding step must block the wizard until someone decides it
+        should not — the reverse default would let it through in silence.
+        """
+        from app.services.onboarding import OnboardingState, wizard_prerequisites
+
+        state = OnboardingState(
+            steps=["phone", "selfie", "financial_setup"],
+            terms=None,
+            terms_accepted=False,
+        )
+        assert wizard_prerequisites(state) == ["phone", "selfie"]
+
+    async def test_it_still_refuses_while_a_prerequisite_is_outstanding(
         self, api_client
     ):
         """The currency is not known until the region is."""
@@ -273,12 +371,53 @@ class TestOnboardingGate:
         for call in (
             api_client.get(SETUP),
             api_client.put(SETUP, json={"income": "1"}),
-            api_client.post(f"{SETUP}/skip"),
         ):
             response = await call
             assert response.status_code == 409
-            assert response.json()["detail"]["code"] == "onboarding_required"
-            assert "phone" in response.json()["detail"]["onboarding_required"]
+            detail = response.json()["detail"]
+            assert detail["code"] == "onboarding_required"
+            assert "phone" in detail["onboarding_required"]
+            # Never the step this endpoint exists to clear.
+            assert "financial_setup" not in detail["onboarding_required"]
+
+
+class TestRequireOnboarded:
+    """Enforcement for every OTHER endpoint, proven before one needs it.
+
+    Mounted on a throwaway route exactly as `require_feature` is, so the pattern
+    is established rather than retrofitted once endpoints already exist.
+    """
+
+    def _mount(self) -> str:
+        from fastapi import Depends
+
+        from app.main import app
+        from app.services.onboarding import require_onboarded
+
+        path = f"/__test__/onboarded-{uuid.uuid4().hex[:6]}"
+
+        @app.get(path, dependencies=[Depends(require_onboarded)])
+        async def _guarded() -> dict[str, bool]:
+            return {"reached": True}
+
+        return path
+
+    async def test_refuses_while_financial_setup_is_outstanding(self, api_client):
+        await onboard(api_client, "+14165560020")
+
+        response = await api_client.get(self._mount())
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["code"] == "onboarding_required"
+        assert detail["onboarding_required"] == ["financial_setup"]
+
+    async def test_passes_once_the_figures_are_saved(self, api_client):
+        await onboard(api_client, "+14165560021")
+        await api_client.put(SETUP, json=MANDATORY)
+
+        response = await api_client.get(self._mount())
+        assert response.status_code == 200
+        assert response.json() == {"reached": True}
 
 
 class TestHouseholdIsolation:

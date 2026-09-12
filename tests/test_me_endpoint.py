@@ -53,7 +53,7 @@ class TestMe:
         """Their region comes from the phone (#24); the terms still need accepting."""
         authenticate_as(phone="+14165551002")
         body = (await api_client.get("/me")).json()
-        assert body["onboarding_required"] == ["consent"]
+        assert body["onboarding_required"] == ["consent", "financial_setup"]
 
     async def test_a_google_user_is_told_to_collect_a_phone(self, api_client):
         """Not blocked — told. The client reads this and routes to the step."""
@@ -61,7 +61,11 @@ class TestMe:
         response = await api_client.get("/me")
 
         assert response.status_code == 200
-        assert response.json()["onboarding_required"] == ["phone", "consent"]
+        assert response.json()["onboarding_required"] == [
+            "phone",
+            "consent",
+            "financial_setup",
+        ]
 
     async def test_country_code_is_null_until_the_phone_arrives(self, api_client):
         authenticate_as(provider="google", email="g2@example.com")
@@ -84,13 +88,13 @@ class TestMe:
 
         authenticate_as(sub=sub, provider="google", email="g3@example.com")
         before = (await api_client.get("/me")).json()["onboarding_required"]
-        assert before == ["phone", "consent"]
+        assert before == ["phone", "consent", "financial_setup"]
 
         authenticate_as(
             sub=sub, provider="google", email="g3@example.com", phone="+14165551004"
         )
         after = (await api_client.get("/me")).json()
-        assert after["onboarding_required"] == ["consent"]
+        assert after["onboarding_required"] == ["consent", "financial_setup"]
         assert after["user"]["phone"] == "+14165551004"
 
 

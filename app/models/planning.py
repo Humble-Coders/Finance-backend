@@ -125,3 +125,11 @@ class Debt(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     # Basis points (5.25% -> 525). Integer, for the same reason money is:
     # a rate in float drifts once compounded over a repayment schedule.
     interest_rate_bps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # True for the debts the setup wizard owns. A wizard save replaces its own
+    # rows; debts that arrive later from statements (M3) must survive that.
+    entered_via_setup: Mapped[bool] = mapped_column(nullable=False, default=False)
+
+    # The order the user typed them in the wizard. NULL for debts from
+    # statements (M3), which have no wizard position.
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True)

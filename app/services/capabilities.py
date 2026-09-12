@@ -33,6 +33,7 @@ from app.models.platform import (
 from app.schemas.capabilities import Capabilities, Feature
 
 __all__ = [
+    "currency_for",
     "UNKNOWN_REGION_CURRENCY",
     "UNKNOWN_REGION_LOCALE",
     "resolve",
@@ -156,6 +157,26 @@ def _content(pack: CountryPack) -> dict[str, object]:
         "tax_accounts": pack.tax_accounts or [],
         "disclaimer_version": pack.disclaimer_version,
     }
+
+
+async def currency_for(session: AsyncSession, household: Household) -> str:
+    """The currency this household's money is denominated in.
+
+    The country pack's, whether or not that market is launched — currency is a
+    fact about a country, not publishable content. The documented default when
+    there is no pack, which is the window before the phone step and any country
+    we have never configured.
+    """
+    if household.country_code:
+        result = await session.execute(
+            select(CountryPack.currency).where(
+                CountryPack.country_code == household.country_code
+            )
+        )
+        currency = result.scalar_one_or_none()
+        if currency:
+            return currency
+    return UNKNOWN_REGION_CURRENCY
 
 
 async def resolve(session: AsyncSession, household: Household) -> Capabilities:

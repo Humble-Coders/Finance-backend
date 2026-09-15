@@ -45,7 +45,7 @@ from app.models.identity import (
     UserIdentity,
     UserPhoneChange,
 )
-from app.services import notifications
+from app.services import account_events
 from app.services.region import region_for_phone
 
 # Constraint names from the core schema migration. Branching on the name is what
@@ -170,8 +170,10 @@ async def _by_email(session: AsyncSession, email: str) -> User | None:
     matching one its owner no longer controls is the recycled-number hazard
     again. It was right while email was not a way into an account. Once email and
     password is one, whoever controls the address can already reset the password,
-    so the defence against a reassigned address moves to telling the account
-    when a sign-in method is added (app/services/notifications.py).
+    so matching it adds no access the address did not already give. The one
+    exposure left — a reassigned address adding a method to its previous owner's
+    account — is accepted: the account is not told (manager decision,
+    2026-09-15), only the backend records it (app/services/account_events.py).
 
     Verification is the caller's check; this function cannot see the token.
 
@@ -297,10 +299,9 @@ async def resolve_user(
         _absorb_claims(session, linked, caller)
         await _flush_translating_conflicts(session, caller)
         if added:
-            # Raised before the request commits. Harmless while delivery only
-            # logs; a real sender should go through an outbox, so a rolled-back
-            # link can never tell someone a method was added.
-            notifications.sign_in_method_added(linked.id, provider)
+            # A backend record only — nobody is told. The user_identity row
+            # just inserted is the durable version of it.
+            account_events.sign_in_method_added(linked.id, provider)
         return await _resolved(session, linked, created=False)
 
     # 4. Someone new.

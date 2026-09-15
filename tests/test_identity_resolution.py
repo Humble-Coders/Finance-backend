@@ -338,11 +338,11 @@ class TestEmailLinking:
     async def test_adding_a_method_raises_the_alert_exactly_once(
         self, db_session, monkeypatch
     ):
-        from app.services import notifications
+        from app.services import account_events
 
         calls = []
         monkeypatch.setattr(
-            notifications,
+            account_events,
             "sign_in_method_added",
             lambda user_id, provider: calls.append((user_id, provider)),
         )

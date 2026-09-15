@@ -8,7 +8,6 @@ Legacy Supabase projects that still issue HS256 tokens signed with the shared
 JWT secret fall back to `SUPABASE_JWT_SECRET`.
 """
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import jwt
@@ -32,9 +31,6 @@ class AuthenticatedUser:
     # Whether the signed token itself marks the email as verified. Linking two
     # accounts by email trusts nothing else — see `email_verified_from_claims`.
     email_verified: bool = False
-
-
-TokenVerifier = Callable[[str], AuthenticatedUser]
 
 
 def email_verified_from_claims(claims: dict) -> bool:
@@ -123,13 +119,3 @@ async def current_user(
 ) -> AuthenticatedUser:
     """FastAPI dependency: verifies the bearer token, returns the caller."""
     return authenticate_token(credentials.credentials, settings)
-
-
-def get_token_verifier(settings: Settings = Depends(get_settings)) -> TokenVerifier:
-    """A verifier for a token that is not this request's own bearer.
-
-    Linking accounts presents a second session's token in the request body. It
-    gets exactly the verification the bearer gets, through a dependency, so
-    tests replace it the same way they replace `current_user`.
-    """
-    return lambda token: authenticate_token(token, settings)

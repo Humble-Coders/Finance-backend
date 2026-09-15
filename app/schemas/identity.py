@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict
 __all__ = [
     "ConsentIn",
     "HouseholdOut",
-    "LinkIn",
     "MeOut",
     "RegionIn",
     "TermsStatus",
@@ -67,10 +66,3 @@ class RegionIn(BaseModel):
 class ConsentIn(BaseModel):
     # The terms version the user was shown. Must be the one in force.
     version: str
-
-
-class LinkIn(BaseModel):
-    # The access token of the empty account a new sign-in method created. It
-    # proves the caller holds that session as well as this one. A credential:
-    # never log it.
-    orphan_token: str

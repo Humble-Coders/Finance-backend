@@ -1,15 +1,22 @@
 """Resolving a verified token to a user and household.
 
 The problem this solves is not authentication — `app.auth` already does that —
-but **identity**. One person may sign in three ways (phone OTP, Google, Apple),
-and each produces a different Supabase `sub`. Treating each as a new person
-would give them multiple households and split their financial history, which
-support cannot repair.
+but **identity**. One person may sign in several ways (email and password,
+Google, Apple, phone), and each produces a different Supabase `sub`. Treating
+each as a new person would give them multiple households and split their
+financial history, which support cannot repair.
 
-Email cannot be the linking key: Apple's *Hide My Email* returns a relay address
-matching nothing else the person has used. **The verified phone number can**,
-because every signup route ends with one (PRD §4.6) — which is the real reason
-the phone step is mandatory.
+Two keys link one person's sign-in methods, strongest first:
+
+- **The verified phone number**, because every signup route ends with one
+  (PRD §4.6). It is the only key that survives Apple's *Hide My Email*, whose
+  relay address matches nothing else the person has used — the real reason the
+  phone step is mandatory.
+- **A verified email address** (manager decision, 2026-09-15 — PRD §9). Once
+  email and password is a way into an account, whoever controls the address can
+  already reset the password; refusing to link Google through that same address
+  would guard a door that is open anyway. Only an address the signed token
+  itself marks as verified is ever matched.
 
 A note on `user.auth_user_id`: it records the **first** Supabase account we saw
 for a person. When a second provider is linked by phone, that account's `sub`
@@ -38,6 +45,7 @@ from app.models.identity import (
     UserIdentity,
     UserPhoneChange,
 )
+from app.services import notifications
 from app.services.region import region_for_phone
 
 # Constraint names from the core schema migration. Branching on the name is what
@@ -129,6 +137,8 @@ def provider_from_claims(claims: dict) -> AuthProvider:
             return AuthProvider.google
         case "apple":
             return AuthProvider.apple
+        case "email":
+            return AuthProvider.email
         case _:
             return AuthProvider.phone
 
@@ -153,26 +163,25 @@ async def _by_phone(session: AsyncSession, phone: str) -> User | None:
 
 
 async def _by_email(session: AsyncSession, email: str) -> User | None:
-    """Oldest match wins, and only for users who have no phone yet.
+    """The oldest user holding this address. Pass only a VERIFIED email.
 
-    Once someone has a verified phone, that is the authoritative key and email
-    adds only risk: an address can be reassigned, and matching one the person no
-    longer controls is the same hazard as matching a recycled phone number —
-    which linking already refuses to do.
+    Reversed from the phone-first rule on 2026-09-15 (PRD §9). That rule matched
+    only users without a phone, because an address can be reassigned, and
+    matching one its owner no longer controls is the recycled-number hazard
+    again. It was right while email was not a way into an account. Once email and
+    password is one, whoever controls the address can already reset the password,
+    so the defence against a reassigned address moves to telling the account
+    when a sign-in method is added (app/services/notifications.py).
 
-    Email earns its place in exactly one window: someone signs up with Google,
-    abandons the phone step, and returns later with Apple. Bounding it to
-    phone-less users keeps that and closes the rest.
+    Verification is the caller's check; this function cannot see the token.
 
-    `user.email` is indexed but **not unique** — two rows sharing one should be
-    impossible, since this very lookup prevents it, but "impossible" plus an
-    arbitrary pick is a bad combination for something that decides whose
-    financial records a sign-in attaches to. Ordering makes it deterministic.
+    `user.email` is indexed but **not unique**: two people with different
+    verified phones may share an address, and `resolve_user` refuses to link
+    them. Ordering keeps the pick deterministic for something that decides whose
+    financial records a sign-in attaches to.
     """
     result = await session.execute(
-        select(User)
-        .where(User.email == email, User.phone.is_(None))
-        .order_by(User.created_at.asc())
+        select(User).where(User.email == email).order_by(User.created_at.asc())
     )
     return result.scalars().first()
 
@@ -182,21 +191,26 @@ async def _link_identity(
     user: User,
     provider: AuthProvider,
     provider_user_id: str,
-) -> None:
+) -> bool:
     """Attach a provider identity, tolerating a concurrent insert.
 
     ON CONFLICT DO NOTHING rather than check-then-insert: two first requests for
     the same new user arrive in parallel often enough to matter, and the loser of
     that race must not raise.
+
+    Returns whether a row was actually added, so a "sign-in method added" alert
+    fires once rather than on every later sign-in.
     """
-    await session.execute(
+    result = await session.execute(
         pg_insert(UserIdentity)
         .values(user_id=user.id, provider=provider, provider_user_id=provider_user_id)
         # Inferred from the columns rather than named: the constraint is called
         # `provider_identity`, not what the naming convention would produce, and
         # a wrong name here fails only at runtime.
         .on_conflict_do_nothing(index_elements=["provider", "provider_user_id"])
+        .returning(UserIdentity.id)
     )
+    return result.scalar_one_or_none() is not None
 
 
 def _absorb_claims(
@@ -265,17 +279,28 @@ async def resolve_user(
         await _flush_translating_conflicts(session, caller)
         return await _resolved(session, user, created=False)
 
-    # 2/3. A person we already know, arriving via a new provider.
+    # 2/3. A person we already know, arriving via a new method.
     linked: User | None = None
     if caller.phone:
         linked = await _by_phone(session, caller.phone)
-    if linked is None and caller.email:
-        linked = await _by_email(session, caller.email)
+    if linked is None and caller.email and caller.email_verified:
+        candidate = await _by_email(session, caller.email)
+        # Two different verified phones are two different people, whatever the
+        # addresses say. An email match must never move someone's identity key.
+        if candidate is not None and not (
+            caller.phone and candidate.phone and caller.phone != candidate.phone
+        ):
+            linked = candidate
 
     if linked is not None:
-        await _link_identity(session, linked, provider, provider_user_id)
+        added = await _link_identity(session, linked, provider, provider_user_id)
         _absorb_claims(session, linked, caller)
         await _flush_translating_conflicts(session, caller)
+        if added:
+            # Raised before the request commits. Harmless while delivery only
+            # logs; a real sender should go through an outbox, so a rolled-back
+            # link can never tell someone a method was added.
+            notifications.sign_in_method_added(linked.id, provider)
         return await _resolved(session, linked, created=False)
 
     # 4. Someone new.

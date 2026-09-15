@@ -1,7 +1,9 @@
-"""Supabase Auth admin operations — the only code that uses the service_role key.
+"""Supabase Auth admin operations — the only code that uses the secret key.
 
-That key bypasses every Row Level Security policy and can act as any user, so
-it lives in this service's environment and nowhere else (CLAUDE.md). This module
+`SUPABASE_SERVICE_ROLE_KEY` holds either a secret key (`sb_secret_…`) or the
+legacy `service_role` key. Either bypasses every Row Level Security policy and
+can act as any user, so it lives in this service's environment and nowhere else
+(CLAUDE.md). This module
 is deliberately tiny: each operation it offers is one more thing the key can be
 used for, and each should earn its place.
 
@@ -21,9 +23,23 @@ import httpx
 
 from app.config import get_settings
 
-__all__ = ["SupabaseAdmin", "SupabaseAdminError", "get_supabase_admin"]
+__all__ = ["SupabaseAdmin", "SupabaseAdminError", "admin_headers", "get_supabase_admin"]
 
 _TIMEOUT_SECONDS = 10.0
+
+
+def admin_headers(key: str) -> dict[str, str]:
+    """Headers that authorise an admin call, for either kind of Supabase key.
+
+    A **secret key** (`sb_secret_…`, Supabase's current kind) is not a JWT and
+    goes in `apikey` alone; the gateway turns it into a service-role token. Sent
+    as a Bearer token as well, it is rejected for not being a JWT. The **legacy
+    `service_role` key** is a JWT and is sent both ways, as Supabase documents.
+    """
+    headers = {"apikey": key}
+    if not key.startswith("sb_"):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
 
 
 class SupabaseAdminError(Exception):
@@ -55,10 +71,7 @@ class SupabaseAdmin:
             raise SupabaseAdminError("auth user id is not a UUID") from exc
 
         url = f"{self.base_url.rstrip('/')}/auth/v1/admin/users/{user_id}"
-        headers = {
-            "apikey": self.service_role_key,
-            "Authorization": f"Bearer {self.service_role_key}",
-        }
+        headers = admin_headers(self.service_role_key)
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
                 response = await client.delete(url, headers=headers)

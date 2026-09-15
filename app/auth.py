@@ -8,6 +8,7 @@ Legacy Supabase projects that still issue HS256 tokens signed with the shared
 JWT secret fall back to `SUPABASE_JWT_SECRET`.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import jwt
@@ -28,6 +29,26 @@ class AuthenticatedUser:
     email: str | None
     phone: str | None
     claims: dict
+    # Whether the signed token itself marks the email as verified. Linking two
+    # accounts by email trusts nothing else — see `email_verified_from_claims`.
+    email_verified: bool = False
+
+
+TokenVerifier = Callable[[str], AuthenticatedUser]
+
+
+def email_verified_from_claims(claims: dict) -> bool:
+    """Only an explicit `true` in the signed token counts.
+
+    Absent, false, the string "true", a malformed metadata block — all read as
+    unverified. That makes a wrong assumption about where Supabase carries the
+    flag fail SAFE: email linking simply does not happen, and the phone step
+    still stops the duplicate account.
+    """
+    metadata = claims.get("user_metadata")
+    if isinstance(metadata, dict) and metadata.get("email_verified") is True:
+        return True
+    return claims.get("email_verified") is True
 
 
 def _get_jwks_client(settings: Settings) -> jwt.PyJWKClient:
@@ -72,13 +93,10 @@ def _unauthorized(detail: str) -> HTTPException:
     )
 
 
-async def current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
-    settings: Settings = Depends(get_settings),
-) -> AuthenticatedUser:
-    """FastAPI dependency: verifies the bearer token, returns the caller."""
+def authenticate_token(token: str, settings: Settings) -> AuthenticatedUser:
+    """Verify a Supabase token and describe its caller. Raises 401 on any failure."""
     try:
-        claims = _decode(credentials.credentials, settings)
+        claims = _decode(token, settings)
     except HTTPException:
         raise
     except jwt.ExpiredSignatureError as exc:
@@ -95,4 +113,23 @@ async def current_user(
         email=claims.get("email"),
         phone=claims.get("phone"),
         claims=claims,
+        email_verified=email_verified_from_claims(claims),
     )
+
+
+async def current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+    settings: Settings = Depends(get_settings),
+) -> AuthenticatedUser:
+    """FastAPI dependency: verifies the bearer token, returns the caller."""
+    return authenticate_token(credentials.credentials, settings)
+
+
+def get_token_verifier(settings: Settings = Depends(get_settings)) -> TokenVerifier:
+    """A verifier for a token that is not this request's own bearer.
+
+    Linking accounts presents a second session's token in the request body. It
+    gets exactly the verification the bearer gets, through a dependency, so
+    tests replace it the same way they replace `current_user`.
+    """
+    return lambda token: authenticate_token(token, settings)

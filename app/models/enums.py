@@ -66,6 +66,9 @@ class AuthProvider(enum.Enum):
     phone = "phone"
     google = "google"
     apple = "apple"
+    # Email + password (manager decision, 2026-09-15 — PRD §9). Postgres cannot
+    # drop an enum value, which is why its migration's downgrade rebuilds the type.
+    email = "email"
 
 
 class GoalHorizon(enum.Enum):

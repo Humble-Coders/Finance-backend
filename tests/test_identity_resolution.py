@@ -34,6 +34,7 @@ def caller(
     email: str | None = None,
     phone: str | None = None,
     full_name: str | None = None,
+    email_verified: bool = False,
 ) -> AuthenticatedUser:
     claims: dict = {"app_metadata": {"provider": provider}}
     if full_name:
@@ -43,6 +44,7 @@ def caller(
         email=email,
         phone=phone,
         claims=claims,
+        email_verified=email_verified,
     )
 
 
@@ -52,6 +54,7 @@ class TestProviderFromClaims:
         [
             ("google", AuthProvider.google),
             ("apple", AuthProvider.apple),
+            ("email", AuthProvider.email),
             ("phone", AuthProvider.phone),
             (None, AuthProvider.phone),
             ("something-new", AuthProvider.phone),
@@ -117,10 +120,12 @@ class TestLinkingAcrossProviders:
 
     async def test_a_matching_email_links_too(self, db_session):
         first = await resolve_user(
-            db_session, caller(provider="google", email="same@example.com")
+            db_session,
+            caller(provider="google", email="same@example.com", email_verified=True),
         )
         second = await resolve_user(
-            db_session, caller(provider="apple", email="same@example.com")
+            db_session,
+            caller(provider="apple", email="same@example.com", email_verified=True),
         )
         assert second.user.id == first.user.id
 
@@ -253,29 +258,105 @@ class TestEmailAndNameAreFrozen:
         assert second.user.email == "real@example.com"
 
 
-class TestEmailLinkingIsBounded:
-    async def test_email_links_only_while_the_user_has_no_phone(self, db_session):
-        """The window it exists for: Google, abandoned phone step, later Apple."""
+class TestEmailLinking:
+    """A verified email links sign-in methods, and nothing else about an email does.
+
+    Reversed from the phone-first rule on 2026-09-15: once email and password is a
+    way into an account, the address is already a root of trust.
+    """
+
+    async def test_a_verified_email_links_to_an_account_without_a_phone(
+        self, db_session
+    ):
         first = await resolve_user(
-            db_session, caller(provider="google", email="window@example.com")
+            db_session,
+            caller(provider="google", email="window@example.com", email_verified=True),
         )
         second = await resolve_user(
-            db_session, caller(provider="apple", email="window@example.com")
+            db_session,
+            caller(provider="apple", email="window@example.com", email_verified=True),
         )
         assert second.user.id == first.user.id
 
-    async def test_email_does_not_link_once_a_phone_is_verified(self, db_session):
-        """Past that window the phone is authoritative and email adds only risk."""
+    async def test_a_verified_email_links_even_once_a_phone_is_verified(
+        self, db_session
+    ):
+        """The reversal: an existing user adding Google never meets the phone step."""
+        first = await resolve_user(
+            db_session,
+            caller(
+                provider="email",
+                email="settled@example.com",
+                phone="+14165580101",
+                email_verified=True,
+            ),
+        )
+        second = await resolve_user(
+            db_session,
+            caller(provider="google", email="settled@example.com", email_verified=True),
+        )
+        assert second.created is False
+        assert second.user.id == first.user.id
+
+    async def test_an_unverified_email_never_links(self, db_session):
+        """The condition the whole rule rests on."""
+        await resolve_user(
+            db_session,
+            caller(provider="google", email="claimed@example.com", email_verified=True),
+        )
+        stranger = await resolve_user(
+            db_session,
+            caller(provider="apple", email="claimed@example.com", email_verified=False),
+        )
+        assert stranger.created is True
+
+    async def test_a_different_verified_phone_outranks_a_matching_email(
+        self, db_session
+    ):
+        """Two verified numbers are two people, whatever the addresses say."""
         await resolve_user(
             db_session,
             caller(
-                provider="google", email="settled@example.com", phone="+14165560008"
+                provider="email",
+                email="shared@example.com",
+                phone="+14165580102",
+                email_verified=True,
             ),
         )
-        newcomer = await resolve_user(
-            db_session, caller(provider="apple", email="settled@example.com")
+        other = await resolve_user(
+            db_session,
+            caller(
+                provider="google",
+                email="shared@example.com",
+                phone="+14165580103",
+                email_verified=True,
+            ),
         )
-        assert newcomer.created is True
+        assert other.created is True
+        assert other.user.phone == "+14165580103"
+
+    async def test_adding_a_method_raises_the_alert_exactly_once(
+        self, db_session, monkeypatch
+    ):
+        from app.services import account_events
+
+        calls = []
+        monkeypatch.setattr(
+            account_events,
+            "sign_in_method_added",
+            lambda user_id, provider: calls.append((user_id, provider)),
+        )
+        first = await resolve_user(
+            db_session,
+            caller(provider="email", email="alert@example.com", email_verified=True),
+        )
+        google = caller(
+            provider="google", email="alert@example.com", email_verified=True
+        )
+        await resolve_user(db_session, google)
+        await resolve_user(db_session, google)  # the same method, signing in again
+
+        assert calls == [(first.user.id, AuthProvider.google)]
 
 
 class TestAppleClaimsArriveOnlyOnce:

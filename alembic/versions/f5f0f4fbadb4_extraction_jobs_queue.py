@@ -16,6 +16,22 @@ depends_on = None
 
 QUEUE_NAME = "extraction_jobs"
 
+# NOTHING USES THIS QUEUE. Statement extraction moved onto the device on
+# 2026-09-21 (PRD §9, docs/tickets/M3.1-statement-parse-endpoint.md): the apps
+# extract and redact locally and POST redacted text, so nothing enqueues here
+# and the `finai-worker` service that drained it is gone.
+#
+# The migration stays anyway, deliberately:
+#   - Deleting it would rewrite applied history. This revision has run against
+#     production; a later environment replaying the chain must still reach the
+#     same schema.
+#   - Dropping the queue instead would be a production migration that buys
+#     nothing. An empty pgmq queue costs one unread table.
+#   - `scripts/check_migrations.sh` asserts this queue exists after `upgrade
+#     head`, which is CI's only proof that the pgmq-installed path of a guarded
+#     migration actually runs rather than silently no-opping.
+# Delete the queue by hand if M3 ships without ever needing one.
+
 
 def upgrade() -> None:
     """Create the extraction queue, guarded twice.
@@ -46,8 +62,9 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Deliberately a no-op.
 
-    Dropping the queue would destroy any undelivered extraction jobs — real
-    user uploads mid-flight. A downgrade is run to undo a schema change, not to
-    discard work, and leaving the queue in place is harmless: the upgrade is
-    guarded, so re-applying finds it and does nothing.
+    Dropping the queue would destroy any undelivered extraction jobs. That
+    mattered when jobs were real; it is now moot (see the note above), but a
+    downgrade is still run to undo a schema change, not to discard state, and
+    leaving the queue in place is harmless: the upgrade is guarded, so
+    re-applying finds it and does nothing.
     """

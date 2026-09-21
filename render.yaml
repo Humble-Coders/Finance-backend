@@ -1,6 +1,12 @@
 # Render Blueprint. Create via: Render dashboard -> New -> Blueprint.
 # region: virginia is REQUIRED — Render defaults to Oregon, which would put a
 # cross-country hop between the API and the Virginia Supabase project.
+#
+# One service. A `finai-worker` background worker used to sit here and drain the
+# `extraction_jobs` queue; statement extraction moved onto the device on
+# 2026-09-21 (PRD §9), leaving it with no work, and it was removed along with
+# `app/workers/`. Nothing long-running belongs in a request handler, so if such
+# work reappears, add the service back rather than blocking a response on it.
 
 services:
   - type: web
@@ -12,22 +18,6 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
-    envVars:
-      # Pin the interpreter. Render's default tracks the latest Python, and
-      # pydantic-core has no wheels for the newest releases — pip then tries to
-      # compile it from Rust source and the build fails.
-      - key: PYTHON_VERSION
-        value: "3.12.8"
-      - fromGroup: finai-shared
-
-  - type: worker
-    name: finai-worker
-    runtime: python
-    region: virginia
-    plan: starter
-    branch: main
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.workers.main
     envVars:
       # Pin the interpreter. Render's default tracks the latest Python, and
       # pydantic-core has no wheels for the newest releases — pip then tries to

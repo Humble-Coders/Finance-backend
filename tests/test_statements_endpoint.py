@@ -401,13 +401,15 @@ class TestTheImportRecord:
         """
         from app.services import statements as parsing
 
-        monkeypatch.setattr(parsing, "MAX_ROWS", 1)
         use_model(monkeypatch, FakeModel())
         await onboard(api_client, "+14165571017")
         await consent_to_ai(api_client)
 
+        monkeypatch.setattr(parsing, "MAX_ROWS", 1)
         refused = await api_client.post(PARSE, json=body())
-        use_model(monkeypatch, FakeModel())
+        # Lift the limit before retrying, or the retry fails for the same
+        # reason and proves nothing about the quota.
+        monkeypatch.setattr(parsing, "MAX_ROWS", 2_000)
         retried = await api_client.post(PARSE, json=body())
 
         assert refused.status_code == 413

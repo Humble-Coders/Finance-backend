@@ -12,10 +12,9 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.enums import SourceKind, TransactionDirection
-from app.services.statements import MAX_TEXT_CHARS
 
 __all__ = ["StatementParseIn", "ParsedRowOut", "StatementParseOut"]
 
@@ -23,15 +22,35 @@ __all__ = ["StatementParseIn", "ParsedRowOut", "StatementParseOut"]
 class StatementParseIn(BaseModel):
     source_kind: SourceKind
     page_count: int | None = Field(default=None, ge=1, le=500)
-    text: str = Field(min_length=1, max_length=MAX_TEXT_CHARS)
+    # No max_length here on purpose: Pydantic would answer 422, and the
+    # ticket asks for 413 on an oversized statement. The endpoint checks it.
+    text: str = Field(min_length=1)
     # Optional here; 3.3 makes it required, once accounts can be created. An
     # import filed against the wrong account breaks dedup for both of them, so
     # this is never guessed or defaulted.
     account_id: uuid.UUID | None = None
+    # When the statement ran, sent as a field rather than left in the text.
+    # Statements print the year once, in a header block that the on-device
+    # redactor deliberately drops — it is where the name and address live. So
+    # the device reads the period *before* it redacts and sends it here. A date
+    # range is not personal data, and without it every date on the statement is
+    # a day and a month with no year, which the model is told to refuse rather
+    # than guess at.
+    statement_period_start: date | None = None
+    statement_period_end: date | None = None
     # Opt-in, per import, and only honoured when the import actually went badly
     # (PRD F2, 2026-09-21). Defaulting to False is the safe default and is
     # asserted by a test rather than trusted.
     keep_text_for_diagnostics: bool = False
+
+    @model_validator(mode="after")
+    def _period_is_a_period(self) -> StatementParseIn:
+        start, end = self.statement_period_start, self.statement_period_end
+        if (start is None) != (end is None):
+            raise ValueError("a statement period needs both ends or neither")
+        if start is not None and end is not None and end < start:
+            raise ValueError("a statement period cannot end before it starts")
+        return self
 
 
 class ParsedRowOut(BaseModel):
@@ -45,6 +64,12 @@ class ParsedRowOut(BaseModel):
 
 class StatementParseOut(BaseModel):
     import_id: uuid.UUID
+    # The amounts above are decimal strings in this currency. Sent explicitly
+    # rather than left for the client to infer from /capabilities: PRD §4.4
+    # carries money as an amount *and* a currency, and a client formatting
+    # "12.40" with the wrong symbol is the kind of error nobody reports and
+    # everybody notices.
+    currency: str
     rows: list[ParsedRowOut]
     # How many lines the model offered that did not survive validation — most
     # often an invented amount. Surfaced, not swallowed: it is the difference

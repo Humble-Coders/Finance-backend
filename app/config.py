@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     # before any real statement is parsed (PRD Appendix A.3) — that swap has to
     # be an environment variable, or it will not happen on the day it must.
     llm_api_key: str = ""
+    # The operator asserting that the configured key is a business API tier
+    # whose terms forbid training on the data we send (PRD Appendix A.3). The
+    # consent screen tells users this in so many words, so production refuses to
+    # parse without it: a promise nobody can enforce is one we will eventually
+    # break, and the free tier M3 develops against permits exactly what the
+    # screen says is forbidden.
+    llm_no_training_tier: bool = False
     llm_provider: str = "gemini"
     llm_model: str = "gemini-2.0-flash"
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"

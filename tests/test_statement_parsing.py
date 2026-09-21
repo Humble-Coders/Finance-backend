@@ -151,6 +151,44 @@ class TestTheYearSurvivesChunking:
         return "\n".join([self.HEADER, ""] + body)
 
     @pytest.mark.asyncio
+    async def test_the_period_from_the_device_reaches_every_window(self):
+        """The mechanism, as opposed to the fallback.
+
+        Ticket 3.2's redactor drops the block above the first transaction on
+        page 1 — the same block a scraped header comes from, by the same
+        definition — so by the time text reaches us there is usually no header
+        left to scrape. The device reads the period before it redacts and sends
+        it as a field; every window, the first included, is told.
+        """
+        model = FakeModel()
+        redacted = "\n".join(
+            f"{day:02d} Aug   TIM HORTONS #4821 {day:04d}          12.40"
+            for day in range(1, 900)
+        )
+
+        await parse_statement(
+            model, redacted, CURRENCY, (date(2026, 8, 1), date(2026, 8, 31))
+        )
+
+        assert len(model.prompts) > 1
+        assert all("2026-08-01" in prompt for prompt in model.prompts)
+
+    @pytest.mark.asyncio
+    async def test_redacted_text_with_no_period_has_no_year_anywhere(self):
+        """What the previous fix silently did against a real client.
+
+        Kept as a record: with the header gone and no period field, nothing in
+        the text says which year this is, and the prompt tells the model to omit
+        every row rather than guess.
+        """
+        model = FakeModel()
+        redacted = "14 Aug   TIM HORTONS #4821          12.40"
+
+        await parse_statement(model, redacted, CURRENCY)
+
+        assert all("2026" not in prompt for prompt in model.prompts)
+
+    @pytest.mark.asyncio
     async def test_every_window_after_the_first_is_given_the_year(self):
         model = FakeModel()
 

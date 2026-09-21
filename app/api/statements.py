@@ -219,7 +219,12 @@ async def parse(
         # Constructed outside, that misconfiguration escapes as an unhandled
         # 500 with no import record and no reason recorded.
         client = build_client(settings)
-        outcome = await parse_statement(client, body.text, currency)
+        period = (
+            (body.statement_period_start, body.statement_period_end)
+            if body.statement_period_start and body.statement_period_end
+            else None
+        )
+        outcome = await parse_statement(client, body.text, currency, period)
     except TooManyRowsError as exc:
         # Read fine, simply bigger than this endpoint handles. Saying "we could
         # not read that statement" would be both wrong and unactionable.

@@ -33,9 +33,11 @@ ticket asked for.
 
 **Reading the statement**
 - `app/services/statements.py` — windowing, the prompt, row validation, the
-  verbatim-amount check and the overlap merge. The statement's header is carried
-  into every later window: statements print the year once, and without it the
-  prompt's own rule drops every row it cannot date.
+  verbatim-amount check and the overlap merge. **The statement period arrives as
+  a field** (`statement_period_start`/`_end`) and is put on every window:
+  statements print the year once, in the header block the on-device redactor
+  deliberately drops, and without it the prompt's own rule drops every row it
+  cannot date. Scraping the header is kept only as a fallback.
 - `app/services/llm.py` — provider behind a protocol, chosen by settings, with
   one HTTP connection per parse.
 
@@ -59,7 +61,7 @@ ticket asked for.
 
 ```bash
 gh pr checkout 40
-DATABASE_URL="" MIGRATION_DATABASE_URL="" .venv/bin/python -m pytest -q   # 211 / 160 skipped
+DATABASE_URL="" MIGRATION_DATABASE_URL="" .venv/bin/python -m pytest -q   # 216 / 160 skipped
 ```
 
 Database-backed tests need a throwaway Postgres and run in CI's `database` job —
@@ -93,7 +95,7 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
 | Retained text in export; deleted with the account | **Not met** — no export exists. The FK cascade covers deletion incidentally |
 | Provider swap by settings | **Met** |
 | Synthetic fixtures only | **Met** |
-| CI green | **Met** — 214/160 fast, 160 database, migrations apply/reverse/re-apply |
+| CI green | **Met** — 216/160 fast, 160 database, migrations apply/reverse/re-apply |
 
 ## Deviations & decisions
 
@@ -118,6 +120,12 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
 
 - **The fixture should become a realistic multi-page Canadian statement.** What
   exists proves the guards, not the parsing.
+- **The device must send the statement period**, read *before* it redacts —
+  [FinAI-Mobile-2026#29](https://github.com/Humble-Coders/FinAI-Mobile-2026/issues/29)
+  and [#31](https://github.com/Humble-Coders/FinAI-Mobile-2026/issues/31) were
+  updated for it. Its redactor drops the block above the first transaction on
+  page 1, which is where the name, the address *and the year* live. Without the
+  field, a statement that reads perfectly returns nothing.
 - **The client must handle two 413s** the mobile ticket predates: `statement_too_long`
   (over 200k characters) and `too_many_transactions`. Ticket
   [FinAI-Mobile-2026#31](https://github.com/Humble-Coders/FinAI-Mobile-2026/issues/31)
@@ -135,5 +143,8 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
   normally adjacent — but real, and documented in the function.
 - **Export and cross-household read coverage** move to 3.3/3.4 with the endpoints
   they need.
+- **Dates could be checked against the period** now that we have one — a row
+  outside it by more than a posting delay is suspicious. Deliberately not added
+  late in review; it belongs with 3.3's confidence rules.
 - **The prompt is untuned against real bank layouts.** Review-queue volume (3.4)
   is the signal for that, and the opt-in diagnostic text is how we see why.

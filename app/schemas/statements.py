@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.enums import SourceKind, TransactionDirection
 
@@ -29,10 +29,28 @@ class StatementParseIn(BaseModel):
     # import filed against the wrong account breaks dedup for both of them, so
     # this is never guessed or defaulted.
     account_id: uuid.UUID | None = None
+    # When the statement ran, sent as a field rather than left in the text.
+    # Statements print the year once, in a header block that the on-device
+    # redactor deliberately drops — it is where the name and address live. So
+    # the device reads the period *before* it redacts and sends it here. A date
+    # range is not personal data, and without it every date on the statement is
+    # a day and a month with no year, which the model is told to refuse rather
+    # than guess at.
+    statement_period_start: date | None = None
+    statement_period_end: date | None = None
     # Opt-in, per import, and only honoured when the import actually went badly
     # (PRD F2, 2026-09-21). Defaulting to False is the safe default and is
     # asserted by a test rather than trusted.
     keep_text_for_diagnostics: bool = False
+
+    @model_validator(mode="after")
+    def _period_is_a_period(self) -> StatementParseIn:
+        start, end = self.statement_period_start, self.statement_period_end
+        if (start is None) != (end is None):
+            raise ValueError("a statement period needs both ends or neither")
+        if start is not None and end is not None and end < start:
+            raise ValueError("a statement period cannot end before it starts")
+        return self
 
 
 class ParsedRowOut(BaseModel):

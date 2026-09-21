@@ -96,14 +96,18 @@ def _looks_like_a_transaction(line: str) -> bool:
 
 
 def _header(lines: list[str]) -> str:
-    """The block above the first transaction — where the year lives.
+    """The block above the first transaction — where the year *may* live.
 
-    Statements print `14 Aug` on every line and the year exactly once, in
-    "Statement period: 1 Aug 2026 to 31 Aug 2026". A window is a slice of the
-    text, so only the first one contains that. Without this, every later window
-    is a list of dates with no year, the prompt's own rule says to omit a row
-    rather than guess one, and three quarters of a long statement vanish — not
-    rejected, not counted, just absent, reported as a clean import.
+    **A fallback, not the mechanism.** The device sends the statement period as
+    a structured field (`period` below), because scraping it from text cannot
+    be relied on twice over: the on-device redactor drops the block above the
+    first transaction on page 1 — the same block this looks in, by the same
+    definition — and on a card statement a "Previous balance as of 31 Jul 2026
+    1,204.55" summary line carries both a date and an amount, so extraction
+    stops above the period line anyway.
+
+    Kept for text that still has a header, and for anything that reaches this
+    module without a period.
     """
     head: list[str] = []
     size = 0
@@ -203,6 +207,21 @@ def _split_long_lines(lines: list[str]) -> list[str]:
                 pieces.pop()
         out.extend(pieces)
     return out
+
+
+def _period_context(period: tuple[date, date] | None, header: str) -> str:
+    """What every window is told about when this statement happened.
+
+    Statements print `14 Aug` on every line and the year exactly once. A window
+    is a slice of the text, so without this every window but the first is a list
+    of dates with no year — and the prompt's own rule is to omit a row rather
+    than guess one. Not some rows: all of them, silently, reported as a clean
+    import.
+    """
+    if period is not None:
+        start, end = period
+        return f"Statement period: {start.isoformat()} to {end.isoformat()}"
+    return header
 
 
 def _windows(text: str) -> list[str]:
@@ -374,7 +393,12 @@ def _merge(per_window: list[list[ParsedRow]]) -> list[ParsedRow]:
     return [row for key in order for row in [first[key]] * counts[key]]
 
 
-async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseOutcome:
+async def parse_statement(
+    client: LlmClient,
+    text: str,
+    currency: str,
+    period: tuple[date, date] | None = None,
+) -> ParseOutcome:
     """Read a whole statement, however many model calls that takes.
 
     Raises `LlmError` if the model fails: the caller marks the import failed and
@@ -387,8 +411,7 @@ async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseO
     endpoint handles. Reported as the general failure it became "we could not
     read that statement", which is wrong and leaves the user nothing to do.
     """
-    lines = text.splitlines()
-    header = _header(lines)
+    context = _period_context(period, _header(text.splitlines()))
     windows = _windows(text)
     if len(windows) > MAX_WINDOWS:
         raise LlmError(
@@ -404,12 +427,15 @@ async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseO
     for index, window in enumerate(windows):
         if time.monotonic() - started > PARSE_BUDGET_SECONDS:
             raise LlmError("statement took longer to read than the time budget allows")
-        # The first window already contains the header; repeating it there would
-        # invite the model to read the same lines twice.
+        # A period given by the device goes on every window, the first
+        # included: after redaction that window may no longer carry a header at
+        # all. A scraped header is already inside window 0, so repeating it
+        # there would only invite the model to read those lines twice.
+        include = bool(context) and (period is not None or index > 0)
         prompt = (
-            window
-            if index == 0 or not header
-            else f"STATEMENT HEADER\n{header}\n\nTRANSACTIONS\n{window}"
+            f"STATEMENT HEADER\n{context}\n\nTRANSACTIONS\n{window}"
+            if include
+            else window
         )
         answer = await client.complete(
             system=_SYSTEM_PROMPT,

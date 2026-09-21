@@ -1,10 +1,14 @@
 """Every deployable entrypoint must import.
 
 CI runs the test suite, but the suite only imports what it directly needs —
-`app.core`, `app.db`, `app.models`. Nothing imported `app.main` or
-`app.workers.main`, so an import-time failure in either passed CI and failed on
-deploy. That is exactly the second of the three deploy failures this project's
-CI was created to prevent (`ModuleNotFoundError: psycopg2`).
+`app.core`, `app.db`, `app.models`. Nothing imported `app.main`, so an
+import-time failure in it passed CI and failed on deploy. That is exactly the
+second of the three deploy failures this project's CI was created to prevent
+(`ModuleNotFoundError: psycopg2`).
+
+There is one deployed entrypoint now. The extraction worker was removed with
+the superseded upload pipeline (PRD §9, 2026-09-21); the parametrized list
+stays so restoring the cover for a second service is a one-line change.
 
 Linting does not close the gap: ruff does not resolve imports, so a *used*
 import of a module that does not exist is invisible to it.
@@ -45,8 +49,6 @@ def _throwaway_settings(monkeypatch: pytest.MonkeyPatch):
 DEPLOYED_ENTRYPOINTS = [
     # Render: uvicorn app.main:app
     "app.main",
-    # Render: python -m app.workers.main
-    "app.workers.main",
 ]
 
 
@@ -64,10 +66,3 @@ def test_the_api_exposes_an_asgi_app() -> None:
     from app.main import app
 
     assert callable(app)
-
-
-def test_the_worker_exposes_a_main_entrypoint() -> None:
-    """`python -m app.workers.main` needs the module to be runnable."""
-    import app.workers.main as worker
-
-    assert hasattr(worker, "Worker")

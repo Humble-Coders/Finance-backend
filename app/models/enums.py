@@ -13,7 +13,8 @@ __all__ = [
     "TransactionSource",
     "TransactionDirection",
     "AccountKind",
-    "DocumentStatus",
+    "StatementImportStatus",
+    "SourceKind",
     "AuthProvider",
     "GoalHorizon",
     "PlanTier",
@@ -48,11 +49,14 @@ class AccountKind(enum.Enum):
     cash = "cash"
 
 
-class DocumentStatus(enum.Enum):
-    """Lifecycle of an uploaded statement.
+class StatementImportStatus(enum.Enum):
+    """Lifecycle of a statement import.
 
-    `awaiting_review` is the state the source document is retained for; it is
-    deleted on confirmation or after 72 hours, whichever comes first (PRD F2).
+    Since 2026-09-21 the statement is read on the device and parsed inside the
+    request (PRD F2), so an import moves `processing → awaiting_review` in one
+    call and `queued` is never written. The value is kept because Postgres
+    cannot drop an enum member without rebuilding the type, and rebuilding a
+    type to delete a word nobody reads is not worth a production migration.
     """
 
     queued = "queued"
@@ -60,6 +64,18 @@ class DocumentStatus(enum.Enum):
     awaiting_review = "awaiting_review"
     completed = "completed"
     failed = "failed"
+
+
+class SourceKind(enum.Enum):
+    """How the device got the text out of the statement.
+
+    Worth recording: `pdf_text` comes from the PDF's own text layer and is
+    exact, while `ocr` is a reading of pixels and can be wrong in ways that look
+    plausible. When a parse turns out badly, this is the first thing to check.
+    """
+
+    pdf_text = "pdf_text"
+    ocr = "ocr"
 
 
 class AuthProvider(enum.Enum):
@@ -92,10 +108,16 @@ class RegionSource(enum.Enum):
 class PolicyKind(enum.Enum):
     """Which kind of legal copy a `disclaimer_version` row holds.
 
-    Consent is logged against the account terms; the regional disclaimer is what
-    a country pack's `disclaimer_version` points at. They version independently,
-    so one table needs to tell them apart.
+    Consent is logged against the account terms and, separately, against AI
+    processing; the regional disclaimer is what a country pack's
+    `disclaimer_version` points at. They version independently, so one table
+    needs to tell them apart.
     """
 
     account_terms = "account_terms"
     regional_disclaimer = "regional_disclaimer"
+    # Express consent to AI processing of financial data, asked before the first
+    # statement import and separate from the account terms (PRD Appendix A.5 #1).
+    # Bundling it with the account terms would make it not-express, which is the
+    # one thing the requirement is about.
+    ai_processing = "ai_processing"

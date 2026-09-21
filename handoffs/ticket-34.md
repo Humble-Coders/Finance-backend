@@ -57,7 +57,7 @@ ticket asked for.
 
 ```bash
 gh pr checkout 40
-DATABASE_URL="" MIGRATION_DATABASE_URL="" .venv/bin/python -m pytest -q   # 210 / 159 skipped
+DATABASE_URL="" MIGRATION_DATABASE_URL="" .venv/bin/python -m pytest -q   # 211 / 159 skipped
 ```
 
 Database-backed tests need a throwaway Postgres and run in CI's `database` job —
@@ -91,7 +91,7 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
 | Retained text in export; deleted with the account | **Not met** — no export exists. The FK cascade covers deletion incidentally |
 | Provider swap by settings | **Met** |
 | Synthetic fixtures only | **Met** |
-| CI green | **Met** — 210/159 fast, 159 database, migrations apply/reverse/re-apply |
+| CI green | **Met** — 211/159 fast, 159 database, migrations apply/reverse/re-apply |
 
 ## Deviations & decisions
 
@@ -105,13 +105,20 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
   the apps already read it.
 - **No filename column.** `statement-jane-smith.pdf` is personal data with no use.
 - **Retention is weaker than a flat 30 days**: the purge runs on the import path,
-  so expired text survives until the next import. The PRD and Appendix A.5 were
-  corrected to say so, and a scheduled sweep is now a before-launch item.
+  so expired text survives until the next import. The correction to the PRD and
+  Appendix A.5 is committed but **still open** in
+  [FinAI-Mobile-2026#34](https://github.com/Humble-Coders/FinAI-Mobile-2026/pull/34)
+  — until it merges, the PRD on `main` promises a flat 30-day expiry the code
+  does not provide, so **that PR blocks this one**. A scheduled sweep is a
+  before-launch item either way.
 
 ## Open questions / follow-ups
 
 - **The fixture should become a realistic multi-page Canadian statement.** What
   exists proves the guards, not the parsing.
+- **A statement over 2,000 transactions is refused** with 413 `too_many_transactions`
+  rather than imported in parts. Splitting one across imports would need dedup
+  across them, which is 3.3's problem, not this endpoint's.
 - **`_merge` cannot separate two identical transactions that land in different
   windows** with no overlap between them. Narrow — identical same-day rows are
   normally adjacent — but real, and documented in the function.

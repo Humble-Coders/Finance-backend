@@ -30,7 +30,12 @@ from app.services.capabilities import currency_for, require_feature
 from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
 from app.services.llm import LlmError, build_client, close_client
-from app.services.statements import MAX_TEXT_CHARS, parse_statement
+from app.services.statements import (
+    MAX_ROWS,
+    MAX_TEXT_CHARS,
+    TooManyRowsError,
+    parse_statement,
+)
 
 router = APIRouter(tags=["statements"])
 
@@ -43,6 +48,7 @@ IMPORT_FEATURE = "document_upload"
 
 QUOTA_EXCEEDED = "import_quota_exceeded"
 TOO_LONG = "statement_too_long"
+TOO_MANY_ROWS = "too_many_transactions"
 UNKNOWN_ACCOUNT = "unknown_account"
 PARSE_FAILED = "parse_failed"
 
@@ -214,6 +220,22 @@ async def parse(
         # 500 with no import record and no reason recorded.
         client = build_client(settings)
         outcome = await parse_statement(client, body.text, currency)
+    except TooManyRowsError as exc:
+        # Read fine, simply bigger than this endpoint handles. Saying "we could
+        # not read that statement" would be both wrong and unactionable.
+        record.status = StatementImportStatus.failed
+        record.failure_reason = str(exc)
+        await session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "code": TOO_MANY_ROWS,
+                "message": "That statement has more transactions than we can "
+                "import in one go.",
+                "limit": MAX_ROWS,
+                "import_id": str(record.id),
+            },
+        ) from exc
     except LlmError as exc:
         record.status = StatementImportStatus.failed
         record.failure_reason = str(exc)

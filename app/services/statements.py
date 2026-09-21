@@ -36,10 +36,22 @@ from app.services.llm import LlmClient, LlmError
 __all__ = [
     "ParsedRow",
     "ParseOutcome",
+    "TooManyRowsError",
     "parse_statement",
     "MAX_TEXT_CHARS",
     "MAX_ROWS",
 ]
+
+
+class TooManyRowsError(LlmError):
+    """More transactions than a statement plausibly has.
+
+    Its own type because it is not a failure to read: the model may have read
+    perfectly and the document may simply be bigger than this endpoint handles.
+    Reported as `LlmError` it became "we could not read that statement", which
+    is both wrong and unactionable.
+    """
+
 
 log = structlog.get_logger()
 
@@ -63,6 +75,9 @@ PARSE_BUDGET_SECONDS = 180.0
 # overlap covers the error.
 CHUNK_CHARS = 12_000
 OVERLAP_LINES = 6
+# Carried across a character split. Generous next to any real statement line,
+# and cheap: it is re-read once, and the merge removes what it duplicates.
+LINE_SPLIT_OVERLAP_CHARS = 300
 
 _SYSTEM_PROMPT = """\
 You read bank and credit-card statements and return the transactions in them.
@@ -118,15 +133,23 @@ def _split_long_lines(lines: list[str]) -> list[str]:
     a whole statement, as one line. Without this, that line becomes a window
     larger than any model's context and the parse fails on input we could
     otherwise read.
+
+    The pieces **overlap**, and that is not a detail. Splitting at a raw
+    character offset cuts whatever happens to be there — and after this runs,
+    each piece fills a window on its own, so the line-based overlap in
+    `_windows` has nothing to work with and carries nothing across. A
+    transaction straddling a boundary then exists in no window at all: not
+    rejected, not counted, simply never shown to the model. Measured on a
+    150k-character blob that was up to twelve transactions quietly missing from
+    somebody's spending.
     """
     out: list[str] = []
+    step = CHUNK_CHARS - LINE_SPLIT_OVERLAP_CHARS
     for line in lines:
         if len(line) <= CHUNK_CHARS:
             out.append(line)
             continue
-        out.extend(
-            line[at : at + CHUNK_CHARS] for at in range(0, len(line), CHUNK_CHARS)
-        )
+        out.extend(line[at : at + CHUNK_CHARS] for at in range(0, len(line), step))
     return out
 
 
@@ -327,11 +350,11 @@ async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseO
         # pre-merge, so the overlap inflates them and a legitimate statement
         # must not trip it. The real limit is applied to the merged result.
         if total_rows > MAX_ROWS * 4:
-            raise LlmError("statement produced more rows than a statement can have")
+            raise TooManyRowsError(f"more than {MAX_ROWS} transactions")
 
     merged = _merge(per_window)
     if len(merged) > MAX_ROWS:
-        raise LlmError("statement produced more rows than a statement can have")
+        raise TooManyRowsError(f"more than {MAX_ROWS} transactions")
     log.info(
         "statement_parsed",
         model=client.model,

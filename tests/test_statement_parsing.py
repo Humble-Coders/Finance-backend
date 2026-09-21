@@ -17,7 +17,7 @@ from app.core.money import MoneyError
 from app.models.enums import TransactionDirection
 from app.services import statements
 from app.services.llm import LlmError
-from app.services.statements import ParseOutcome, parse_statement
+from app.services.statements import ParseOutcome, TooManyRowsError, parse_statement
 
 CURRENCY = "CAD"
 
@@ -209,6 +209,20 @@ class TestOcrShapedInput:
         assert len(windows) > 1
         assert all(len(w) <= statements.CHUNK_CHARS for w in windows)
 
+    def test_a_transaction_across_a_character_split_survives_whole(self):
+        """The splitting fix's own failure mode, pinned.
+
+        Cutting at a raw offset leaves each piece filling a window on its own,
+        so the line-based overlap carries nothing — and a transaction on the
+        boundary is in no window at all. Not rejected, not counted: never shown
+        to the model, and silently missing from the person's spending.
+        """
+        blob = ("A" * 11_980) + "2026-08-14  TIM HORTONS  12.40" + ("B" * 40_000)
+
+        windows = statements._windows(blob)
+
+        assert any("TIM HORTONS  12.40" in w for w in windows)
+
 
 class TestLongStatements:
     @pytest.mark.asyncio
@@ -283,7 +297,7 @@ class TestLongStatements:
         )
         model = FakeModel(*[many] * 20)
 
-        with pytest.raises(LlmError):
+        with pytest.raises(TooManyRowsError):
             await parse_statement(model, long_statement, CURRENCY)
 
 

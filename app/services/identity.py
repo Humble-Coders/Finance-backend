@@ -54,6 +54,15 @@ from app.services.region import region_for_phone
 AUTH_USER_ID_UNIQUE = "uq_user_auth_user_id"
 PHONE_UNIQUE = "uq_user_phone"
 
+# Why a phone conflict was raised. All three answer the client with the same
+# code (`phone_already_linked`) — it must not reveal whose account holds the
+# number — so this is the only thing that tells them apart afterwards. The first
+# is someone signing in with a number another account already has; the other two
+# are races, and a race showing up in the logs at all is worth knowing.
+PHONE_TAKEN_ON_CHECK = "phone_owned_by_another_user"
+PHONE_TAKEN_ON_FLUSH = "phone_claimed_concurrently"
+PHONE_TAKEN_ON_CREATE = "phone_claimed_during_create"
+
 __all__ = [
     "PhoneAlreadyLinkedError",
     "ResolvedIdentity",
@@ -70,9 +79,14 @@ class PhoneAlreadyLinkedError(Exception):
     is the outcome this whole module exists to prevent.
     """
 
-    def __init__(self, phone: str) -> None:
+    def __init__(self, phone: str, reason: str) -> None:
         super().__init__("phone already linked to another user")
         self.phone = phone
+        # Which of the paths above found it. Carried on the exception because
+        # the handler that logs the 409 is in another module and cannot tell.
+        # The phone number itself must never reach a log — see
+        # `app.services.conflicts`.
+        self.reason = reason
 
 
 async def _flush_translating_conflicts(
@@ -98,7 +112,9 @@ async def _flush_translating_conflicts(
         constraint = _violated_constraint(exc)
         await session.rollback()
         if constraint == PHONE_UNIQUE:
-            raise PhoneAlreadyLinkedError(caller.phone or "") from exc
+            raise PhoneAlreadyLinkedError(
+                caller.phone or "", PHONE_TAKEN_ON_FLUSH
+            ) from exc
         raise
 
 
@@ -323,7 +339,9 @@ async def resolve_user(
             # sequential path, so the same answer. (Kept here as well as in
             # _flush_translating_conflicts because this path must also decide
             # whether to retry, which the helper cannot know.)
-            raise PhoneAlreadyLinkedError(caller.phone or "") from exc
+            raise PhoneAlreadyLinkedError(
+                caller.phone or "", PHONE_TAKEN_ON_CREATE
+            ) from exc
 
         if constraint is not None and constraint != AUTH_USER_ID_UNIQUE:
             # Some other constraint we have no recovery for. Raising beats
@@ -452,4 +470,4 @@ async def _assert_phone_not_taken(
         return
     owner = await _by_phone(session, caller.phone)
     if owner is not None and owner.id != user.id:
-        raise PhoneAlreadyLinkedError(caller.phone)
+        raise PhoneAlreadyLinkedError(caller.phone, PHONE_TAKEN_ON_CHECK)

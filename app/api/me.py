@@ -27,6 +27,7 @@ from app.schemas.identity import (
     TermsStatus,
     UserOut,
 )
+from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
 from app.services.onboarding import onboarding_state
 from app.services.region import normalize_region
@@ -115,6 +116,16 @@ async def accept_terms(
     state = await onboarding_state(session, identity.user, identity.household)
     terms = state.terms
     if terms is None or body.version != terms.version:
+        # Version strings are ours, not the user's, so they are safe to log —
+        # and which one the client showed is the only way to tell a stale app
+        # from terms that were never configured.
+        log_conflict(
+            TERMS_VERSION_MISMATCH,
+            "no_terms_in_force" if terms is None else "stale_terms_version",
+            user_id=str(identity.user.id),
+            sent_version=body.version,
+            current_version=terms.version if terms else None,
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={

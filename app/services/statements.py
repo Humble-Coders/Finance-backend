@@ -102,8 +102,12 @@ MAX_HEADER_CHARS = 1_200
 # An amount, and a date that is not necessarily a year: `14 Aug`, `AUG 14`,
 # `08/14`. Deliberately loose — this only decides where the header ends.
 _AMOUNT_RE = re.compile(r"\d[\d,]*\.\d{2}")
+# `\s?`, not `\s*`: a date is "14 Aug" or "Aug 14", never a word and a number
+# separated by a column of spaces. With `\s*` a statement's "Opening balance
+#     2,184.63" reads as a dated amount, and the header — the year with it —
+# gets cut above the line that holds it.
 _DATE_RE = re.compile(
-    r"\b(\d{1,2}[/-]\d{1,2}|\d{1,2}\s*[A-Za-z]{3,}|[A-Za-z]{3,}\s*\d{1,2})\b"
+    r"\b(\d{1,2}[/-]\d{1,2}|\d{1,2}\s?[A-Za-z]{3,}|[A-Za-z]{3,}\s?\d{1,2})\b"
 )
 
 
@@ -272,6 +276,24 @@ def _windows(text: str) -> list[str]:
     return windows
 
 
+def _ungrouped(amount: str) -> str:
+    """`2,410.00` -> `2410.00`. Thousands separators removed, nothing else.
+
+    The prompt tells the model to copy an amount exactly as the statement
+    prints it, and Canadian statements print `2,410.00`. `Decimal` rejects
+    that, so without this every row over $999.99 was dropped by the validator
+    as unparseable — rent, mortgage, payroll, tuition, car payments. The
+    largest lines in somebody's finances, gone, while the small ones came
+    through and the total looked plausible.
+
+    Only `,` and spaces between digits. A European `1.234,56` is a different
+    problem and is not guessed at here: v1 is CAD, and inventing a rule for
+    which separator means what is how an amount becomes wrong by a factor of a
+    hundred rather than merely rejected.
+    """
+    return re.sub(r"(?<=\d)[,\s](?=\d)", "", amount.strip())
+
+
 def _amount_forms(amount: str) -> set[str]:
     """How this amount might be written on a statement.
 
@@ -308,7 +330,7 @@ def _coerce(raw: object, window: str, currency: str) -> ParsedRow | None:
         return None
     try:
         occurred_on = date.fromisoformat(str(raw["date"]))
-        amount = normalize(str(raw["amount"]), currency)
+        amount = normalize(_ungrouped(str(raw["amount"])), currency)
         direction = TransactionDirection(str(raw["direction"]))
         description = str(raw["description"]).strip()
     except (KeyError, ValueError, MoneyError):

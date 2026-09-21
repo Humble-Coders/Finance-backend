@@ -1,0 +1,32 @@
+01 Aug  PAYROLL DEP NORTHWIND LOGISTICS                    2,410.00   4,594.63
+02 Aug  TIM HORTONS #4821 OTTAWA ON              5.25                 4,589.38
+02 Aug  TIM HORTONS #4821 OTTAWA ON              5.25                 4,584.13
+03 Aug  LOBLAWS 1042 OTTAWA ON                 134.02                 4,450.11
+04 Aug  POS PURCHASE ••••2345               68.40                 4,381.71
+        PETRO-CANADA 2281 OTTAWA ON
+05 Aug  E-TRANSFER TO J SMITH                  250.00                 4,131.71
+06 Aug  HYDRO OTTAWA PREAUTH                    112.55                 4,019.16
+07 Aug  SPOTIFY P3A4B5C6                         11.29                 4,007.87
+10 Aug  CHEQUE #0142                          1,450.00                 2,557.87
+11 Aug  METRO 8821 OTTAWA ON                     87.16                 2,470.71
+12 Aug  OC TRANSPO FARE                           2.90                 2,467.81
+12 Aug  OC TRANSPO FARE                           2.90                 2,464.91
+14 Aug  AMZN MKTP CA*2R41K OTTAWA ON              43.77                 2,421.14
+15 Aug  PAYROLL DEP NORTHWIND LOGISTICS                    2,410.00   4,831.14
+17 Aug  SHOPPERS DRUG MART #0847                  31.08                 4,800.06
+18 Aug  RESTAURANT LE MOULIN OTTAWA               76.45                 4,723.61
+
+ROYAL BANK OF CANADA — Account number: ••••4321— page 2 of 2
+
+Date    Description                        Withdrawals    Deposits    Balance
+20 Aug  INTERAC E-TRANSFER FEE                     1.50                 4,722.11
+21 Aug  BELL CANADA PREAUTH                       95.00                 4,627.11
+24 Aug  COSTCO WHOLESALE W1284                   212.34                 4,414.77
+25 Aug  NETFLIX.COM                               20.99                 4,393.78
+26 Aug  TD INSURANCE PREAUTH                     142.00                 4,251.78
+28 Aug  PRESTO RELOAD                             40.00                 4,211.78
+29 Aug  ATM WITHDRAWAL RIDEAU CENTRE             100.00                 4,111.78
+31 Aug  MONTHLY ACCOUNT FEE                       16.95                 4,094.83
+31 Aug  INTEREST PAID                                          0.42     4,095.25
+
+Closing balance                                                     4,095.25

@@ -19,10 +19,15 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import date
+from pathlib import Path
 
-from app.config import get_settings
-from app.services.llm import build_client, close_client
-from app.services.statements import parse_statement
+# Python puts the *script's* directory on sys.path, not the working directory,
+# so `python scripts/try_statement.py` cannot see `app/`. Repo root first.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.config import get_settings  # noqa: E402
+from app.services.llm import LlmError, build_client, close_client  # noqa: E402
+from app.services.statements import parse_statement  # noqa: E402
 
 
 async def main() -> None:
@@ -42,7 +47,13 @@ async def main() -> None:
             "send it.\n! Synthetic fixtures only. Never a real statement.\n"
         )
 
-    client = build_client(settings)
+    try:
+        client = build_client(settings)
+    except LlmError as exc:
+        # A hand-run script should say what to fix, not print a traceback at
+        # somebody trying to answer a question about a bank statement.
+        sys.exit(f"\n{exc}\nSet it in .env (it is gitignored; this repo is public).")
+
     try:
         outcome = await parse_statement(client, text, "CAD", period)
     finally:

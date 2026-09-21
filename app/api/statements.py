@@ -47,6 +47,7 @@ log = structlog.get_logger()
 IMPORT_FEATURE = "document_upload"
 
 QUOTA_EXCEEDED = "import_quota_exceeded"
+TIER_NOT_CONFIRMED = "ai_processing_unavailable"
 TOO_LONG = "statement_too_long"
 TOO_MANY_ROWS = "too_many_transactions"
 UNKNOWN_ACCOUNT = "unknown_account"
@@ -149,6 +150,23 @@ async def parse(
                 "code": TOO_LONG,
                 "message": "That statement is too long to read in one go.",
                 "limit_chars": MAX_TEXT_CHARS,
+            },
+        )
+
+    if settings.is_production and not settings.llm_no_training_tier:
+        # The consent screen states, as fact, that the provider is contractually
+        # forbidden from training on this data. Until someone sets
+        # LLM_NO_TRAINING_TIER, nothing in the system makes that true — and a
+        # free tier, which is what M3 develops against, permits exactly what the
+        # screen says is forbidden. Refusing is the only honest answer: showing
+        # a user that text and then sending their statement anyway is the
+        # violation, not a step towards it.
+        log.error("llm_tier_not_confirmed", provider=settings.llm_provider)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": TIER_NOT_CONFIRMED,
+                "message": "Statement import is temporarily unavailable.",
             },
         )
 

@@ -61,7 +61,7 @@ ticket asked for.
 
 ```bash
 gh pr checkout 40
-DATABASE_URL="" MIGRATION_DATABASE_URL="" .venv/bin/python -m pytest -q   # 217 / 161 skipped
+DATABASE_URL="" MIGRATION_DATABASE_URL="" .venv/bin/python -m pytest -q
 ```
 
 Database-backed tests need a throwaway Postgres and run in CI's `database` job —
@@ -95,7 +95,7 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
 | Retained text in export; deleted with the account | **Not met** — no export exists. The FK cascade covers deletion incidentally |
 | Provider swap by settings | **Met** |
 | Synthetic fixtures only | **Met** |
-| CI green | **Met** — 217/161 fast, 161 database, migrations apply/reverse/re-apply |
+| CI green | **Met** — see the run on the PR; counts are not copied here, because the four times they were they drifted |
 
 ## Deviations & decisions
 

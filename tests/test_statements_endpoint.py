@@ -117,6 +117,66 @@ def body(**overrides) -> dict:
     return {"source_kind": "pdf_text", "page_count": 2, "text": STATEMENT, **overrides}
 
 
+class TestTheNoTrainingClaim:
+    """The consent screen states as fact that the provider may not train on
+    this data. Production refuses to parse until someone asserts that is true.
+
+    M3 develops against a free tier, whose terms generally permit exactly what
+    the screen says is forbidden. Showing a user that text and sending their
+    statement anyway is the violation itself (PRD Appendix A.2), not a step
+    towards it.
+    """
+
+    async def test_production_refuses_until_the_tier_is_confirmed(
+        self, api_client, monkeypatch
+    ):
+        from app.config import Settings, get_settings
+
+        model = FakeModel()
+        use_model(monkeypatch, model)
+        await onboard(api_client, "+14165571019")
+        await consent_to_ai(api_client)
+
+        live = get_settings()
+        unconfirmed = Settings(
+            **{
+                **live.model_dump(),
+                "app_env": "production",
+                "llm_no_training_tier": False,
+            }
+        )
+        monkeypatch.setattr(endpoint, "get_settings", lambda: unconfirmed)
+
+        response = await api_client.post(PARSE, json=body())
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "ai_processing_unavailable"
+        assert model.calls == 0, "nothing may be sent before the tier is confirmed"
+
+    async def test_production_parses_once_it_is_confirmed(
+        self, api_client, monkeypatch
+    ):
+        from app.config import Settings, get_settings
+
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571020")
+        await consent_to_ai(api_client)
+
+        live = get_settings()
+        confirmed = Settings(
+            **{
+                **live.model_dump(),
+                "app_env": "production",
+                "llm_no_training_tier": True,
+            }
+        )
+        monkeypatch.setattr(endpoint, "get_settings", lambda: confirmed)
+
+        response = await api_client.post(PARSE, json=body())
+
+        assert response.status_code == 200, response.text
+
+
 class TestConsent:
     async def test_refused_before_consent_and_the_model_is_never_called(
         self, api_client, monkeypatch

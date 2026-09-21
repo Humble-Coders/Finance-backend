@@ -102,8 +102,12 @@ MAX_HEADER_CHARS = 1_200
 # An amount, and a date that is not necessarily a year: `14 Aug`, `AUG 14`,
 # `08/14`. Deliberately loose — this only decides where the header ends.
 _AMOUNT_RE = re.compile(r"\d[\d,]*\.\d{2}")
+# `\s?`, not `\s*`: a date is "14 Aug" or "Aug 14", never a word and a number
+# separated by a column of spaces. With `\s*` a statement's "Opening balance
+#     2,184.63" reads as a dated amount, and the header — the year with it —
+# gets cut above the line that holds it.
 _DATE_RE = re.compile(
-    r"\b(\d{1,2}[/-]\d{1,2}|\d{1,2}\s*[A-Za-z]{3,}|[A-Za-z]{3,}\s*\d{1,2})\b"
+    r"\b(\d{1,2}[/-]\d{1,2}|\d{1,2}\s?[A-Za-z]{3,}|[A-Za-z]{3,}\s?\d{1,2})\b"
 )
 
 

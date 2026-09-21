@@ -34,8 +34,26 @@ class Settings(BaseSettings):
     # Legacy HS256 projects only. Prefer asymmetric keys + JWKS (see auth.py).
     supabase_jwt_secret: str = ""
 
+    # The model provider is configuration on purpose. M3 starts on a free tier
+    # against synthetic fixtures and must move to a paid, no-training tier
+    # before any real statement is parsed (PRD Appendix A.3) — that swap has to
+    # be an environment variable, or it will not happen on the day it must.
     llm_api_key: str = ""
-    document_ai_credentials: str = ""
+    # The operator asserting that the configured key is a business API tier
+    # whose terms forbid training on the data we send (PRD Appendix A.3). The
+    # consent screen tells users this in so many words, so production refuses to
+    # parse without it: a promise nobody can enforce is one we will eventually
+    # break, and the free tier M3 develops against permits exactly what the
+    # screen says is forbidden.
+    llm_no_training_tier: bool = False
+    llm_provider: str = "gemini"
+    llm_model: str = "gemini-2.0-flash"
+    llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+    # Free tier: one import a month (PRD F2). A setting rather than a constant
+    # so development is not rationed by the production plan; 7.1 moves this into
+    # entitlements, where per-plan limits belong.
+    free_imports_per_month: int = 1
 
     extraction_queue_name: str = "extraction_jobs"
 

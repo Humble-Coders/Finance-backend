@@ -54,6 +54,11 @@ group `finai-shared` — never from this repo.
 
 ## Notes
 
+- **`LLM_NO_TRAINING_TIER` must be `true` in production.** The AI-processing consent
+  screen states as fact that the provider may not train on the data we send. Until
+  this is set, `/statements/parse` returns 503 rather than send a statement to a
+  provider that might — showing someone that text and sending it anyway is the
+  violation, not a step towards it (PRD Appendix A.2/A.3).
 - The `DATABASE_URL` must be Supabase's **transaction pooler** string (port 6543),
   not the direct `:5432` connection.
 - This repo is public. No secrets, ever. If a key is committed by accident, rotate it

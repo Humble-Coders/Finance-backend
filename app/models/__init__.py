@@ -9,11 +9,12 @@ from app.models.derived import ChatConversation, HealthScoreSnapshot
 from app.models.enums import (
     AccountKind,
     AuthProvider,
-    DocumentStatus,
     GoalHorizon,
     PlanTier,
     PolicyKind,
     RegionSource,
+    SourceKind,
+    StatementImportStatus,
     TransactionDirection,
     TransactionSource,
 )
@@ -25,7 +26,12 @@ from app.models.identity import (
     UserIdentity,
     UserPhoneChange,
 )
-from app.models.money import Account, DocumentUpload, Transaction
+from app.models.money import (
+    Account,
+    StatementImport,
+    StatementImportText,
+    Transaction,
+)
 from app.models.planning import Budget, BudgetLine, Debt, Goal
 from app.models.platform import (
     CountryPack,
@@ -44,7 +50,8 @@ __all__ = [
     "ConsentEvent",
     "Account",
     "Transaction",
-    "DocumentUpload",
+    "StatementImport",
+    "StatementImportText",
     "Category",
     "CategoryCorrection",
     "Budget",
@@ -62,7 +69,8 @@ __all__ = [
     "DisclaimerVersion",
     "AccountKind",
     "AuthProvider",
-    "DocumentStatus",
+    "StatementImportStatus",
+    "SourceKind",
     "GoalHorizon",
     "PlanTier",
     "PolicyKind",

@@ -5,8 +5,17 @@ Started by Render as:
 """
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 
-from app.api import capabilities, financial_setup, health, legal, me
+from app.api import (
+    capabilities,
+    errors,
+    financial_setup,
+    health,
+    legal,
+    me,
+    statements,
+)
 from app.config import get_settings
 
 settings = get_settings()
@@ -20,8 +29,12 @@ app = FastAPI(
     openapi_url=None if settings.is_production else "/openapi.json",
 )
 
+
+app.add_exception_handler(RequestValidationError, errors.validation_error)
+
 app.include_router(health.router)
 app.include_router(capabilities.router)
 app.include_router(me.router)
 app.include_router(legal.router)
 app.include_router(financial_setup.router)
+app.include_router(statements.router)

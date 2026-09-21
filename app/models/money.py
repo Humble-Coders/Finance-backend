@@ -21,12 +21,13 @@ from app.models.base import (
 )
 from app.models.enums import (
     AccountKind,
-    DocumentStatus,
+    SourceKind,
+    StatementImportStatus,
     TransactionDirection,
     TransactionSource,
 )
 
-__all__ = ["Account", "Transaction", "DocumentUpload"]
+__all__ = ["Account", "Transaction", "StatementImport", "StatementImportText"]
 
 
 class Account(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
@@ -57,25 +58,32 @@ class Account(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     transactions: Mapped[list[Transaction]] = relationship(back_populates="account")
 
 
-class DocumentUpload(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
-    """An uploaded statement, tracked from queue to deletion.
+class StatementImport(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
+    """One statement the user imported.
 
-    The source document is deleted once the user confirms the extracted rows, or
-    after 72 hours, whichever comes first (PRD F2) — `deleted_at` records that it
-    actually happened, so the retention job is auditable rather than assumed.
+    **There is no document here, and no column for one.** Since 2026-09-21 the
+    statement is read and redacted on the device and only text is sent (PRD F2),
+    so `storage_path`, `content_type`, `byte_size` and `deleted_at` were dropped:
+    a column describing a file we never receive would tell every future reader
+    the opposite of what the product does, and invite someone to start filling
+    it.
+
+    There is no filename column either. `statement-jane-smith.pdf` is personal
+    data we have no use for, and the cheapest way not to leak something is not
+    to ask for it.
     """
 
-    __tablename__ = "document_upload"
+    __tablename__ = "statement_import"
 
-    storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    original_filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    byte_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_kind: Mapped[SourceKind] = mapped_column(
+        SAEnum(SourceKind, name="source_kind"), nullable=False
+    )
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    status: Mapped[DocumentStatus] = mapped_column(
-        SAEnum(DocumentStatus, name="document_status"),
+    status: Mapped[StatementImportStatus] = mapped_column(
+        SAEnum(StatementImportStatus, name="statement_import_status"),
         nullable=False,
-        default=DocumentStatus.queued,
+        default=StatementImportStatus.processing,
         index=True,
     )
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -84,12 +92,50 @@ class DocumentUpload(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
 
     transactions: Mapped[list[Transaction]] = relationship(
-        back_populates="document_upload"
+        back_populates="statement_import"
+    )
+    diagnostic_text: Mapped[StatementImportText | None] = relationship(
+        back_populates="statement_import", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class StatementImportText(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
+    """Redacted statement text the user explicitly asked us to keep.
+
+    The **only** thing retained from an import beyond the transactions
+    themselves, and only when the user opts in after an import failed or came
+    back mostly flagged (manager decision, 2026-09-21). The review queue tells us
+    *that* a parse went wrong; only this says why.
+
+    Its own table rather than a column on `statement_import`, for two reasons
+    that both matter more than tidiness: a query for imports can never load it by
+    accident, and disposing of it is one `DELETE` rather than an `UPDATE` over a
+    table we read constantly.
+
+    `expires_at` is 30 days out and enforced by the parse path itself — every
+    parse request clears what has expired. A retention rule that depends on a
+    scheduled job nobody watches is how "we delete it after 30 days" becomes
+    false without anyone noticing.
+    """
+
+    __tablename__ = "statement_import_text"
+
+    statement_import_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("statement_import.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    # Redacted on the device before it was ever sent. Never the document.
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    statement_import: Mapped[StatementImport] = relationship(
+        back_populates="diagnostic_text"
     )
 
 
@@ -123,9 +169,9 @@ class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
         ForeignKey("account.id", ondelete="CASCADE"),
         nullable=False,
     )
-    document_upload_id: Mapped[uuid.UUID | None] = mapped_column(
+    statement_import_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
-        ForeignKey("document_upload.id", ondelete="SET NULL"),
+        ForeignKey("statement_import.id", ondelete="SET NULL"),
         nullable=True,
     )
     category_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -159,6 +205,6 @@ class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     )
 
     account: Mapped[Account] = relationship(back_populates="transactions")
-    document_upload: Mapped[DocumentUpload | None] = relationship(
+    statement_import: Mapped[StatementImport | None] = relationship(
         back_populates="transactions"
     )

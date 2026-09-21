@@ -236,6 +236,20 @@ class TestFeatureGate:
 
 
 class TestTheImportRecord:
+    async def test_the_response_says_which_currency_the_amounts_are_in(
+        self, api_client, monkeypatch
+    ):
+        """Money is an amount *and* a currency (PRD §4.4). A client left to
+        infer it from /capabilities formats "12.40" with whatever symbol it
+        guessed — an error nobody reports and everybody notices."""
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571018")
+        await consent_to_ai(api_client)
+
+        response = await api_client.post(PARSE, json=body())
+
+        assert response.json()["currency"] == "CAD"
+
     async def test_a_successful_import_keeps_no_text(
         self, api_client, db_session, monkeypatch
     ):

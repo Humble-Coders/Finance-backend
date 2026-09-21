@@ -168,6 +168,19 @@ async def parse(
             },
         )
 
+    # Check-then-act, knowingly. Two simultaneous requests from one household
+    # both read zero and both proceed, costing one extra parse.
+    #
+    # Every tighter version is worse here. A row or advisory lock taken now is
+    # held until commit — across a model call with a 180-second budget — so one
+    # import would block the household's next request for minutes. Committing
+    # the record before parsing releases the lock but leaves a crashed request
+    # holding the month forever. A unique index expresses a limit of exactly
+    # one, and the limit is configurable.
+    #
+    # It needs simultaneous requests from one account to trigger and costs a
+    # single parse when it does. 7.1 moves quotas into entitlements, where the
+    # accounting belongs and can be done in one statement.
     used = await _imports_this_month(session, household)
     if used >= settings.free_imports_per_month:
         resets_at = _next_month(datetime.now(UTC))
@@ -279,6 +292,7 @@ async def parse(
 
     return StatementParseOut(
         import_id=record.id,
+        currency=currency,
         rows=[
             ParsedRowOut(
                 occurred_on=row.occurred_on,

@@ -64,6 +64,12 @@ class ParsedRowOut(BaseModel):
 
 class StatementParseOut(BaseModel):
     import_id: uuid.UUID
+    # The amounts above are decimal strings in this currency. Sent explicitly
+    # rather than left for the client to infer from /capabilities: PRD §4.4
+    # carries money as an amount *and* a currency, and a client formatting
+    # "12.40" with the wrong symbol is the kind of error nobody reports and
+    # everybody notices.
+    currency: str
     rows: list[ParsedRowOut]
     # How many lines the model offered that did not survive validation — most
     # often an invented amount. Surfaced, not swallowed: it is the difference

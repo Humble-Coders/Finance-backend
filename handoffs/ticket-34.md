@@ -61,7 +61,7 @@ ticket asked for.
 
 ```bash
 gh pr checkout 40
-DATABASE_URL="" MIGRATION_DATABASE_URL="" .venv/bin/python -m pytest -q   # 216 / 160 skipped
+DATABASE_URL="" MIGRATION_DATABASE_URL="" .venv/bin/python -m pytest -q   # 217 / 161 skipped
 ```
 
 Database-backed tests need a throwaway Postgres and run in CI's `database` job —
@@ -95,7 +95,7 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
 | Retained text in export; deleted with the account | **Not met** — no export exists. The FK cascade covers deletion incidentally |
 | Provider swap by settings | **Met** |
 | Synthetic fixtures only | **Met** |
-| CI green | **Met** — 216/160 fast, 160 database, migrations apply/reverse/re-apply |
+| CI green | **Met** — 217/161 fast, 161 database, migrations apply/reverse/re-apply |
 
 ## Deviations & decisions
 
@@ -143,6 +143,16 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
   normally adjacent — but real, and documented in the function.
 - **Export and cross-household read coverage** move to 3.3/3.4 with the endpoints
   they need.
+- **Prompt injection is accepted, not prevented**, and the reasoning is written
+  into `app/services/statements.py` rather than left implicit: the document is
+  the user's own, fabricated rows land in their own ledger, they can already type
+  transactions by hand, and every row passes a review queue before it is saved.
+  **The condition:** if low-risk rows are ever auto-confirmed, or a statement can
+  arrive from anyone but the account holder, this needs a real answer.
+- **The monthly quota is check-then-act.** Two simultaneous requests from one
+  household cost one extra parse. Every tighter version is worse — a lock held
+  across a 180-second model call, or a crashed request holding the month forever
+  — so it is documented and left to 7.1, where quotas move into entitlements.
 - **Dates could be checked against the period** now that we have one — a row
   outside it by more than a posting delay is suspicious. Deliberately not added
   late in review; it belongs with 3.3's confidence rules.

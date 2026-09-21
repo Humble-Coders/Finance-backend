@@ -131,6 +131,51 @@ class TestItRefusesWhatIsNotThere:
         assert outcome == ParseOutcome(rows=[], unparsed_line_count=0, model="fake-1")
 
 
+class TestGenuineDuplicates:
+    """The failure the naive dedup causes, and the reason for the per-window count.
+
+    Two identical transactions on one statement look exactly like one row seen
+    through two overlapping windows. Collapsing them deletes real spending and
+    reports nothing — the worst shape of bug this product can have, because the
+    number it produces is confident and wrong.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_identical_transactions_both_survive(self):
+        statement = "\n".join(
+            [
+                "2026-08-14  TIM HORTONS #4821             5.00",
+                "2026-08-14  TIM HORTONS #4821             5.00",
+            ]
+        )
+        coffee = row("5.00", "TIM HORTONS", "2026-08-14")
+        model = FakeModel(rows(coffee, coffee))
+
+        outcome = await parse_statement(model, statement, CURRENCY)
+
+        assert len(outcome.rows) == 2, "a real second coffee is not a duplicate"
+
+    @pytest.mark.asyncio
+    async def test_a_repeat_is_kept_while_the_seam_duplicate_is_dropped(
+        self, monkeypatch
+    ):
+        """Both behaviours at once, which is the only way to prove the rule is
+        'maximum per window' rather than 'always one' or 'always all'."""
+        monkeypatch.setattr(statements, "CHUNK_CHARS", 120)
+        monkeypatch.setattr(statements, "OVERLAP_LINES", 3)
+        statement = "\n".join(
+            f"2026-08-{day:02d}  MERCHANT {day}   {day}.50" for day in range(1, 21)
+        )
+        twice = row("5.50", "MERCHANT 5", "2026-08-05")
+        # Every window reports the same pair, exactly as two real transactions
+        # inside one window would.
+        model = FakeModel(*[rows(twice, twice)] * 20)
+
+        outcome = await parse_statement(model, statement, CURRENCY)
+
+        assert len(outcome.rows) == 2
+
+
 class TestLongStatements:
     @pytest.mark.asyncio
     async def test_a_transaction_on_the_seam_is_returned_once(self, monkeypatch):
@@ -157,6 +202,38 @@ class TestLongStatements:
 
         assert len(model.prompts) > 1, "the statement should have been split"
         assert len(outcome.rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_statement_needing_too_many_passes_is_refused_before_any_call(
+        self, monkeypatch
+    ):
+        """Unbounded windows meant an unbounded request: 84 sequential calls at a
+        60-second timeout is over an hour, billed the whole way, long after the
+        client gave up."""
+        monkeypatch.setattr(statements, "CHUNK_CHARS", 60)
+        monkeypatch.setattr(statements, "MAX_WINDOWS", 3)
+        statement = "\n".join(
+            f"2026-08-{day:02d}  MERCHANT {day}   {day}.50" for day in range(1, 21)
+        )
+        model = FakeModel()
+
+        with pytest.raises(LlmError, match="passes"):
+            await parse_statement(model, statement, CURRENCY)
+
+        assert model.prompts == [], "nothing should have been sent"
+
+    @pytest.mark.asyncio
+    async def test_the_time_budget_stops_a_parse_that_outlives_its_reader(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(statements, "CHUNK_CHARS", 60)
+        monkeypatch.setattr(statements, "PARSE_BUDGET_SECONDS", -1.0)
+        statement = "\n".join(
+            f"2026-08-{day:02d}  MERCHANT {day}   {day}.50" for day in range(1, 6)
+        )
+
+        with pytest.raises(LlmError, match="time budget"):
+            await parse_statement(FakeModel(), statement, CURRENCY)
 
     @pytest.mark.asyncio
     async def test_an_absurd_number_of_rows_stops_rather_than_billing_forever(

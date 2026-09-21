@@ -15,7 +15,6 @@ from datetime import date
 from pydantic import BaseModel, Field
 
 from app.models.enums import SourceKind, TransactionDirection
-from app.services.statements import MAX_TEXT_CHARS
 
 __all__ = ["StatementParseIn", "ParsedRowOut", "StatementParseOut"]
 
@@ -23,7 +22,9 @@ __all__ = ["StatementParseIn", "ParsedRowOut", "StatementParseOut"]
 class StatementParseIn(BaseModel):
     source_kind: SourceKind
     page_count: int | None = Field(default=None, ge=1, le=500)
-    text: str = Field(min_length=1, max_length=MAX_TEXT_CHARS)
+    # No max_length here on purpose: Pydantic would answer 422, and the
+    # ticket asks for 413 on an oversized statement. The endpoint checks it.
+    text: str = Field(min_length=1)
     # Optional here; 3.3 makes it required, once accounts can be created. An
     # import filed against the wrong account breaks dedup for both of them, so
     # this is never guessed or defaulted.

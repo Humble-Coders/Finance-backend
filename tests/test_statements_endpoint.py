@@ -128,7 +128,7 @@ class TestConsent:
         response = await api_client.post(PARSE, json=body())
 
         assert response.status_code == 409
-        assert response.json()["detail"]["code"] == "ai_consent_required"
+        assert response.json()["detail"]["code"] == "consent_required"
         assert model.calls == 0, "a refused request must not reach a paid provider"
 
     async def test_allowed_once_consent_is_recorded(self, api_client, monkeypatch):
@@ -153,6 +153,49 @@ class TestConsent:
 
 
 class TestQuota:
+    async def test_a_failed_import_does_not_cost_the_month(
+        self, api_client, monkeypatch
+    ):
+        """The 502 says "please try again". This is what makes that true.
+
+        Counting a failure against the free tier's single monthly import meant a
+        statement we could not read cost someone their month — and the retry the
+        message asked for came back 429. Worse for exactly the users who then
+        opted in to send us the text so we could fix it.
+        """
+
+        class Broken(FakeModel):
+            async def complete(self, **_kwargs):
+                raise LlmError("provider returned 503")
+
+        await onboard(api_client, "+14165571011")
+        await consent_to_ai(api_client)
+
+        use_model(monkeypatch, Broken())
+        failed = await api_client.post(PARSE, json=body())
+        use_model(monkeypatch, FakeModel())
+        retried = await api_client.post(PARSE, json=body())
+
+        assert failed.status_code == 502
+        assert retried.status_code == 200, retried.text
+
+    async def test_a_parse_that_finds_nothing_does_not_cost_the_month_either(
+        self, api_client, monkeypatch
+    ):
+        """An import that returns no rows is a failure to the person holding a
+        statement full of transactions, whatever the model thought."""
+        await onboard(api_client, "+14165571012")
+        await consent_to_ai(api_client)
+
+        use_model(monkeypatch, FakeModel(INVENTED_ANSWER))
+        empty = await api_client.post(PARSE, json=body())
+        use_model(monkeypatch, FakeModel())
+        retried = await api_client.post(PARSE, json=body())
+
+        assert empty.status_code == 200
+        assert empty.json()["rows"] == []
+        assert retried.status_code == 200, retried.text
+
     async def test_the_second_import_in_a_month_is_refused(
         self, api_client, monkeypatch
     ):
@@ -259,6 +302,53 @@ class TestTheImportRecord:
         record = (await db_session.execute(select(StatementImport))).scalars().one()
         assert record.status is StatementImportStatus.failed
         assert record.failure_reason
+
+    async def test_a_statement_too_long_to_read_says_so_with_413(
+        self, api_client, monkeypatch
+    ):
+        from app.services.statements import MAX_TEXT_CHARS
+
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571013")
+        await consent_to_ai(api_client)
+
+        response = await api_client.post(
+            PARSE, json=body(text="x" * (MAX_TEXT_CHARS + 1))
+        )
+
+        assert response.status_code == 413
+        assert response.json()["detail"]["code"] == "statement_too_long"
+        # The refusal must not quote the statement back, same as a 422.
+        assert "xxxx" not in response.text
+
+    async def test_a_future_dated_policy_is_not_yet_in_force(
+        self, api_client, db_session, monkeypatch
+    ):
+        """Announcing next month's policy must not invalidate today's consent.
+
+        Without the `effective_from <= now()` test this passed the moment it was
+        inserted: every existing consent void, every import refused, and the
+        text users were pointed at not live yet.
+        """
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571014")
+        await consent_to_ai(api_client)
+        await db_session.execute(
+            text(
+                "INSERT INTO disclaimer_version "
+                "(id, country_code, version, kind, body, effective_from, "
+                " created_at, updated_at) "
+                "VALUES (gen_random_uuid(), NULL, 'ai-v2', 'ai_processing', "
+                "'later', now() + interval '30 days', now(), now())"
+            )
+        )
+
+        response = await api_client.post(PARSE, json=body())
+
+        assert response.status_code == 200, response.text
+        assert (await api_client.get("/legal/ai-processing")).json()[
+            "version"
+        ] == "ai-v1"
 
     async def test_an_account_from_another_household_is_not_found(
         self, api_client, monkeypatch

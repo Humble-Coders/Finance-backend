@@ -30,6 +30,7 @@ __all__ = [
     "LlmClient",
     "LlmError",
     "build_client",
+    "close_client",
     "register_adapter",
 ]
 
@@ -53,6 +54,10 @@ class LlmError(Exception):
 class LlmClient(Protocol):
     """What the rest of the application is allowed to know about a model."""
 
+    async def aclose(self) -> None:
+        """Release the connection. Callers use `close_client`, which tolerates
+        a client that has none."""
+
     @property
     def model(self) -> str:
         """The model actually answering, recorded with anything it produces.
@@ -72,10 +77,17 @@ class _OpenAICompatibleClient:
         self._key = settings.llm_api_key
         self._model = settings.llm_model
         self._base_url = settings.llm_base_url.rstrip("/")
+        # One connection for the whole parse. A long statement is many calls to
+        # the same host, and a fresh client per call is a fresh TLS handshake
+        # per call — pure latency on a path the user is waiting through.
+        self._http = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS)
 
     @property
     def model(self) -> str:
         return self._model
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
     async def complete(self, *, system: str, user: str, max_output_tokens: int) -> str:
         payload = {
@@ -90,6 +102,7 @@ class _OpenAICompatibleClient:
             "temperature": 0,
         }
         data = await _post(
+            self._http,
             f"{self._base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self._key}"},
             payload=payload,
@@ -123,6 +136,7 @@ class _AnthropicClient:
             "temperature": 0,
         }
         data = await _post(
+            self._http,
             f"{self._base_url}/messages",
             headers={"x-api-key": self._key, "anthropic-version": "2023-06-01"},
             payload=payload,
@@ -133,7 +147,9 @@ class _AnthropicClient:
             raise LlmError("unexpected response shape") from exc
 
 
-async def _post(url: str, *, headers: dict[str, str], payload: dict) -> dict:
+async def _post(
+    http: httpx.AsyncClient, url: str, *, headers: dict[str, str], payload: dict
+) -> dict:
     """One request, with the failure modes flattened into `LlmError`.
 
     No retry here. A retry belongs to the caller that knows what the request
@@ -192,3 +208,15 @@ def build_client(settings: Settings) -> LlmClient:
     if not settings.llm_model:
         raise LlmError("LLM_MODEL is not set")
     return factory(settings)
+
+
+async def close_client(client: object) -> None:
+    """Release a client's connection, if it holds one.
+
+    Tolerant by design: test fakes are plain objects with a `complete`, and
+    making every one of them implement a teardown it does not need would be a
+    tax on writing tests, which is a tax on writing them at all.
+    """
+    aclose = getattr(client, "aclose", None)
+    if aclose is not None:
+        await aclose()

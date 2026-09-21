@@ -25,12 +25,12 @@ from app.models.enums import StatementImportStatus
 from app.models.identity import Household
 from app.models.money import Account, StatementImport, StatementImportText
 from app.schemas.statements import ParsedRowOut, StatementParseIn, StatementParseOut
-from app.services.ai_consent import AI_CONSENT_REQUIRED, current_policy, has_consented
+from app.services.ai_consent import CONSENT_REQUIRED, current_policy, has_consented
 from app.services.capabilities import currency_for, require_feature
 from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
-from app.services.llm import LlmError, build_client
-from app.services.statements import parse_statement
+from app.services.llm import LlmError, build_client, close_client
+from app.services.statements import MAX_TEXT_CHARS, parse_statement
 
 router = APIRouter(tags=["statements"])
 
@@ -42,6 +42,7 @@ log = structlog.get_logger()
 IMPORT_FEATURE = "document_upload"
 
 QUOTA_EXCEEDED = "import_quota_exceeded"
+TOO_LONG = "statement_too_long"
 UNKNOWN_ACCOUNT = "unknown_account"
 PARSE_FAILED = "parse_failed"
 
@@ -69,6 +70,20 @@ async def _purge_expired(session: AsyncSession) -> None:
 
 
 async def _imports_this_month(session: AsyncSession, household: Household) -> int:
+    """How many imports this household has *had*, which is not how many it tried.
+
+    Failed imports are excluded, and that is the whole point. The free tier
+    allows one import a month; counting a failure against it would mean a
+    statement we could not read costs someone their month, while the response
+    tells them to try again — advice the next request refuses. It is worse in
+    combination with the diagnostic-text offer, which appears only after a
+    failure: the user agrees to help us fix the parser and is locked out for
+    their trouble.
+
+    The month starts at UTC midnight rather than in the household's own
+    timezone, which we do not store. Somebody importing late on the 31st gets
+    next month's allowance a few hours early — the error direction to prefer.
+    """
     start = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     result = await session.execute(
         select(func.count())
@@ -76,6 +91,7 @@ async def _imports_this_month(session: AsyncSession, household: Household) -> in
         .where(
             StatementImport.household_id == household.id,
             StatementImport.created_at >= start,
+            StatementImport.status != StatementImportStatus.failed,
         )
     )
     return int(result.scalar_one())
@@ -107,17 +123,32 @@ async def parse(
     settings = get_settings()
     household, user = identity.household, identity.user
 
+    # Before the gates, deliberately. Retained text expires on a date, and a
+    # household that has stopped importing must not be the reason someone
+    # else's expired text survives.
+    await _purge_expired(session)
+
+    if len(body.text) > MAX_TEXT_CHARS:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "code": TOO_LONG,
+                "message": "That statement is too long to read in one go.",
+                "limit_chars": MAX_TEXT_CHARS,
+            },
+        )
+
     policy = await current_policy(session)
     if policy is None or not await has_consented(session, user, policy):
         log_conflict(
-            AI_CONSENT_REQUIRED,
+            CONSENT_REQUIRED,
             "no_ai_policy_configured" if policy is None else "consent_not_given",
             user_id=str(user.id),
         )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
-                "code": AI_CONSENT_REQUIRED,
+                "code": CONSENT_REQUIRED,
                 "message": "Consent to AI processing is needed before importing.",
                 "policy_version": policy.version if policy else None,
             },
@@ -156,8 +187,6 @@ async def parse(
                 detail={"code": UNKNOWN_ACCOUNT, "message": "No such account."},
             )
 
-    await _purge_expired(session)
-
     record = StatementImport(
         household_id=household.id,
         source_kind=body.source_kind,
@@ -168,8 +197,9 @@ async def parse(
     await session.flush()
 
     currency = await currency_for(session, household)
+    client = build_client(settings)
     try:
-        outcome = await parse_statement(build_client(settings), body.text, currency)
+        outcome = await parse_statement(client, body.text, currency)
     except LlmError as exc:
         record.status = StatementImportStatus.failed
         record.failure_reason = str(exc)
@@ -187,8 +217,19 @@ async def parse(
                 "import_id": str(record.id),
             },
         ) from exc
+    finally:
+        await close_client(client)
 
-    record.status = StatementImportStatus.awaiting_review
+    # A parse that found nothing is a failure from the only perspective that
+    # matters — the person holding a statement full of transactions. Recording
+    # it as `awaiting_review` would also charge them for it.
+    record.status = (
+        StatementImportStatus.awaiting_review
+        if outcome.rows
+        else StatementImportStatus.failed
+    )
+    if not outcome.rows:
+        record.failure_reason = "no transactions found in the submitted text"
     record.extracted_count = len(outcome.rows)
 
     retained_until = _retain_text_if_asked(session, record, body, outcome)

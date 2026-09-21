@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 
@@ -41,10 +43,20 @@ __all__ = [
 
 log = structlog.get_logger()
 
-# A statement this long is not a statement. The cap exists so one request cannot
-# spend an unbounded amount of somebody's money on tokens.
-MAX_TEXT_CHARS = 1_000_000
+# A statement this long is not a statement. The caps exist so one request cannot
+# spend an unbounded amount of somebody's money on tokens — and, just as much,
+# so it cannot run for longer than anyone is still listening. 200k characters is
+# roughly a 70-page statement.
+MAX_TEXT_CHARS = 200_000
 MAX_ROWS = 2_000
+# Windows are read one after another, so without a ceiling a large statement is
+# an unbounded number of sequential 60-second calls: over an hour in one HTTP
+# request, billed the whole way, long after the client gave up and every proxy
+# in between dropped the connection.
+MAX_WINDOWS = 20
+# The budget is checked between calls, so a parse can overshoot by at most one
+# call. Exact enough for something whose purpose is "stop, nobody is waiting".
+PARSE_BUDGET_SECONDS = 180.0
 
 # Windows are sized in characters rather than tokens: an exact token count needs
 # the provider's tokenizer, and being approximately right is enough when the
@@ -200,17 +212,38 @@ def _rows_from(answer: str, window: str, currency: str) -> tuple[list[ParsedRow]
     return rows, rejected
 
 
-def _merge(rows: list[ParsedRow]) -> list[ParsedRow]:
-    """Drop the duplicates the window overlap creates, keep the order."""
-    seen: set[tuple[date, str, str]] = set()
-    merged: list[ParsedRow] = []
-    for row in rows:
-        key = (row.occurred_on, row.amount, " ".join(row.description.lower().split()))
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(row)
-    return merged
+def _key(row: ParsedRow) -> tuple[date, str, str]:
+    return (row.occurred_on, row.amount, " ".join(row.description.lower().split()))
+
+
+def _merge(per_window: list[list[ParsedRow]]) -> list[ParsedRow]:
+    """Remove the duplicates the overlap creates — and nothing else.
+
+    The naive version of this, a set over every row, is wrong in a way that is
+    invisible until it costs someone money: two genuinely identical transactions
+    on one statement — two $5.00 coffees at the same shop on the same day, two
+    $2.50 fares, two $20 withdrawals — look exactly like one row seen through
+    two overlapping windows. Deduplicating globally deletes one of them, reports
+    nothing, and understates what the person spent.
+
+    So count per window and keep the **maximum**, never the union. A row on a
+    seam appears once in each of two windows, so the maximum is one. Two real
+    coffees appear twice in every window that contains that region, so the
+    maximum is two. The only way to see a count of N is for some single window
+    to have read N of them.
+    """
+    counts: dict[tuple[date, str, str], int] = {}
+    first: dict[tuple[date, str, str], ParsedRow] = {}
+    order: list[tuple[date, str, str]] = []
+
+    for window_rows in per_window:
+        for key, count in Counter(_key(row) for row in window_rows).items():
+            if key not in counts:
+                order.append(key)
+                first[key] = next(r for r in window_rows if _key(r) == key)
+            counts[key] = max(counts[key], count) if key in counts else count
+
+    return [row for key in order for row in [first[key]] * counts[key]]
 
 
 async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseOutcome:
@@ -221,10 +254,21 @@ async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseO
     whole reason a failed import is not a problem here — nothing was half-saved,
     because the source of truth never left their device.
     """
-    rows: list[ParsedRow] = []
-    rejected = 0
+    windows = _windows(text)
+    if len(windows) > MAX_WINDOWS:
+        raise LlmError(
+            f"statement needs {len(windows)} passes, "
+            f"more than the {MAX_WINDOWS} allowed"
+        )
 
-    for window in _windows(text):
+    started = time.monotonic()
+    per_window: list[list[ParsedRow]] = []
+    rejected = 0
+    total_rows = 0
+
+    for window in windows:
+        if time.monotonic() - started > PARSE_BUDGET_SECONDS:
+            raise LlmError("statement took longer to read than the time budget allows")
         answer = await client.complete(
             system=_SYSTEM_PROMPT,
             user=window,
@@ -233,18 +277,20 @@ async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseO
             max_output_tokens=8_000,
         )
         window_rows, window_rejected = _rows_from(answer, window, currency)
-        rows.extend(window_rows)
+        per_window.append(window_rows)
         rejected += window_rejected
-        if len(rows) > MAX_ROWS:
+        total_rows += len(window_rows)
+        if total_rows > MAX_ROWS:
             raise LlmError("statement produced more rows than a statement can have")
 
-    merged = _merge(rows)
+    merged = _merge(per_window)
     log.info(
         "statement_parsed",
         model=client.model,
         prompt_version=_PROMPT_VERSION,
-        windows=len(_windows(text)),
+        windows=len(windows),
         rows=len(merged),
         rejected=rejected,
+        seconds=round(time.monotonic() - started, 1),
     )
     return ParseOutcome(rows=merged, unparsed_line_count=rejected, model=client.model)

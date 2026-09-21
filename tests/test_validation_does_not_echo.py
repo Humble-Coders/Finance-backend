@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from httpx import ASGITransport, AsyncClient
 
-from app.main import _validation_error
+from app.api.errors import validation_error
 from app.schemas.statements import StatementParseIn
 
 SECRET = "2026-08-14  TIM HORTONS #4821   12.40"
@@ -26,7 +26,7 @@ SECRET = "2026-08-14  TIM HORTONS #4821   12.40"
 def client():
     """The real handler, on a route using the real request schema."""
     app = FastAPI()
-    app.add_exception_handler(RequestValidationError, _validation_error)
+    app.add_exception_handler(RequestValidationError, validation_error)
 
     @app.post("/parse")
     async def parse(body: StatementParseIn):  # pragma: no cover - never valid here

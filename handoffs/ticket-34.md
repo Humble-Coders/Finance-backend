@@ -33,7 +33,9 @@ ticket asked for.
 
 **Reading the statement**
 - `app/services/statements.py` — windowing, the prompt, row validation, the
-  verbatim-amount check and the overlap merge.
+  verbatim-amount check and the overlap merge. The statement's header is carried
+  into every later window: statements print the year once, and without it the
+  prompt's own rule drops every row it cannot date.
 - `app/services/llm.py` — provider behind a protocol, chosen by settings, with
   one HTTP connection per parse.
 
@@ -57,7 +59,7 @@ ticket asked for.
 
 ```bash
 gh pr checkout 40
-DATABASE_URL="" MIGRATION_DATABASE_URL="" .venv/bin/python -m pytest -q   # 211 / 159 skipped
+DATABASE_URL="" MIGRATION_DATABASE_URL="" .venv/bin/python -m pytest -q   # 211 / 160 skipped
 ```
 
 Database-backed tests need a throwaway Postgres and run in CI's `database` job —
@@ -91,7 +93,7 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
 | Retained text in export; deleted with the account | **Not met** — no export exists. The FK cascade covers deletion incidentally |
 | Provider swap by settings | **Met** |
 | Synthetic fixtures only | **Met** |
-| CI green | **Met** — 211/159 fast, 159 database, migrations apply/reverse/re-apply |
+| CI green | **Met** — 214/160 fast, 160 database, migrations apply/reverse/re-apply |
 
 ## Deviations & decisions
 
@@ -124,6 +126,10 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
 - **A statement over 2,000 transactions is refused** with 413 `too_many_transactions`
   rather than imported in parts. Splitting one across imports would need dedup
   across them, which is 3.3's problem, not this endpoint's.
+- **A credit written `12.40-` or `(12.40)`** — both real Canadian conventions —
+  fails the verbatim-amount check against the `-12.40` the model returns, so it
+  is rejected and counted rather than saved with a guessed sign. Losing a row
+  the user can see in the review queue beats inventing a figure.
 - **`_merge` cannot separate two identical transactions that land in different
   windows** with no overlap between them. Narrow — identical same-day rows are
   normally adjacent — but real, and documented in the function.

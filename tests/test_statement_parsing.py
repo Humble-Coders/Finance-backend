@@ -131,6 +131,70 @@ class TestItRefusesWhatIsNotThere:
         assert outcome == ParseOutcome(rows=[], unparsed_line_count=0, model="fake-1")
 
 
+class TestTheYearSurvivesChunking:
+    """The defect four review passes missed, because it lived in the prompt.
+
+    Statements print `14 Aug` on every line and the year exactly once, in the
+    period header. A window is a slice of the text, so only the first one had
+    it — and the prompt's own rule is to omit a row rather than guess a year.
+    Three quarters of a long statement would simply be absent: not rejected,
+    not counted, reported as a clean import.
+    """
+
+    HEADER = "ROYAL BANK OF CANADA\nStatement period: 1 Aug 2026 to 31 Aug 2026"
+
+    def statement(self) -> str:
+        body = [
+            f"{day:02d} Aug   TIM HORTONS #4821 {day:04d}          12.40"
+            for day in range(1, 900)
+        ]
+        return "\n".join([self.HEADER, ""] + body)
+
+    @pytest.mark.asyncio
+    async def test_every_window_after_the_first_is_given_the_year(self):
+        model = FakeModel()
+
+        await parse_statement(model, self.statement(), CURRENCY)
+
+        assert len(model.prompts) > 1, "this statement should have been split"
+        assert all("2026" in prompt for prompt in model.prompts)
+
+    @pytest.mark.asyncio
+    async def test_the_carried_header_does_not_widen_the_amount_check(self):
+        """The header is added to the prompt, never to the text an amount is
+        checked against.
+
+        Otherwise carrying it into every window would quietly weaken the guard
+        everywhere: an opening balance printed once could vouch for a figure the
+        model invented three windows later. The first window is a different
+        case — the header really is part of that text, and a balance really is
+        printed on the statement. A substring check cannot tell a balance from a
+        purchase, and never could; what it can do is refuse a number that is not
+        on the page at all.
+        """
+
+        class OnlyLaterWindows(FakeModel):
+            async def complete(self, *, system, user, max_output_tokens):
+                self.prompts.append(user)
+                if "STATEMENT HEADER" not in user:
+                    return "[]"
+                return rows(row("4321.00", "NOT A REAL ROW", "2026-08-14"))
+
+        model = OnlyLaterWindows()
+
+        outcome = await parse_statement(model, self.statement(), CURRENCY)
+
+        assert len(model.prompts) > 1
+        assert any("STATEMENT HEADER" in p for p in model.prompts)
+        assert outcome.rows == [], "the header vouched for an invented amount"
+
+    def test_the_header_stops_at_the_first_transaction(self):
+        header = statements._header(self.statement().splitlines())
+
+        assert "Statement period" in header
+        assert "TIM HORTONS" not in header
+
+
 class TestGenuineDuplicates:
     """The failure the naive dedup causes, and the reason for the per-window count.
 

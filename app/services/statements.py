@@ -78,6 +78,44 @@ OVERLAP_LINES = 6
 # Carried across a character split. Generous next to any real statement line,
 # and cheap: it is re-read once, and the merge removes what it duplicates.
 LINE_SPLIT_OVERLAP_CHARS = 300
+# The statement's own header, carried into every later window. Bounded so it
+# cannot crowd out the transactions it is there to date.
+MAX_HEADER_LINES = 12
+MAX_HEADER_CHARS = 1_200
+
+# An amount, and a date that is not necessarily a year: `14 Aug`, `AUG 14`,
+# `08/14`. Deliberately loose — this only decides where the header ends.
+_AMOUNT_RE = re.compile(r"\d[\d,]*\.\d{2}")
+_DATE_RE = re.compile(
+    r"\b(\d{1,2}[/-]\d{1,2}|\d{1,2}\s*[A-Za-z]{3,}|[A-Za-z]{3,}\s*\d{1,2})\b"
+)
+
+
+def _looks_like_a_transaction(line: str) -> bool:
+    return bool(_AMOUNT_RE.search(line) and _DATE_RE.search(line))
+
+
+def _header(lines: list[str]) -> str:
+    """The block above the first transaction — where the year lives.
+
+    Statements print `14 Aug` on every line and the year exactly once, in
+    "Statement period: 1 Aug 2026 to 31 Aug 2026". A window is a slice of the
+    text, so only the first one contains that. Without this, every later window
+    is a list of dates with no year, the prompt's own rule says to omit a row
+    rather than guess one, and three quarters of a long statement vanish — not
+    rejected, not counted, just absent, reported as a clean import.
+    """
+    head: list[str] = []
+    size = 0
+    for line in lines[:MAX_HEADER_LINES]:
+        if _looks_like_a_transaction(line):
+            break
+        size += len(line) + 1
+        if size > MAX_HEADER_CHARS:
+            break
+        head.append(line)
+    return "\n".join(head).strip()
+
 
 _SYSTEM_PROMPT = """\
 You read bank and credit-card statements and return the transactions in them.
@@ -93,8 +131,11 @@ Rules:
   statement's purchases are debits.
 - Ignore running balances, subtotals, totals, interest summaries and page
   headers. Only individual transactions.
-- If the year is not on a line, take it from the statement period. If you cannot
+- If the year is not on a line, take it from the statement period, which may
+  appear in a "STATEMENT HEADER" block above the transactions. If you cannot
   tell, omit the row rather than guessing a year.
+- A "STATEMENT HEADER" block is context only. Never return a transaction from
+  it, however much one of its lines looks like one.
 - confidence is how sure you are of THAT row: 90+ for a clean tabular line,
   below 60 when you are inferring.
 - If there are no transactions, return [].
@@ -211,7 +252,14 @@ def _amount_forms(amount: str) -> set[str]:
 
 
 def _appears_verbatim(amount: str, haystack: str) -> bool:
-    """Whether the model's amount is actually in the text it was given."""
+    """Whether the model's amount is actually in the text it was given.
+
+    Known and accepted: a credit written `12.40-` or `(12.40)` — both real
+    Canadian conventions — does not match the `-12.40` the model may return, so
+    that row is rejected and counted rather than saved with a guessed sign.
+    Losing a row the user can see in the review queue beats inventing a figure,
+    which is the whole trade this function exists to make.
+    """
     return any(form in haystack for form in _amount_forms(amount))
 
 
@@ -242,7 +290,10 @@ def _coerce(raw: object, window: str, currency: str) -> ParsedRow | None:
         return None
 
     confidence = raw.get("confidence", 50)
-    confidence = confidence if isinstance(confidence, int) else 50
+    # `isinstance(True, int)` is True in Python, so a JSON `true` would sail
+    # through as a confidence of 1.
+    if isinstance(confidence, bool) or not isinstance(confidence, int):
+        confidence = 50
     return ParsedRow(
         occurred_on=occurred_on,
         description=description,
@@ -336,6 +387,8 @@ async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseO
     endpoint handles. Reported as the general failure it became "we could not
     read that statement", which is wrong and leaves the user nothing to do.
     """
+    lines = text.splitlines()
+    header = _header(lines)
     windows = _windows(text)
     if len(windows) > MAX_WINDOWS:
         raise LlmError(
@@ -348,16 +401,25 @@ async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseO
     rejected = 0
     total_rows = 0
 
-    for window in windows:
+    for index, window in enumerate(windows):
         if time.monotonic() - started > PARSE_BUDGET_SECONDS:
             raise LlmError("statement took longer to read than the time budget allows")
+        # The first window already contains the header; repeating it there would
+        # invite the model to read the same lines twice.
+        prompt = (
+            window
+            if index == 0 or not header
+            else f"STATEMENT HEADER\n{header}\n\nTRANSACTIONS\n{window}"
+        )
         answer = await client.complete(
             system=_SYSTEM_PROMPT,
-            user=window,
+            user=prompt,
             # Roughly four times the window's line count in tokens; JSON rows are
             # much smaller than the text they came from.
             max_output_tokens=8_000,
         )
+        # Validated against the window, never against the prompt: a balance in
+        # the header must not be able to vouch for an amount the model invented.
         window_rows, window_rejected = _rows_from(answer, window, currency)
         per_window.append(window_rows)
         rejected += window_rejected

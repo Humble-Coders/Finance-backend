@@ -350,6 +350,46 @@ class TestTheImportRecord:
             "version"
         ] == "ai-v1"
 
+    async def test_expired_text_is_purged_even_when_the_request_is_refused(
+        self, api_client, db_session, monkeypatch
+    ):
+        """The purge runs before the gates — which is worth nothing unless it
+        commits, because `get_session` never commits on its own and every
+        refusal path raises."""
+        use_model(monkeypatch, FakeModel(INVENTED_ANSWER))
+        await onboard(api_client, "+14165571015")
+        await consent_to_ai(api_client)
+        await api_client.post(PARSE, json=body(keep_text_for_diagnostics=True))
+        await db_session.execute(
+            text(
+                "UPDATE statement_import_text SET expires_at = now() - interval '1 day'"
+            )
+        )
+
+        # Refused for size, so nothing in this request commits by itself.
+        refused = await api_client.post(PARSE, json=body(text="x" * 300_000))
+
+        assert refused.status_code == 413
+        kept = (await db_session.execute(select(StatementImportText))).scalars().all()
+        assert kept == [], "expired text survived a refused request"
+
+    async def test_a_missing_api_key_is_a_502_not_a_500(self, api_client, monkeypatch):
+        """The failure mode of the free-tier-to-paid swap. It must land as the
+        error the client already handles, with the import recorded as failed."""
+        from app.services.llm import LlmError as _LlmError
+
+        def unconfigured(_settings):
+            raise _LlmError("LLM_API_KEY is not set")
+
+        monkeypatch.setattr(endpoint, "build_client", unconfigured)
+        await onboard(api_client, "+14165571016")
+        await consent_to_ai(api_client)
+
+        response = await api_client.post(PARSE, json=body())
+
+        assert response.status_code == 502
+        assert response.json()["detail"]["code"] == "parse_failed"
+
     async def test_an_account_from_another_household_is_not_found(
         self, api_client, monkeypatch
     ):

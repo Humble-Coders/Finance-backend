@@ -55,18 +55,26 @@ DIAGNOSTIC_MIN_FAILURE_RATIO = 0.5
 
 
 async def _purge_expired(session: AsyncSession) -> None:
-    """Delete diagnostic text past its date.
+    """Delete diagnostic text past its date, and commit it.
 
     Done here, on the path that creates it, rather than by a scheduled job. A
     retention promise that depends on a cron nobody watches is how "deleted
     after 30 days" quietly becomes false — and the on-device decision removed
     the worker that would have run it anyway.
+
+    **The commit is the point.** Without it this runs before the consent, quota
+    and size gates and is then discarded by every one of them, because
+    `get_session` closes without committing — a deletion that only happens on
+    requests that were going to succeed anyway. It commits on its own because
+    it owns nothing else: nothing is pending at this point in the request, so
+    there is no other work to drag along with it.
     """
     await session.execute(
         delete(StatementImportText).where(
             StatementImportText.expires_at < datetime.now(UTC)
         )
     )
+    await session.commit()
 
 
 async def _imports_this_month(session: AsyncSession, household: Household) -> int:
@@ -197,8 +205,14 @@ async def parse(
     await session.flush()
 
     currency = await currency_for(session, household)
-    client = build_client(settings)
+    client = None
     try:
+        # Inside the try: `build_client` raises `LlmError` for a missing key,
+        # missing model or unknown provider — which is precisely the failure
+        # mode of the free-tier-to-paid swap this module exists to make safe.
+        # Constructed outside, that misconfiguration escapes as an unhandled
+        # 500 with no import record and no reason recorded.
+        client = build_client(settings)
         outcome = await parse_statement(client, body.text, currency)
     except LlmError as exc:
         record.status = StatementImportStatus.failed
@@ -218,7 +232,8 @@ async def parse(
             },
         ) from exc
     finally:
-        await close_client(client)
+        if client is not None:
+            await close_client(client)
 
     # A parse that found nothing is a failure from the only perspective that
     # matters — the person holding a statement full of transactions. Recording

@@ -53,7 +53,7 @@ MAX_ROWS = 2_000
 # an unbounded number of sequential 60-second calls: over an hour in one HTTP
 # request, billed the whole way, long after the client gave up and every proxy
 # in between dropped the connection.
-MAX_WINDOWS = 20
+MAX_WINDOWS = 40
 # The budget is checked between calls, so a parse can overshoot by at most one
 # call. Exact enough for something whose purpose is "stop, nobody is waiting".
 PARSE_BUDGET_SECONDS = 180.0
@@ -110,9 +110,38 @@ class ParseOutcome:
     prompt_version: str = _PROMPT_VERSION
 
 
+def _split_long_lines(lines: list[str]) -> list[str]:
+    """Break any single line too big to be a window on its own.
+
+    On-device OCR does not return one line per transaction — Vision and ML Kit
+    return text *blocks*, and a badly-segmented scan can return a whole page, or
+    a whole statement, as one line. Without this, that line becomes a window
+    larger than any model's context and the parse fails on input we could
+    otherwise read.
+    """
+    out: list[str] = []
+    for line in lines:
+        if len(line) <= CHUNK_CHARS:
+            out.append(line)
+            continue
+        out.extend(
+            line[at : at + CHUNK_CHARS] for at in range(0, len(line), CHUNK_CHARS)
+        )
+    return out
+
+
 def _windows(text: str) -> list[str]:
-    """Split into overlapping windows on line boundaries."""
-    lines = text.splitlines()
+    """Split into overlapping windows on line boundaries.
+
+    The overlap is bounded *relative to the window*, which the obvious version
+    of this gets wrong. Stepping back a fixed six lines is right when a window
+    holds hundreds of short lines from a PDF's text layer; when it holds four
+    long OCR blocks, `end - 6` lands at or before `start`, the window advances
+    by a single line, and almost the whole window is sent again. Measured on
+    OCR-shaped input that was 37 windows and 3.7x the statement's own length in
+    billed tokens — for the input class this architecture made *more* likely.
+    """
+    lines = _split_long_lines(text.splitlines())
     if not lines:
         return []
 
@@ -126,9 +155,10 @@ def _windows(text: str) -> list[str]:
         windows.append("\n".join(lines[start:end]))
         if end >= len(lines):
             break
-        # Step back a few lines so a transaction split by the boundary appears
-        # whole in the next window. The duplicate this creates is removed later.
-        start = max(end - OVERLAP_LINES, start + 1)
+        # Enough to carry a transaction across the boundary, never so much that
+        # the window fails to advance.
+        overlap = min(OVERLAP_LINES, max(1, (end - start) // 4))
+        start = max(end - overlap, start + 1)
     return windows
 
 
@@ -231,17 +261,30 @@ def _merge(per_window: list[list[ParsedRow]]) -> list[ParsedRow]:
     coffees appear twice in every window that contains that region, so the
     maximum is two. The only way to see a count of N is for some single window
     to have read N of them.
+
+    What it still cannot tell apart: two identical transactions that land in
+    *different* windows with no overlap between them look exactly like one row
+    seen twice, and collapse to one. On a statement sorted by date, identical
+    same-day transactions sit next to each other and share a window, so this is
+    narrow — but it is not nothing, and nobody should read this function as
+    airtight.
     """
     counts: dict[tuple[date, str, str], int] = {}
     first: dict[tuple[date, str, str], ParsedRow] = {}
     order: list[tuple[date, str, str]] = []
 
     for window_rows in per_window:
-        for key, count in Counter(_key(row) for row in window_rows).items():
-            if key not in counts:
+        # One pass per window. Resolving the representative with a rescan per
+        # key was quadratic, on the request path, with the user waiting.
+        window_counts: Counter[tuple[date, str, str]] = Counter()
+        for row in window_rows:
+            key = _key(row)
+            window_counts[key] += 1
+            if key not in first:
                 order.append(key)
-                first[key] = next(r for r in window_rows if _key(r) == key)
-            counts[key] = max(counts[key], count) if key in counts else count
+                first[key] = row
+        for key, count in window_counts.items():
+            counts[key] = max(counts.get(key, 0), count)
 
     return [row for key in order for row in [first[key]] * counts[key]]
 
@@ -280,10 +323,15 @@ async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseO
         per_window.append(window_rows)
         rejected += window_rejected
         total_rows += len(window_rows)
-        if total_rows > MAX_ROWS:
+        # A runaway guard, generously above the real cap: rows counted here are
+        # pre-merge, so the overlap inflates them and a legitimate statement
+        # must not trip it. The real limit is applied to the merged result.
+        if total_rows > MAX_ROWS * 4:
             raise LlmError("statement produced more rows than a statement can have")
 
     merged = _merge(per_window)
+    if len(merged) > MAX_ROWS:
+        raise LlmError("statement produced more rows than a statement can have")
     log.info(
         "statement_parsed",
         model=client.model,

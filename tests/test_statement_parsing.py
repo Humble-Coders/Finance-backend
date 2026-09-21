@@ -176,6 +176,40 @@ class TestGenuineDuplicates:
         assert len(outcome.rows) == 2
 
 
+class TestOcrShapedInput:
+    """OCR returns blocks, not one line per transaction.
+
+    The obvious windowing — step back a fixed number of lines — is right for a
+    PDF text layer with hundreds of short lines and badly wrong for four long
+    OCR blocks, where it fails to advance and re-sends almost the whole window.
+    This is the input class the on-device decision made more common, so it is
+    the one worth pinning.
+    """
+
+    def test_long_lines_do_not_multiply_the_windows(self):
+        statement = "\n".join(["x" * 3000] * 60)
+
+        windows = statements._windows(statement)
+        sent = sum(len(w) for w in windows)
+
+        assert len(windows) <= statements.MAX_WINDOWS, "would be refused outright"
+        assert sent < len(statement) * 1.6, "billing multiples of the statement"
+
+    def test_short_lines_still_barely_overlap(self):
+        statement = "\n".join(["x" * 60] * 400)
+
+        sent = sum(len(w) for w in statements._windows(statement))
+
+        assert sent < len(statement) * 1.2
+
+    def test_one_enormous_line_is_split_rather_than_sent_whole(self):
+        """A badly-segmented scan can return a whole statement as one line."""
+        windows = statements._windows("y" * 150_000)
+
+        assert len(windows) > 1
+        assert all(len(w) <= statements.CHUNK_CHARS for w in windows)
+
+
 class TestLongStatements:
     @pytest.mark.asyncio
     async def test_a_transaction_on_the_seam_is_returned_once(self, monkeypatch):
@@ -211,7 +245,7 @@ class TestLongStatements:
         60-second timeout is over an hour, billed the whole way, long after the
         client gave up."""
         monkeypatch.setattr(statements, "CHUNK_CHARS", 60)
-        monkeypatch.setattr(statements, "MAX_WINDOWS", 3)
+        monkeypatch.setattr(statements, "MAX_WINDOWS", 2)
         statement = "\n".join(
             f"2026-08-{day:02d}  MERCHANT {day}   {day}.50" for day in range(1, 21)
         )

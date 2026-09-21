@@ -85,6 +85,23 @@ class TestItReadsWhatIsThere:
         assert [r.amount for r in outcome.rows] == ["2410.00"]
 
     @pytest.mark.asyncio
+    async def test_an_amount_with_a_thousands_separator_is_kept(self):
+        """Found by the first real statement, after nine review passes missed it.
+
+        The prompt tells the model to copy an amount exactly as printed, and a
+        Canadian statement prints `2,410.00`. `Decimal` rejects that, so the
+        validator dropped the row — every transaction over $999.99, which is
+        rent, mortgage, payroll and tuition. The small ones came through and the
+        total still looked plausible, which is the worst way for it to fail.
+        """
+        model = FakeModel(rows(row("2,410.00", "PAYROLL DEP", "2026-08-16", "credit")))
+
+        outcome = await parse_statement(model, STATEMENT, CURRENCY)
+
+        assert [r.amount for r in outcome.rows] == ["2410.00"]
+        assert outcome.unparsed_line_count == 0
+
+    @pytest.mark.asyncio
     async def test_json_wrapped_in_a_code_fence_is_still_json(self):
         model = FakeModel("```json\n" + rows(row()) + "\n```")
         outcome = await parse_statement(model, STATEMENT, CURRENCY)

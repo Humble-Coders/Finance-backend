@@ -57,6 +57,24 @@ look plausible.
    word boundary. *Failure (in the redactor, not the model): the line is gone
    before the model sees it.*
 
+## First run, 2026-09-22
+
+`google/gemini-2.5-flash` via OpenRouter, one window, 9.1 seconds.
+
+- **First attempt: 22 of 25, three rejected.** The three were `2,410.00`,
+  `1,450.00` and `2,410.00` — every amount with a thousands separator. The
+  prompt tells the model to copy amounts exactly as printed; `Decimal` rejects
+  the grouped form; the validator dropped the rows. Every transaction over
+  $999.99 would have vanished, while the small ones came through and the total
+  looked plausible. Fixed by `_ungrouped`.
+- **Second attempt: 25 of 25, none rejected.** Every trap above held: the year
+  arrived from the period field with no year anywhere in the text, the balance
+  column stayed out, both coffees and both bus fares survived, the wrapped
+  description merged into one row, and the page-2 header produced nothing.
+
+Nine review passes did not find the separator bug. One realistic statement found
+it in nine seconds, and it was the worst defect in the feature.
+
 ## Running it
 
 ```bash

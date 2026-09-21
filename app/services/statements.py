@@ -276,6 +276,24 @@ def _windows(text: str) -> list[str]:
     return windows
 
 
+def _ungrouped(amount: str) -> str:
+    """`2,410.00` -> `2410.00`. Thousands separators removed, nothing else.
+
+    The prompt tells the model to copy an amount exactly as the statement
+    prints it, and Canadian statements print `2,410.00`. `Decimal` rejects
+    that, so without this every row over $999.99 was dropped by the validator
+    as unparseable — rent, mortgage, payroll, tuition, car payments. The
+    largest lines in somebody's finances, gone, while the small ones came
+    through and the total looked plausible.
+
+    Only `,` and spaces between digits. A European `1.234,56` is a different
+    problem and is not guessed at here: v1 is CAD, and inventing a rule for
+    which separator means what is how an amount becomes wrong by a factor of a
+    hundred rather than merely rejected.
+    """
+    return re.sub(r"(?<=\d)[,\s](?=\d)", "", amount.strip())
+
+
 def _amount_forms(amount: str) -> set[str]:
     """How this amount might be written on a statement.
 
@@ -312,7 +330,7 @@ def _coerce(raw: object, window: str, currency: str) -> ParsedRow | None:
         return None
     try:
         occurred_on = date.fromisoformat(str(raw["date"]))
-        amount = normalize(str(raw["amount"]), currency)
+        amount = normalize(_ungrouped(str(raw["amount"])), currency)
         direction = TransactionDirection(str(raw["direction"]))
         description = str(raw["description"]).strip()
     except (KeyError, ValueError, MoneyError):

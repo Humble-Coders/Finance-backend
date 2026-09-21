@@ -8,7 +8,7 @@ all authoritative financial math, and all AI orchestration.
 - Product spec: [docs/PRD.md in FinAI-Mobile-2026](https://github.com/Humble-Coders/FinAI-Mobile-2026/blob/main/docs/PRD.md) — canonical, not duplicated here
 - Conventions: `CLAUDE.md`
 - Data platform: Supabase (Postgres, Auth, Storage, Queues, pgvector) — `us-east-1`
-- Hosting: Render (`finai-api` web service, `finai-worker` background worker) — Virginia
+- Hosting: Render (`finai-api` web service) — Virginia
 
 ## Local development
 
@@ -39,16 +39,15 @@ app/
 ├── db.py              async SQLAlchemy engine + session
 ├── auth.py            Supabase JWT verification (JWKS)
 ├── api/               HTTP routes
-├── core/money.py      the decimal-string <-> minor-units boundary
-└── workers/main.py    queue consumer (extraction pipeline)
+└── core/money.py      the decimal-string <-> minor-units boundary
 alembic/               database migrations
 tests/
-render.yaml            Render Blueprint (both services)
+render.yaml            Render Blueprint (the finai-api service)
 ```
 
 ## Deployment
 
-Render reads `render.yaml`. Both services must be in the **virginia** region to sit
+Render reads `render.yaml`. The service must be in the **virginia** region to sit
 beside the Supabase project. Environment variables come from the Render environment
 group `finai-shared` — never from this repo.
 

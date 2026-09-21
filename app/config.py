@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # Supabase — use the TRANSACTION POOLER connection string (port 6543).
     # The direct :5432 connection will exhaust Postgres connections once the
-    # API and worker each run multiple instances.
+    # API runs multiple instances.
     database_url: str
 
     # Migrations need a SESSION-mode connection (port 5432). DDL through the
@@ -47,8 +47,6 @@ class Settings(BaseSettings):
     # so development is not rationed by the production plan; 7.1 moves this into
     # entitlements, where per-plan limits belong.
     free_imports_per_month: int = 1
-
-    extraction_queue_name: str = "extraction_jobs"
 
     @property
     def database_dsn(self) -> str:

@@ -72,10 +72,18 @@ Python 3.11+ · FastAPI · SQLAlchemy 2 (async) · Alembic · Supabase Postgres 
   offer.
 
 ### Async work
-- Anything long-running, retry-heavy, or LLM-dependent belongs in the **worker**, not a
-  request handler. Uploads return `status: queued` immediately.
-- Extraction must be resumable and idempotent — a partially imported statement in
-  someone's financial records is worse than a failed import.
+- **There is no worker.** Statement extraction moved onto the device on 2026-09-21
+  (PRD §9), which left the `finai-worker` service with nothing to drain; it and
+  `app/workers/` were removed. The queued-upload design it served — Storage upload,
+  `pgmq`, `status: queued` — is superseded, not merely unbuilt.
+- So long-running work has nowhere to go but a request handler, and that is a
+  constraint to design around, not a licence. Parsing is bounded and synchronous
+  (`app/api/statements.py`). Anything genuinely long-running, retry-heavy, or
+  fan-out needs a worker service brought back first — do not grow a request handler
+  into one.
+- Extraction must still be idempotent — a partially imported statement in someone's
+  financial records is worse than a failed import. The user keeps the file, so a
+  failed import is retried from the device.
 
 ### Privacy (see PRD Appendix A)
 - **No document bytes, raw statement text, or unredacted account numbers in logs, error
@@ -101,7 +109,7 @@ Python 3.11+ · FastAPI · SQLAlchemy 2 (async) · Alembic · Supabase Postgres 
 - No LLM-generated figures presented as data.
 - No secrets in the repo (it is **public**).
 - No PII in logs or analytics.
-- No blocking a request on work that belongs in the worker.
+- No unbounded or retry-heavy work inside a request handler (see Async work).
 - No per-country branches in code — use country packs.
 
 ## Testing

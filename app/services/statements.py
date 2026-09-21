@@ -149,7 +149,18 @@ def _split_long_lines(lines: list[str]) -> list[str]:
         if len(line) <= CHUNK_CHARS:
             out.append(line)
             continue
-        out.extend(line[at : at + CHUNK_CHARS] for at in range(0, len(line), step))
+        pieces = [line[at : at + CHUNK_CHARS] for at in range(0, len(line), step)]
+        # A trailing piece can be almost entirely the overlap it carried: a line
+        # one character past the chunk size ends with 300 repeated characters
+        # and one new one, and that piece becomes its own window and its own
+        # model call. Absorb such a tail into the piece before it rather than
+        # dropping it — the new content may be a digit.
+        if len(pieces) > 1:
+            covered = (len(pieces) - 2) * step + CHUNK_CHARS
+            if len(line) - covered <= LINE_SPLIT_OVERLAP_CHARS:
+                pieces[-2] = line[(len(pieces) - 2) * step :]
+                pieces.pop()
+        out.extend(pieces)
     return out
 
 
@@ -319,6 +330,11 @@ async def parse_statement(client: LlmClient, text: str, currency: str) -> ParseO
     tells the user, who still has the file and can simply try again. That is the
     whole reason a failed import is not a problem here — nothing was half-saved,
     because the source of truth never left their device.
+
+    Raises `TooManyRowsError` — a subclass, so catch it first — when the model
+    read the statement perfectly and there is simply more of it than this
+    endpoint handles. Reported as the general failure it became "we could not
+    read that statement", which is wrong and leaves the user nothing to do.
     """
     windows = _windows(text)
     if len(windows) > MAX_WINDOWS:

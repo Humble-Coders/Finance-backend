@@ -116,6 +116,11 @@ print(len(w), 'windows,', round(sum(map(len,w))/len(t),2), 'x the statement sent
 
 - **The fixture should become a realistic multi-page Canadian statement.** What
   exists proves the guards, not the parsing.
+- **The client must handle two 413s** the mobile ticket predates: `statement_too_long`
+  (over 200k characters) and `too_many_transactions`. Ticket
+  [FinAI-Mobile-2026#31](https://github.com/Humble-Coders/FinAI-Mobile-2026/issues/31)
+  has been updated; it previously listed only 403, 409, 429 and 502, so 3.6 would
+  have rendered both through a generic "something went wrong".
 - **A statement over 2,000 transactions is refused** with 413 `too_many_transactions`
   rather than imported in parts. Splitting one across imports would need dedup
   across them, which is 3.3's problem, not this endpoint's.

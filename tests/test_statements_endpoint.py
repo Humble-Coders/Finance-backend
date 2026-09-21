@@ -390,6 +390,32 @@ class TestTheImportRecord:
         assert response.status_code == 502
         assert response.json()["detail"]["code"] == "parse_failed"
 
+    async def test_too_many_transactions_is_413_and_does_not_cost_the_month(
+        self, api_client, db_session, monkeypatch
+    ):
+        """A statement read perfectly, with more in it than we import at once.
+
+        Its own code, because "we could not read that statement" is both wrong
+        and unactionable here — and it must not burn the month's import, since
+        nothing was imported.
+        """
+        from app.services import statements as parsing
+
+        monkeypatch.setattr(parsing, "MAX_ROWS", 1)
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571017")
+        await consent_to_ai(api_client)
+
+        refused = await api_client.post(PARSE, json=body())
+        use_model(monkeypatch, FakeModel())
+        retried = await api_client.post(PARSE, json=body())
+
+        assert refused.status_code == 413
+        assert refused.json()["detail"]["code"] == "too_many_transactions"
+        record = (await db_session.execute(select(StatementImport))).scalars().first()
+        assert record.status is StatementImportStatus.failed
+        assert retried.status_code == 200, "a refusal must not cost the month"
+
     async def test_an_account_from_another_household_is_not_found(
         self, api_client, monkeypatch
     ):

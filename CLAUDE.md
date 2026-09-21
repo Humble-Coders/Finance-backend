@@ -45,6 +45,11 @@ Python 3.11+ · FastAPI · SQLAlchemy 2 (async) · Alembic · Supabase Postgres 
   Supabase account seen for a person; when a second provider is linked by phone,
   that `sub` lives in `user_identity`. Resolution goes through `user_identity`,
   or it silently fails for anyone using more than one provider.
+- **Every 409 calls `log_conflict` first** (`app/services/conflicts.py`): the code
+  the client gets, plus a `reason` naming the branch that refused, and never the
+  value that collided. A conflict reads as "Something went wrong" on the phone,
+  so the log line is the only record of which one it was. A guard test fails the
+  build on a 409 raised without it.
 - Clients authenticate against **Supabase Auth**; this service only verifies the JWT
   (`app/auth.py`). No custom auth.
 - The `service_role` key exists only in this service's environment. It must never reach

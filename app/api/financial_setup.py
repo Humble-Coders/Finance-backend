@@ -54,7 +54,11 @@ async def _require_prerequisites(
     state = await onboarding_state(session, identity.user, identity.household)
     outstanding = wizard_prerequisites(state)
     if outstanding:
-        raise onboarding_conflict(outstanding)
+        raise onboarding_conflict(
+            outstanding,
+            gate="wizard_prerequisites",
+            user_id=identity.user.id,
+        )
 
 
 @router.get("/financial-setup", response_model=FinancialSetupOut)

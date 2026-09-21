@@ -27,6 +27,7 @@ wizard's own endpoints refuse on `wizard_prerequisites` instead, or clearing
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, status
@@ -39,6 +40,7 @@ from app.models.enums import PolicyKind
 from app.models.identity import ConsentEvent, Household, User
 from app.models.platform import DisclaimerVersion
 from app.models.setup import FinancialProfile
+from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
 
 __all__ = [
@@ -179,8 +181,14 @@ def wizard_prerequisites(state: OnboardingState) -> list[str]:
     return [step for step in state.steps if step != ONBOARDING_FINANCIAL_SETUP]
 
 
-def onboarding_conflict(steps: list[str]) -> HTTPException:
+def onboarding_conflict(
+    steps: list[str], *, gate: str, user_id: uuid.UUID
+) -> HTTPException:
     """409 naming what is still outstanding, so the client can route on it.
+
+    `gate` is the caller's own name, recorded in the log: the same code means
+    "you have not finished onboarding" and "you have not finished the parts the
+    wizard needs", and only the gate distinguishes them.
 
     `steps` is scoped to the gate that raised it, not always the whole list:
     `require_onboarded` passes every outstanding step, while the wizard's own
@@ -188,6 +196,8 @@ def onboarding_conflict(steps: list[str]) -> HTTPException:
     a caller held there is never told to finish the step it exists to clear.
     Either way the first entry is the step to route to.
     """
+    # Step names are our own vocabulary, not the user's data.
+    log_conflict(ONBOARDING_REQUIRED, gate, user_id=str(user_id), steps=steps)
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={
@@ -215,4 +225,6 @@ async def require_onboarded(
     """
     state = await onboarding_state(session, identity.user, identity.household)
     if state.steps:
-        raise onboarding_conflict(state.steps)
+        raise onboarding_conflict(
+            state.steps, gate="require_onboarded", user_id=identity.user.id
+        )

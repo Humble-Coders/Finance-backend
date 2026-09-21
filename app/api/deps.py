@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import AuthenticatedUser, current_user
 from app.db import get_session
 from app.models.identity import Household, User
+from app.services.conflicts import log_conflict
 from app.services.identity import (
     PhoneAlreadyLinkedError,
     ResolvedIdentity,
@@ -39,6 +40,10 @@ async def current_identity(
         resolved = await resolve_user(session, caller)
     except PhoneAlreadyLinkedError as exc:
         await session.rollback()
+        # The number is the one thing we must not log; `exc.reason` says which
+        # of the three phone paths refused, and the auth uid is enough to find
+        # the account by hand.
+        log_conflict(PHONE_ALREADY_LINKED, exc.reason, auth_user_id=caller.user_id)
         # 409: the request is well-formed, but reconciling two accounts is a
         # decision for a person. Coded so the client can act on it rather than
         # parsing prose.

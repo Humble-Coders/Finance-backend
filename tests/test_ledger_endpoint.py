@@ -388,6 +388,30 @@ class TestWhatReachesTheModel:
         for forbidden in ("2026-08-02", account, "4821", "#", "debit"):
             assert forbidden not in sent, f"{forbidden!r} reached the model"
 
+    async def test_a_row_with_no_name_is_not_sent_to_the_model(
+        self, api_client, db_session, monkeypatch
+    ):
+        """A description that is all reference numbers leaves nothing to
+        categorize with. Asking anyway buys a confident-looking guess on a
+        transaction nobody could name."""
+        model = FakeModel()
+        use_model(monkeypatch, model)
+        me = await onboard(api_client, "+14165572028")
+        account = await an_account(api_client)
+
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [row(description="#### 99812")],
+        )
+
+        assert model.prompts == [], "a nameless row was sent to the model"
+        saved = await db_session.execute(select(Transaction))
+        transaction = saved.scalar_one()
+        assert transaction.needs_review is True
+        assert transaction.review_reason is ReviewReason.unknown_category
+
     async def test_an_invented_category_becomes_other_and_is_flagged(
         self, api_client, db_session, monkeypatch
     ):

@@ -98,10 +98,53 @@ def _numbered(
     return out
 
 
-async def _near_match(
+async def _candidates(
     session: AsyncSession,
     account_id,
     statement_import_id,
+    rows: list[tuple[RowToSave, str, int, int]],
+) -> dict[tuple[date, int], list[Transaction]]:
+    """Every row this import could collide with, in one query.
+
+    One query per row is the obvious shape and it degrades badly: a 200-line
+    statement is 200 round trips before a single insert, and each one crosses
+    the pooler. Measured at ~4ms a row against a local container, which is
+    fractions of a second there and seconds through Supabase — inside a request
+    somebody is waiting on.
+
+    **Rows from this same import are excluded, and that is not an
+    optimisation.** Two lines on one statement are two transactions by
+    definition — the statement listed them both — so neither can be a duplicate
+    of the other. Without it, two $100 e-transfers to different people on one
+    day flag each other, and so does every pair of same-day $20 withdrawals.
+    """
+    if not rows:
+        return {}
+
+    dates = [row.occurred_on for row, _, _, _ in rows]
+    amounts = {minor for _, _, minor, _ in rows}
+    window = timedelta(days=NEAR_MATCH_DAYS)
+
+    result = await session.execute(
+        select(Transaction).where(
+            Transaction.account_id == account_id,
+            Transaction.amount_minor_units.in_(amounts),
+            Transaction.occurred_on >= min(dates) - window,
+            Transaction.occurred_on <= max(dates) + window,
+            Transaction.statement_import_id.is_distinct_from(statement_import_id),
+        )
+    )
+
+    found: dict[tuple[date, int], list[Transaction]] = {}
+    for existing in result.scalars().all():
+        found.setdefault(
+            (existing.occurred_on, existing.amount_minor_units), []
+        ).append(existing)
+    return found
+
+
+def _near_match(
+    candidates: dict[tuple[date, int], list[Transaction]],
     occurred_on: date,
     minor: int,
     key: str,
@@ -112,28 +155,14 @@ async def _near_match(
     descriptions look. The case this exists for is a re-import after the parse
     improved, where the description is the single thing guaranteed to differ; a
     similarity gate would miss it for precisely the reason it changed.
-
-    **Rows from this same import are excluded, and that is not an optimisation.**
-    Two lines on one statement are two transactions by definition — the
-    statement listed them both — so neither can be a duplicate of the other.
-    Without this, two $100 e-transfers to different people on one day flag each
-    other, and so does every pair of same-day $20 withdrawals. A review queue
-    that is mostly false alarms is a review queue people learn to ignore.
     """
-    result = await session.execute(
-        select(Transaction)
-        .where(
-            Transaction.account_id == account_id,
-            Transaction.amount_minor_units == minor,
-            Transaction.occurred_on >= occurred_on - timedelta(days=NEAR_MATCH_DAYS),
-            Transaction.occurred_on <= occurred_on + timedelta(days=NEAR_MATCH_DAYS),
-            Transaction.normalized_description != key,
-            Transaction.statement_import_id.is_distinct_from(statement_import_id),
-        )
-        .order_by(Transaction.occurred_on)
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
+    for offset in range(-NEAR_MATCH_DAYS, NEAR_MATCH_DAYS + 1):
+        for existing in candidates.get(
+            (occurred_on + timedelta(days=offset), minor), []
+        ):
+            if existing.normalized_description != key:
+                return existing
+    return None
 
 
 async def save_rows(
@@ -151,11 +180,11 @@ async def save_rows(
     lands whole or not at all.
     """
     outcome = SaveOutcome()
+    numbered = _numbered(rows, currency)
+    candidates = await _candidates(session, account_id, statement_import_id, numbered)
 
-    for row, key, minor, occurrence in _numbered(rows, currency):
-        existing = await _near_match(
-            session, account_id, statement_import_id, row.occurred_on, minor, key
-        )
+    for row, key, minor, occurrence in numbered:
+        existing = _near_match(candidates, row.occurred_on, minor, key)
         flagged = existing is not None
         low = row.confidence < LOW_CONFIDENCE
 

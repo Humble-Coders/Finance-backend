@@ -501,7 +501,18 @@ async def _apply_categories(session, settings, household_id, saved_ids) -> None:
     result = await session.execute(
         select(Transaction).where(Transaction.id.in_(saved_ids))
     )
-    rows = list(result.scalars().all())
+    all_rows = list(result.scalars().all())
+
+    # A row whose description held no name — all reference numbers, say — has
+    # nothing to categorize *with*. Asking the model to file `["", "5.25"]`
+    # buys an answer that looks confident and cannot be better than a guess.
+    # It goes straight to a person instead, which is cheaper and honest.
+    nameless = [row for row in all_rows if not row.merchant]
+    for row in nameless:
+        row.needs_review = True
+        row.review_reason = row.review_reason or ReviewReason.unknown_category
+
+    rows = [row for row in all_rows if row.merchant]
     if not rows:
         return
 

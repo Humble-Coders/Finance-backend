@@ -31,7 +31,29 @@ def run_migrations_offline() -> None:
 
 
 def _run(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        # One transaction per revision, not one for the whole upgrade.
+        #
+        # Postgres refuses to *use* an enum value in the transaction that added
+        # it — with one exception: it allows it when the enum type was created
+        # in that same transaction. Applying from base, every migration shares
+        # one transaction and the CREATE TYPE is in it, so the exception applies
+        # and it works. Applying onto a database that already has the type, it
+        # does not, and the upgrade fails with UnsafeNewEnumValueUsageError.
+        #
+        # That difference is invisible to CI, which only ever migrates from
+        # base. It surfaced on production, where splitting the work across two
+        # revisions was not enough because both revisions still ran inside one
+        # transaction.
+        #
+        # The trade: a failure midway now leaves earlier revisions applied
+        # rather than rolling the whole upgrade back. That is the standard
+        # arrangement, and it is the honest one — each revision is a unit of
+        # work, and a migration that cannot stand alone is a migration to split.
+        transaction_per_migration=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

@@ -507,10 +507,23 @@ async def _apply_categories(session, settings, household_id, saved_ids) -> None:
     # nothing to categorize *with*. Asking the model to file `["", "5.25"]`
     # buys an answer that looks confident and cannot be better than a guess.
     # It goes straight to a person instead, which is cheaper and honest.
-    nameless = [row for row in all_rows if not row.merchant]
-    for row in nameless:
-        row.needs_review = True
-        row.review_reason = row.review_reason or ReviewReason.unknown_category
+    def send_to_review(rows) -> None:
+        """A transaction with no category belongs in front of a person.
+
+        Every path out of this function that leaves a row uncategorized has to
+        call this. Rows are written before categorization runs precisely so a
+        model problem costs nothing — but "costs nothing" means the row still
+        reaches somebody, not that it lands silently with an empty category
+        while the review queue says all is well. M4's budgets read categories.
+        """
+        for row in rows:
+            row.needs_review = True
+            row.review_reason = row.review_reason or ReviewReason.unknown_category
+
+    # A row whose description held no name — all reference numbers, say — has
+    # nothing to categorize *with*. Asking the model to file `["", "5.25"]`
+    # buys an answer that looks confident and cannot be better than a guess.
+    send_to_review([row for row in all_rows if not row.merchant])
 
     rows = [row for row in all_rows if row.merchant]
     if not rows:
@@ -525,7 +538,13 @@ async def _apply_categories(session, settings, household_id, saved_ids) -> None:
         # once it has a client; this is the same promise, one step earlier.
         client = build_client(settings)
     except LlmError:
+        # The likely failure, not the exotic one: a misspelled LLM_PROVIDER is
+        # a deployment mistake somebody makes once. Without this, a month of
+        # imports would land with no categories and nothing in the review queue
+        # saying so — and `categorize` flags this same condition when it fails
+        # further in, so the two paths disagreed about the same event.
         log.warning("categorization_skipped", reason="client_unavailable")
+        send_to_review(rows)
         return
 
     try:

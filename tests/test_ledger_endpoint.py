@@ -573,8 +573,16 @@ class TestTheImportRecord:
 
         assert response.status_code == 200, response.text
         assert response.json()["saved"] == 1
-        saved = await db_session.execute(select(Transaction))
-        assert saved.scalar_one().category_id is None
+        transaction = (await db_session.execute(select(Transaction))).scalar_one()
+        assert transaction.category_id is None
+        # The half this test used to miss. A row saved with no category and no
+        # flag never reaches a person, and reaching a person is the entire
+        # reason rows are written before categorization runs. `categorize`
+        # flags this same condition when it fails further in; both paths have
+        # to agree about it.
+        assert transaction.needs_review is True
+        assert transaction.review_reason is ReviewReason.unknown_category
+        assert response.json()["needs_review"] == 1
 
     async def test_a_low_confidence_row_goes_to_review(
         self, api_client, db_session, monkeypatch

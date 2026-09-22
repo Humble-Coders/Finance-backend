@@ -10,13 +10,21 @@ helpfully puts it back in by default.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.enums import SourceKind, TransactionDirection
+from app.models.enums import SourceKind, StatementImportStatus, TransactionDirection
 
-__all__ = ["StatementParseIn", "ParsedRowOut", "StatementParseOut"]
+__all__ = [
+    "StatementParseIn",
+    "ParsedRowOut",
+    "StatementParseOut",
+    "ConfirmRowIn",
+    "ConfirmRowsIn",
+    "SaveOutcomeOut",
+    "StatementImportOut",
+]
 
 
 class StatementParseIn(BaseModel):
@@ -78,3 +86,44 @@ class StatementParseOut(BaseModel):
     model: str
     prompt_version: str
     text_retained_until: date | None = None
+
+
+class ConfirmRowIn(BaseModel):
+    """A row the user is saving, as they confirmed it — not as we parsed it.
+
+    They may have corrected the date, the amount or the description on the
+    review screen before pressing save, so this is the record of what they
+    said, not an echo of what the model read.
+    """
+
+    occurred_on: date
+    description: str = Field(min_length=1, max_length=512)
+    amount: str
+    direction: TransactionDirection
+    confidence: int = Field(default=100, ge=0, le=100)
+
+
+class ConfirmRowsIn(BaseModel):
+    account_id: uuid.UUID
+    rows: list[ConfirmRowIn] = Field(min_length=1, max_length=2_000)
+
+
+class SaveOutcomeOut(BaseModel):
+    import_id: uuid.UUID
+    saved: int
+    # Exact matches the database refused. Certain, so not presented as work.
+    duplicates: int
+    # Saved, but pointed at something they might be a second copy of.
+    flagged: int
+    needs_review: int
+
+
+class StatementImportOut(BaseModel):
+    id: uuid.UUID
+    status: StatementImportStatus
+    source_kind: SourceKind
+    page_count: int | None
+    extracted_count: int | None
+    saved: int
+    needs_review: int
+    confirmed_at: datetime | None

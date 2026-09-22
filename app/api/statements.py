@@ -11,6 +11,7 @@ request that was never allowed must not cost money.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -20,15 +21,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_identity
 from app.config import get_settings
+from app.core.money import from_minor_units
 from app.db import get_session
-from app.models.enums import StatementImportStatus
+from app.models.categorization import Category
+from app.models.enums import ReviewReason, StatementImportStatus
 from app.models.identity import Household
-from app.models.money import Account, StatementImport, StatementImportText
-from app.schemas.statements import ParsedRowOut, StatementParseIn, StatementParseOut
+from app.models.money import Account, StatementImport, StatementImportText, Transaction
+from app.schemas.statements import (
+    ConfirmRowsIn,
+    ParsedRowOut,
+    SaveOutcomeOut,
+    StatementImportOut,
+    StatementParseIn,
+    StatementParseOut,
+)
 from app.services.ai_consent import CONSENT_REQUIRED, current_policy, has_consented
 from app.services.capabilities import currency_for, require_feature
+from app.services.categorization import categorize
 from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
+from app.services.ledger import RowToSave, save_rows
 from app.services.llm import LlmError, build_client, close_client
 from app.services.statements import (
     MAX_ROWS,
@@ -50,6 +62,7 @@ QUOTA_EXCEEDED = "import_quota_exceeded"
 TIER_NOT_CONFIRMED = "ai_processing_unavailable"
 TOO_LONG = "statement_too_long"
 TOO_MANY_ROWS = "too_many_transactions"
+UNKNOWN_IMPORT = "unknown_import"
 UNKNOWN_ACCOUNT = "unknown_account"
 PARSE_FAILED = "parse_failed"
 
@@ -369,3 +382,173 @@ def _retain_text_if_asked(
 
 
 __all__ = ["router", "IMPORT_FEATURE", "QUOTA_EXCEEDED", "PARSE_FAILED"]
+
+
+async def _owned_import(
+    session: AsyncSession, household: Household, import_id: uuid.UUID
+) -> StatementImport:
+    """This household's import, or 404. Never another household's, and never
+    "403" — whether an id exists is not something an outsider gets to learn."""
+    result = await session.execute(
+        select(StatementImport).where(
+            StatementImport.id == import_id,
+            StatementImport.household_id == household.id,
+        )
+    )
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": UNKNOWN_IMPORT, "message": "No such import."},
+        )
+    return record
+
+
+@router.post(
+    "/statements/{import_id}/transactions",
+    response_model=SaveOutcomeOut,
+    dependencies=[Depends(require_feature(IMPORT_FEATURE))],
+)
+async def confirm_rows(
+    import_id: uuid.UUID,
+    body: ConfirmRowsIn,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> SaveOutcomeOut:
+    """Save the rows the user confirmed, and say what was already there.
+
+    One database transaction: an import lands whole or not at all. Half a
+    statement is worse than none, because nothing on screen would say which
+    half.
+
+    The rows come from the client rather than from what we parsed, because the
+    user may have corrected them on the review screen first. What they said
+    outranks what the model read.
+    """
+    settings = get_settings()
+    household = identity.household
+    record = await _owned_import(session, household, import_id)
+
+    owned = await session.execute(
+        select(Account.id).where(
+            Account.id == body.account_id, Account.household_id == household.id
+        )
+    )
+    if owned.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": UNKNOWN_ACCOUNT, "message": "No such account."},
+        )
+
+    currency = await currency_for(session, household)
+    outcome = await save_rows(
+        session,
+        household_id=household.id,
+        account_id=body.account_id,
+        statement_import_id=record.id,
+        currency=currency,
+        rows=[
+            RowToSave(
+                occurred_on=row.occurred_on,
+                description=row.description,
+                amount=row.amount,
+                direction=row.direction,
+                confidence=row.confidence,
+            )
+            for row in body.rows
+        ],
+    )
+
+    if outcome.saved_ids:
+        await _apply_categories(session, settings, household.id, outcome.saved_ids)
+
+    record.confirmed_at = datetime.now(UTC)
+    await session.commit()
+
+    needs_review = await session.execute(
+        select(func.count())
+        .select_from(Transaction)
+        .where(
+            Transaction.statement_import_id == record.id,
+            Transaction.needs_review.is_(True),
+        )
+    )
+    return SaveOutcomeOut(
+        import_id=record.id,
+        saved=outcome.saved,
+        duplicates=outcome.duplicates,
+        flagged=outcome.flagged,
+        needs_review=int(needs_review.scalar_one()),
+    )
+
+
+async def _apply_categories(session, settings, household_id, saved_ids) -> None:
+    """Categorize what was just saved, on merchant and amount alone.
+
+    Runs after the rows exist so a model outage cannot cost the import: the
+    transactions are already written, and an uncategorized row simply goes to
+    review, which is where it belongs anyway.
+    """
+    result = await session.execute(
+        select(Transaction).where(Transaction.id.in_(saved_ids))
+    )
+    rows = list(result.scalars().all())
+    if not rows:
+        return
+
+    client = build_client(settings)
+    try:
+        # The entire payload: a shop name and a price. Nothing else may be
+        # added here (PRD Appendix A.3) — there is a test that asserts it.
+        suggestions = await categorize(
+            session,
+            client,
+            household_id=household_id,
+            pairs=[
+                (
+                    row.merchant or "",
+                    from_minor_units(row.amount_minor_units, row.currency),
+                )
+                for row in rows
+            ],
+        )
+    finally:
+        await close_client(client)
+
+    slugs = await session.execute(
+        select(Category.slug, Category.id).where(Category.household_id.is_(None))
+    )
+    by_slug = {slug: ident for slug, ident in slugs.all()}
+
+    for row, suggestion in zip(rows, suggestions, strict=False):
+        row.category_id = by_slug.get(suggestion.slug)
+        if not suggestion.recognised:
+            row.needs_review = True
+            row.review_reason = row.review_reason or ReviewReason.unknown_category
+
+
+@router.get("/statements/{import_id}", response_model=StatementImportOut)
+async def read_import(
+    import_id: uuid.UUID,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> StatementImportOut:
+    """How an import turned out: what was saved, what still needs a person."""
+    record = await _owned_import(session, identity.household, import_id)
+    counts = await session.execute(
+        select(
+            func.count(Transaction.id),
+            func.count(Transaction.id).filter(Transaction.needs_review.is_(True)),
+        ).where(Transaction.statement_import_id == record.id)
+    )
+    saved, needs_review = counts.one()
+    return StatementImportOut(
+        id=record.id,
+        status=record.status,
+        source_kind=record.source_kind,
+        page_count=record.page_count,
+        extracted_count=record.extracted_count,
+        saved=int(saved),
+        needs_review=int(needs_review),
+        confirmed_at=record.confirmed_at,
+    )

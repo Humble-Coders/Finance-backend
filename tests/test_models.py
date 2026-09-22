@@ -212,6 +212,12 @@ class TestTransactionDedup:
             "occurred_on",
             "amount_minor_units",
             "normalized_description",
+            # Added in 3.3. Without it the key cannot tell two real $5.25
+            # coffees on one day from one coffee imported twice — the rows are
+            # byte-identical and only their context differs. Numbering each row
+            # within its own import lets a re-import collide exactly while a
+            # genuine third coffee still saves.
+            "occurrence",
         ]
 
     def test_source_is_agnostic(self):

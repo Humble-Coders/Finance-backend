@@ -40,7 +40,7 @@ from app.services.capabilities import currency_for, require_feature
 from app.services.categorization import categorize
 from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
-from app.services.ledger import RowToSave, save_rows
+from app.services.ledger import RowToSave, RowValidationError, save_rows
 from app.services.llm import LlmError, build_client, close_client
 from app.services.statements import (
     MAX_ROWS,
@@ -63,6 +63,7 @@ TIER_NOT_CONFIRMED = "ai_processing_unavailable"
 TOO_LONG = "statement_too_long"
 TOO_MANY_ROWS = "too_many_transactions"
 UNKNOWN_IMPORT = "unknown_import"
+INVALID_ROW = "invalid_row"
 UNKNOWN_ACCOUNT = "unknown_account"
 PARSE_FAILED = "parse_failed"
 
@@ -441,23 +442,37 @@ async def confirm_rows(
         )
 
     currency = await currency_for(session, household)
-    outcome = await save_rows(
-        session,
-        household_id=household.id,
-        account_id=body.account_id,
-        statement_import_id=record.id,
-        currency=currency,
-        rows=[
-            RowToSave(
-                occurred_on=row.occurred_on,
-                description=row.description,
-                amount=row.amount,
-                direction=row.direction,
-                confidence=row.confidence,
-            )
-            for row in body.rows
-        ],
-    )
+    try:
+        outcome = await save_rows(
+            session,
+            household_id=household.id,
+            account_id=body.account_id,
+            statement_import_id=record.id,
+            currency=currency,
+            rows=[
+                RowToSave(
+                    occurred_on=row.occurred_on,
+                    description=row.description,
+                    amount=row.amount,
+                    direction=row.direction,
+                    confidence=row.confidence,
+                )
+                for row in body.rows
+            ],
+        )
+    except RowValidationError as exc:
+        # 422 naming the row, not a 500 taking the import with it. The amounts
+        # here are what a person typed on the review screen, so a bad one is an
+        # ordinary event — and every other row in the statement was fine.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": INVALID_ROW,
+                "message": "That amount cannot be saved.",
+                "field": f"rows.{exc.index}.{exc.field}",
+                "reason": exc.message,
+            },
+        ) from exc
 
     if outcome.saved_ids:
         await _apply_categories(session, settings, household.id, outcome.saved_ids)

@@ -67,7 +67,7 @@ DATABASE_URL=$PG MIGRATION_DATABASE_URL=$PG SUPABASE_URL=https://local.test \
 | Merge keeps the user's version | **Partial** — `may_merge_onto()` exists; the merge is 3.4's |
 | Normalizer is deterministic | Met — 25 table-driven cases |
 | Backfill guard | Met — every stored key equals today's output |
-| Amounts round-trip, no float | Met |
+| Amounts round-trip, no float | Met — and a *bad* amount is 422 naming the row, not a 500 |
 | Only merchant and amount reach the model | Met — asserted on the wire |
 | Unknown slug → `other` + review, no category created | Met |
 | Corrections never cross households | Met |
@@ -92,6 +92,10 @@ DATABASE_URL=$PG MIGRATION_DATABASE_URL=$PG SUPABASE_URL=https://local.test \
   decision): nothing is ever missing from the ledger.
 - **`confirmed_at` is set only when nothing is outstanding**, which is what 3.4
   reads it to mean.
+- **Amounts on this endpoint are what a person typed**, not what we parsed —
+  the review screen lets them correct one. So `12,40`, `12.345` and an empty
+  field are ordinary inputs, answered with 422 naming `rows.N.amount` rather
+  than an unhandled MoneyError that took the whole import with it.
 - **A row with no merchant never reaches the model** — there is nothing to
   categorize with, and a guess that looks confident is worse than a flag.
 

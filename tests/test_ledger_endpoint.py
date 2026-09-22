@@ -366,6 +366,62 @@ class TestDedup:
             assert key == normalized(description)
 
 
+class TestWhatAPersonTyped:
+    """This endpoint takes rows as the user corrected them on the review
+    screen, not as we parsed them — so a mistyped amount is an ordinary event.
+
+    It used to raise MoneyError straight out of the request: a 500, and every
+    valid row in the statement lost along with the bad one.
+    """
+
+    @pytest.mark.parametrize(
+        ("amount", "why"),
+        [
+            ("12,40", "a French-Canadian keyboard, or copied from 2,410.00"),
+            ("abc", "a slip"),
+            ("12.345", "a client doing its own arithmetic"),
+            ("", "a cleared field"),
+        ],
+    )
+    async def test_a_bad_amount_is_422_naming_the_row(
+        self, api_client, db_session, monkeypatch, amount, why
+    ):
+        use_model(monkeypatch, FakeModel())
+        me = await onboard(api_client, f"+1416557{abs(hash(amount)) % 9000 + 1000}")
+        account = await an_account(api_client)
+
+        response = await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [row("10.00", "FINE"), row(amount, "EDITED BY USER")],
+        )
+
+        assert response.status_code == 422, why
+        assert response.json()["detail"]["field"] == "rows.1.amount"
+
+    async def test_one_bad_row_does_not_lose_the_others(
+        self, api_client, db_session, monkeypatch
+    ):
+        """Nothing is saved — the import is one transaction — but the client
+        gets a field to highlight rather than a 500, so the user fixes one row
+        and resends instead of starting the statement again."""
+        use_model(monkeypatch, FakeModel())
+        me = await onboard(api_client, "+14165572029")
+        account = await an_account(api_client)
+        import_id = await an_import(db_session, me["household"]["id"])
+
+        refused = await save(
+            api_client, import_id, account, [row("10.00", "FINE"), row("oops", "TYPO")]
+        )
+        fixed = await save(
+            api_client, import_id, account, [row("10.00", "FINE"), row("5.00", "FIXED")]
+        )
+
+        assert refused.status_code == 422
+        assert fixed.json()["saved"] == 2
+
+
 class TestWhatReachesTheModel:
     async def test_only_merchants_and_amounts(
         self, api_client, db_session, monkeypatch

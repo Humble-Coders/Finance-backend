@@ -40,13 +40,19 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.money import to_minor_units
+from app.core.money import MoneyError, to_minor_units
 from app.models.enums import ReviewReason, TransactionDirection, TransactionSource
 from app.models.money import Transaction
 from app.services.normalization import merchant as readable_merchant
 from app.services.normalization import normalized
 
-__all__ = ["RowToSave", "SaveOutcome", "save_rows", "NEAR_MATCH_DAYS"]
+__all__ = [
+    "RowToSave",
+    "SaveOutcome",
+    "RowValidationError",
+    "save_rows",
+    "NEAR_MATCH_DAYS",
+]
 
 log = structlog.get_logger()
 
@@ -62,6 +68,26 @@ NEAR_MATCH_DAYS = 0
 
 # Below this, a person should look at the row before it counts as their money.
 LOW_CONFIDENCE = 70
+
+
+@dataclass(frozen=True)
+class RowValidationError(Exception):
+    """A row this endpoint cannot store, named by its position in the request.
+
+    This is the one endpoint in the feature where a **person types the amount**
+    — the rows arrive as the user corrected them on the review screen, not as
+    we parsed them. So `12,40` off a French-Canadian keyboard, or `12.345` from
+    a client doing its own arithmetic, is an ordinary input and not an attack.
+
+    Unguarded, `to_minor_units` raised straight out of the request and took the
+    whole import with it: one mistyped row, a 500, and every valid row beside
+    it lost. Naming the row lets the client highlight the field the user is
+    looking at, the same way the setup wizard does.
+    """
+
+    index: int
+    field: str
+    message: str
 
 
 @dataclass(frozen=True)
@@ -89,8 +115,11 @@ def _numbered(
     """Each row with its key parts and its occurrence within this import."""
     seen: Counter[tuple[date, int, str]] = Counter()
     out = []
-    for row in rows:
-        minor = to_minor_units(row.amount, currency)
+    for index, row in enumerate(rows):
+        try:
+            minor = to_minor_units(row.amount, currency)
+        except MoneyError as exc:
+            raise RowValidationError(index, "amount", str(exc)) from exc
         key = normalized(row.description)
         group = (row.occurred_on, minor, key)
         seen[group] += 1

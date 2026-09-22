@@ -92,6 +92,12 @@ DATABASE_URL=$PG MIGRATION_DATABASE_URL=$PG SUPABASE_URL=https://local.test \
   decision): nothing is ever missing from the ledger.
 - **`confirmed_at` is set only when nothing is outstanding**, which is what 3.4
   reads it to mean.
+- **The rules ticket #38 settled for typed transactions are enforced here**,
+  because this endpoint takes typed rows too: the amount must not be negative
+  (`direction` carries the sign — `-50.00` with `debit` is ambiguous by
+  construction), and the date must be no more than a day ahead and within ten
+  years. **3.5 should reuse `ConfirmRowIn`'s validators rather than write them
+  again**; two copies of a rule is two chances to disagree.
 - **Amounts on this endpoint are what a person typed**, not what we parsed —
   the review screen lets them correct one. So `12,40`, `12.345` and an empty
   field are ordinary inputs, answered with 422 naming `rows.N.amount` rather

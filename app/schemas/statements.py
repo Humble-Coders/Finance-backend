@@ -10,11 +10,15 @@ helpfully puts it back in by default.
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.enums import SourceKind, StatementImportStatus, TransactionDirection
+
+# Ten years. Long enough for anyone importing historical statements, short
+# enough that a typo'd year lands outside it rather than in the ledger.
+OLDEST_IMPORTABLE_DAYS = 3_650
 
 __all__ = [
     "StatementParseIn",
@@ -98,9 +102,47 @@ class ConfirmRowIn(BaseModel):
 
     occurred_on: date
     description: str = Field(min_length=1, max_length=512)
+    # Format is checked in the service, where the household's currency is
+    # known; the sign is checked here, because it needs no currency and means
+    # the same thing everywhere.
     amount: str
     direction: TransactionDirection
     confidence: int = Field(default=100, ge=0, le=100)
+
+    @field_validator("amount")
+    @classmethod
+    def _not_negative(cls, value: str) -> str:
+        """`direction` carries the sign; the amount must not carry it too.
+
+        `-50.00` with `direction=debit` is ambiguous by construction — money
+        out, or a refund? Nothing downstream can tell, and the parse path only
+        ever produces positives. One typed minus would put a figure in the
+        ledger whose meaning depends on who reads it. Ticket #38 settled this
+        for manually typed transactions; this endpoint takes typed rows too.
+        """
+        if value.strip().startswith("-"):
+            raise ValueError(
+                "must not be negative — use direction to say which way it went"
+            )
+        return value
+
+    @field_validator("occurred_on")
+    @classmethod
+    def _within_living_memory(cls, value: date) -> date:
+        """A date the rest of the product can reason about.
+
+        Every period the product is built on keys off this: M4's budgets,
+        "spending this month", the health score's windows. A row dated 2999
+        sits outside all of them forever, and outside the review queue too,
+        because nothing flags a date nobody checked. A day of tolerance ahead
+        covers a timezone edge without admitting a typo'd year.
+        """
+        today = date.today()
+        if value > today + timedelta(days=1):
+            raise ValueError("cannot be in the future")
+        if value < today - timedelta(days=OLDEST_IMPORTABLE_DAYS):
+            raise ValueError("is too far in the past to be a statement line")
+        return value
 
 
 class ConfirmRowsIn(BaseModel):

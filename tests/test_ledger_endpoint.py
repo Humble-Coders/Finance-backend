@@ -400,6 +400,63 @@ class TestWhatAPersonTyped:
         assert response.status_code == 422, why
         assert response.json()["detail"]["field"] == "rows.1.amount"
 
+    @pytest.mark.parametrize(
+        ("amount", "day", "why"),
+        [
+            ("-50.00", None, "direction carries the sign; the amount must not too"),
+            (None, "2999-12-31", "outside every period the product reasons about"),
+            (None, "1900-01-01", "older than any statement anyone imports"),
+        ],
+    )
+    async def test_rules_ticket_38_settled_apply_here_too(
+        self, api_client, db_session, monkeypatch, amount, day, why
+    ):
+        """#38 wrote these down for manually typed transactions. This endpoint
+        takes typed rows as well — the user corrects them on the review screen
+        — so the same rules have to hold, and hold *here*, or 3.5 writes them
+        a second time and the two disagree."""
+        use_model(monkeypatch, FakeModel())
+        me = await onboard(api_client, f"+1416558{abs(hash(why)) % 9000 + 1000}")
+        account = await an_account(api_client)
+        bad = row(amount or "50.00", "TYPED BY USER", day or "2026-08-02")
+
+        response = await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [bad],
+        )
+
+        assert response.status_code == 422, why
+        saved = await db_session.execute(select(Transaction))
+        assert saved.scalars().all() == []
+
+    async def test_yesterday_and_today_are_fine(
+        self, api_client, db_session, monkeypatch
+    ):
+        """The bound must not refuse ordinary statements. A day of tolerance
+        ahead covers a timezone edge."""
+        from datetime import date, timedelta
+
+        use_model(monkeypatch, FakeModel())
+        me = await onboard(api_client, "+14165582001")
+        account = await an_account(api_client)
+        today = date.today()
+
+        response = await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [
+                row("5.00", "YESTERDAY", (today - timedelta(days=1)).isoformat()),
+                row("6.00", "TODAY", today.isoformat()),
+                row("7.00", "TIMEZONE EDGE", (today + timedelta(days=1)).isoformat()),
+            ],
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["saved"] == 3
+
     async def test_one_bad_row_does_not_lose_the_others(
         self, api_client, db_session, monkeypatch
     ):

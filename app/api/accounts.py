@@ -55,6 +55,11 @@ async def create_account(
     session: AsyncSession = Depends(get_session),
 ) -> Account:
     household = identity.household
+    # Captured before any rollback below: a rollback expires every ORM object
+    # in the session, so reading `household.id` afterwards needs a database
+    # round-trip — from a sync context, which raises MissingGreenlet rather
+    # than the 409 we meant to send.
+    household_id = household.id
     account = Account(
         household_id=household.id,
         name=body.name.strip(),
@@ -74,7 +79,7 @@ async def create_account(
         log_conflict(
             DUPLICATE_ACCOUNT,
             "name_already_used_in_household",
-            household_id=str(household.id),
+            household_id=str(household_id),
         )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

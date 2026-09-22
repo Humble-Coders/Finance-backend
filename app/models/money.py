@@ -218,6 +218,11 @@ class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     # is a duplicate. Numbering occurrences per import is what lets the database
     # express both, so a re-import collides exactly and a genuine third coffee
     # does not.
+    #
+    # Defaults to 1 on purpose: "the first of its group" is the right answer for
+    # any row that has no opinion — a manually typed transaction, a future
+    # aggregator feed, a fixture checking something else. The import path always
+    # sets it explicitly.
     occurrence: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
     )

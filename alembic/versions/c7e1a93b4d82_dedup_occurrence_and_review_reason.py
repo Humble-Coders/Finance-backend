@@ -26,14 +26,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # `server_default` because the column is NOT NULL and the table may already
-    # hold rows; dropped straight after, so the application must always say
-    # which occurrence it means rather than inheriting a silent 1.
+    # The default stays. "The first of its group" is the right answer for any
+    # row that does not think about this — a manually typed transaction, a
+    # future aggregator feed, a test inserting a row to check something else.
+    # Dropping it would make every other insert path name a column it has no
+    # opinion about, and the import path sets it explicitly regardless.
     op.add_column(
         "transaction",
         sa.Column("occurrence", sa.Integer(), nullable=False, server_default="1"),
     )
-    op.alter_column("transaction", "occurrence", server_default=None)
 
     op.drop_index("uq_transaction_dedup", table_name="transaction")
     op.create_index(

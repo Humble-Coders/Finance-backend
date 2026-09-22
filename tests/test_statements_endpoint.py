@@ -488,7 +488,16 @@ class TestTheImportRecord:
 
         assert refused.status_code == 413
         assert refused.json()["detail"]["code"] == "too_many_transactions"
-        record = (await db_session.execute(select(StatementImport))).scalars().first()
+        # By id, not `.first()`: this test makes two imports — the refused one
+        # and the retry — and an unordered SELECT returns whichever Postgres
+        # feels like. The assertion passed or failed depending on the day,
+        # about two runs in five.
+        refused_id = uuid.UUID(refused.json()["detail"]["import_id"])
+        record = (
+            await db_session.execute(
+                select(StatementImport).where(StatementImport.id == refused_id)
+            )
+        ).scalar_one()
         assert record.status is StatementImportStatus.failed
         assert retried.status_code == 200, "a refusal must not cost the month"
 

@@ -295,6 +295,37 @@ class TestDedup:
         assert row_.needs_review is True
         assert row_.review_reason is ReviewReason.suspected_duplicate
 
+    async def test_two_payments_on_one_statement_never_flag_each_other(
+        self, api_client, db_session, monkeypatch
+    ):
+        """Two $100 e-transfers to different people, same day, one statement.
+
+        Neither is a duplicate of the other — the statement listed them both,
+        so both happened. Without excluding the current import from the
+        near-match, every pair of same-day round amounts flags itself, and a
+        review queue that is mostly false alarms is one people stop opening.
+        """
+        use_model(monkeypatch, FakeModel())
+        me = await onboard(api_client, "+14165572024")
+        account = await an_account(api_client)
+
+        response = await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [
+                row("100.00", "E-TRANSFER TO ALEX", "2026-08-02"),
+                row("100.00", "E-TRANSFER TO SAM", "2026-08-02"),
+            ],
+        )
+
+        assert response.json()["saved"] == 2
+        assert response.json()["flagged"] == 0
+        flagged = await db_session.execute(
+            select(Transaction).where(Transaction.duplicate_of_id.isnot(None))
+        )
+        assert flagged.scalars().all() == []
+
     async def test_amounts_round_trip_exactly(
         self, api_client, db_session, monkeypatch
     ):
@@ -459,7 +490,67 @@ class TestTheImportRecord:
 
         assert report["saved"] == 2
         assert report["needs_review"] == 1
+        # Not confirmed: one row is still flagged, and an import nobody has
+        # looked at is not a finished one. 3.4 stamps it as the last review is
+        # resolved.
+        assert report["confirmed_at"] is None
+
+    async def test_an_import_with_rows_still_flagged_is_not_confirmed(
+        self, api_client, db_session, monkeypatch
+    ):
+        """`confirmed_at` means the user has finished with this import. Stamping
+        it while rows are still flagged marks a statement complete that nobody
+        has looked at — 3.4 reads this to decide when an import is done."""
+        use_model(monkeypatch, FakeModel())
+        me = await onboard(api_client, "+14165572025")
+        account = await an_account(api_client)
+        import_id = await an_import(db_session, me["household"]["id"])
+
+        await save(api_client, import_id, account, [row(confidence=10)])
+
+        report = (await api_client.get(f"/statements/{import_id}")).json()
+        assert report["needs_review"] == 1
+        assert report["confirmed_at"] is None
+
+    async def test_an_import_with_nothing_outstanding_is_confirmed(
+        self, api_client, db_session, monkeypatch
+    ):
+        use_model(monkeypatch, FakeModel())
+        me = await onboard(api_client, "+14165572026")
+        account = await an_account(api_client)
+        import_id = await an_import(db_session, me["household"]["id"])
+
+        await save(api_client, import_id, account, [row()])
+
+        report = (await api_client.get(f"/statements/{import_id}")).json()
+        assert report["needs_review"] == 0
         assert report["confirmed_at"] is not None
+
+    async def test_a_missing_model_key_does_not_lose_the_import(
+        self, api_client, db_session, monkeypatch
+    ):
+        """Rows are written before categorization precisely so a model problem
+        costs nothing. A misconfigured key must not be the exception."""
+        from app.services.llm import LlmError as _LlmError
+
+        def unconfigured(_settings):
+            raise _LlmError("LLM_API_KEY is not set")
+
+        monkeypatch.setattr(endpoint, "build_client", unconfigured)
+        me = await onboard(api_client, "+14165572027")
+        account = await an_account(api_client)
+
+        response = await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [row()],
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["saved"] == 1
+        saved = await db_session.execute(select(Transaction))
+        assert saved.scalar_one().category_id is None
 
     async def test_a_low_confidence_row_goes_to_review(
         self, api_client, db_session, monkeypatch

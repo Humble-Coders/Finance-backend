@@ -101,16 +101,24 @@ def _numbered(
 async def _near_match(
     session: AsyncSession,
     account_id,
+    statement_import_id,
     occurred_on: date,
     minor: int,
     key: str,
 ) -> Transaction | None:
-    """An existing row that is probably this one, wearing a different name.
+    """An earlier row that is probably this one, wearing a different name.
 
     Matched on account, amount and date — **never** on how similar the
     descriptions look. The case this exists for is a re-import after the parse
     improved, where the description is the single thing guaranteed to differ; a
     similarity gate would miss it for precisely the reason it changed.
+
+    **Rows from this same import are excluded, and that is not an optimisation.**
+    Two lines on one statement are two transactions by definition — the
+    statement listed them both — so neither can be a duplicate of the other.
+    Without this, two $100 e-transfers to different people on one day flag each
+    other, and so does every pair of same-day $20 withdrawals. A review queue
+    that is mostly false alarms is a review queue people learn to ignore.
     """
     result = await session.execute(
         select(Transaction)
@@ -120,6 +128,7 @@ async def _near_match(
             Transaction.occurred_on >= occurred_on - timedelta(days=NEAR_MATCH_DAYS),
             Transaction.occurred_on <= occurred_on + timedelta(days=NEAR_MATCH_DAYS),
             Transaction.normalized_description != key,
+            Transaction.statement_import_id.is_distinct_from(statement_import_id),
         )
         .order_by(Transaction.occurred_on)
         .limit(1)
@@ -144,7 +153,9 @@ async def save_rows(
     outcome = SaveOutcome()
 
     for row, key, minor, occurrence in _numbered(rows, currency):
-        existing = await _near_match(session, account_id, row.occurred_on, minor, key)
+        existing = await _near_match(
+            session, account_id, statement_import_id, row.occurred_on, minor, key
+        )
         flagged = existing is not None
         low = row.confidence < LOW_CONFIDENCE
 

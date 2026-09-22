@@ -462,10 +462,8 @@ async def confirm_rows(
     if outcome.saved_ids:
         await _apply_categories(session, settings, household.id, outcome.saved_ids)
 
-    record.confirmed_at = datetime.now(UTC)
-    await session.commit()
-
-    needs_review = await session.execute(
+    await session.flush()
+    outstanding = await session.execute(
         select(func.count())
         .select_from(Transaction)
         .where(
@@ -473,12 +471,23 @@ async def confirm_rows(
             Transaction.needs_review.is_(True),
         )
     )
+    still_to_review = int(outstanding.scalar_one())
+
+    # `confirmed_at` means "the user has finished with this import", which 3.4
+    # reads to decide when a statement is done. Stamping it while rows are
+    # still flagged would mark an import complete that nobody has looked at —
+    # so it is set only when nothing is outstanding. 3.4 sets it as the last
+    # review is resolved.
+    if still_to_review == 0:
+        record.confirmed_at = datetime.now(UTC)
+    await session.commit()
+
     return SaveOutcomeOut(
         import_id=record.id,
         saved=outcome.saved,
         duplicates=outcome.duplicates,
         flagged=outcome.flagged,
-        needs_review=int(needs_review.scalar_one()),
+        needs_review=still_to_review,
     )
 
 
@@ -496,7 +505,18 @@ async def _apply_categories(session, settings, household_id, saved_ids) -> None:
     if not rows:
         return
 
-    client = build_client(settings)
+    try:
+        # Inside the try: `build_client` raises LlmError for a missing key,
+        # model or provider. Outside it, that misconfiguration propagates, the
+        # transaction rolls back, and the import the user just confirmed is
+        # lost to a 500 — which is the opposite of why categorization runs
+        # after the rows are written. `categorize` already degrades on its own
+        # once it has a client; this is the same promise, one step earlier.
+        client = build_client(settings)
+    except LlmError:
+        log.warning("categorization_skipped", reason="client_unavailable")
+        return
+
     try:
         # The entire payload: a shop name and a price. Nothing else may be
         # added here (PRD Appendix A.3) — there is a test that asserts it.

@@ -771,6 +771,11 @@ class TestIsolation:
 
         assert response.status_code == 404
         assert response.json()["detail"]["code"] == "unknown_import"
+        # The status code alone would also be satisfied by a different guard
+        # firing first. Household scoping is structural (PRD §4.4), so assert
+        # the thing that actually matters: nothing was written into anyone.
+        written = await db_session.execute(select(Transaction))
+        assert written.scalars().all() == []
 
     async def test_an_account_from_another_household_is_not_found(
         self, api_client, db_session, monkeypatch

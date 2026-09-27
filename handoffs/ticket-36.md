@@ -124,6 +124,12 @@ nothing twice in review:
 | Near-match requires similar descriptions | 1 test |
 | Normalizer returns the raw description | 11 tests |
 | Same-import rows become candidates | 1 test |
+| Import isolation dropped (`_owned_import`) | 1 test |
+| Account isolation dropped (`confirm_rows`) | 1 test |
+| Account isolation dropped (`parse`) | 1 test — added after a mutation found nothing |
+| `confirmed_at` stamped while rows are flagged | 1 test |
+| Uncategorized rows not sent to review | 1 test |
+| Corrections not scoped to the household | 1 test |
 | Slug lookup always misses | 2 tests |
 
 The last two were added *because* the mutation survived. Worth knowing why the
@@ -142,6 +148,17 @@ close that, and the same mutation now fails both.
 
 Worth repeating on anything else here that matters: ask what would still pass
 if this were broken, rather than only whether it passes now.
+
+**Two traps in doing that, both of which caught me.** Mutate by line number
+when a line appears twice in a file — `replace(..., 1)` silently hit the wrong
+function and made a working test look hollow, which I then reported as a
+defect. And check *which* test failed, not how many: five mutations each broke
+twenty tests by cascade while the test that named the behaviour passed.
+
+The account check on `parse` was the one real gap this found. Its test passed a
+random UUID, which 404s whether or not the household filter is there, because
+no such row exists anywhere. Only a *real* foreign account tells "unknown"
+apart from "not yours".
 
 ## Open questions / follow-ups
 

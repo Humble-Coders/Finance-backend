@@ -15,6 +15,7 @@ __all__ = [
     "AccountKind",
     "StatementImportStatus",
     "SourceKind",
+    "ReviewReason",
     "AuthProvider",
     "GoalHorizon",
     "PlanTier",
@@ -76,6 +77,21 @@ class SourceKind(enum.Enum):
 
     pdf_text = "pdf_text"
     ocr = "ocr"
+
+
+class ReviewReason(enum.Enum):
+    """Why a transaction is waiting for a person.
+
+    `needs_review` says *that* a row needs attention; without this the review
+    queue is one undifferentiated list and the user re-checks rows that were
+    always fine. Each reason wants a different affordance: a low-confidence row
+    needs reading, an unknown category needs picking, a suspected duplicate
+    needs comparing against the row it matched.
+    """
+
+    low_confidence = "low_confidence"
+    unknown_category = "unknown_category"
+    suspected_duplicate = "suspected_duplicate"
 
 
 class AuthProvider(enum.Enum):

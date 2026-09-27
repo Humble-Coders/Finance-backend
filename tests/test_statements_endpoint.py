@@ -488,11 +488,20 @@ class TestTheImportRecord:
 
         assert refused.status_code == 413
         assert refused.json()["detail"]["code"] == "too_many_transactions"
-        record = (await db_session.execute(select(StatementImport))).scalars().first()
+        # By id, not `.first()`: this test makes two imports — the refused one
+        # and the retry — and an unordered SELECT returns whichever Postgres
+        # feels like. The assertion passed or failed depending on the day,
+        # about two runs in five.
+        refused_id = uuid.UUID(refused.json()["detail"]["import_id"])
+        record = (
+            await db_session.execute(
+                select(StatementImport).where(StatementImport.id == refused_id)
+            )
+        ).scalar_one()
         assert record.status is StatementImportStatus.failed
         assert retried.status_code == 200, "a refusal must not cost the month"
 
-    async def test_an_account_from_another_household_is_not_found(
+    async def test_an_account_id_that_exists_nowhere_is_not_found(
         self, api_client, monkeypatch
     ):
         use_model(monkeypatch, FakeModel())
@@ -500,6 +509,34 @@ class TestTheImportRecord:
         await consent_to_ai(api_client)
 
         response = await api_client.post(PARSE, json=body(account_id=str(uuid.uuid4())))
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "unknown_account"
+
+    async def test_another_household_s_account_is_not_found_either(
+        self, api_client, monkeypatch
+    ):
+        """A *real* account, owned by somebody else — which the test above does
+        not cover.
+
+        A random id 404s whether or not the household filter is there, because
+        no such row exists anywhere. Only a real foreign account distinguishes
+        "unknown" from "not yours", and without the filter this request would
+        succeed — telling the caller that id belongs to a live account
+        somewhere. Mutation-checked: deleting the filter fails this and nothing
+        else.
+        """
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571021")
+        theirs = await api_client.post(
+            "/accounts", json={"name": "Someone Else's Visa", "kind": "credit_card"}
+        )
+        assert theirs.status_code == 201, theirs.text
+        foreign_id = theirs.json()["id"]
+
+        await onboard(api_client, "+14165571022")
+        await consent_to_ai(api_client)
+        response = await api_client.post(PARSE, json=body(account_id=foreign_id))
 
         assert response.status_code == 404
         assert response.json()["detail"]["code"] == "unknown_account"

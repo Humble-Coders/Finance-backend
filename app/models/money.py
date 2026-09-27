@@ -21,6 +21,7 @@ from app.models.base import (
 )
 from app.models.enums import (
     AccountKind,
+    ReviewReason,
     SourceKind,
     StatementImportStatus,
     TransactionDirection,
@@ -38,7 +39,14 @@ class Account(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     """
 
     __tablename__ = "account"
-    __table_args__ = (currency_check(),)
+    __table_args__ = (
+        currency_check(),
+        # One "RBC Chequing" per household. A second account for the same real
+        # account is a silent dedup hole, because the dedup key below starts
+        # with `account_id`: file half a statement under "RBC" and half under
+        # "RBC Chequing" and neither half can see the other's duplicates.
+        Index("uq_account_household_name", "household_id", "name", unique=True),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     kind: Mapped[AccountKind] = mapped_column(
@@ -158,6 +166,7 @@ class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
             "occurred_on",
             "amount_minor_units",
             "normalized_description",
+            "occurrence",
             unique=True,
         ),
         Index("ix_transaction_household_occurred", "household_id", "occurred_on"),
@@ -198,10 +207,41 @@ class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     )
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Which of N identical transactions this is — the 1st $5.25 Tim Hortons on
+    # the 2nd, the 2nd, the 3rd.
+    #
+    # Without it the dedup key cannot tell a real repeat purchase from a
+    # re-imported one: two coffees at the same shop, same day, same price
+    # produce byte-identical rows, and so does importing one coffee twice. The
+    # difference is context, not content — two identical lines *within* one
+    # statement are two purchases; the same line appearing in a *later* import
+    # is a duplicate. Numbering occurrences per import is what lets the database
+    # express both, so a re-import collides exactly and a genuine third coffee
+    # does not.
+    #
+    # Defaults to 1 on purpose: "the first of its group" is the right answer for
+    # any row that has no opinion — a manually typed transaction, a future
+    # aggregator feed, a fixture checking something else. The import path always
+    # sets it explicitly.
+    occurrence: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+
     # Set by extraction; low-confidence rows go to the user review queue (F2).
     extraction_confidence: Mapped[int | None] = mapped_column(Integer, nullable=True)
     needs_review: Mapped[bool] = mapped_column(
         nullable=False, default=False, index=True
+    )
+    review_reason: Mapped[ReviewReason | None] = mapped_column(
+        SAEnum(ReviewReason, name="review_reason"), nullable=True
+    )
+    # What a suspected duplicate matched. Flagging a row without saying what it
+    # collided with leaves the review screen asking a question it cannot show
+    # the evidence for — and makes a merge impossible.
+    duplicate_of_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("transaction.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     account: Mapped[Account] = relationship(back_populates="transactions")

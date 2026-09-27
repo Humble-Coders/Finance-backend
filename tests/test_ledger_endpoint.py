@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import date
 
 import pytest
 from sqlalchemy import select
@@ -20,7 +21,13 @@ from sqlalchemy import select
 from app.api import statements as endpoint
 from app.auth import AuthenticatedUser, current_user
 from app.models.categorization import Category, CategoryCorrection
-from app.models.enums import ReviewReason, SourceKind, StatementImportStatus
+from app.models.enums import (
+    ReviewReason,
+    SourceKind,
+    StatementImportStatus,
+    TransactionDirection,
+    TransactionSource,
+)
 from app.models.money import StatementImport, Transaction
 from app.services.normalization import normalized
 from tests.conftest import requires_db
@@ -301,9 +308,16 @@ class TestDedup:
         """Two $100 e-transfers to different people, same day, one statement.
 
         Neither is a duplicate of the other — the statement listed them both,
-        so both happened. Without excluding the current import from the
-        near-match, every pair of same-day round amounts flags itself, and a
-        review queue that is mostly false alarms is one people stop opening.
+        so both happened. Every pair of same-day round amounts would otherwise
+        flag itself, and a review queue that is mostly false alarms is one
+        people stop opening.
+
+        Note what actually holds this up: candidates are read **once, before
+        any insert**, so a row written by this call cannot be a candidate for a
+        later row in the same call. `_candidates`' import filter is the second
+        line of defence and is pinned separately in `TestCandidates` — this
+        test passed with that filter deleted, which is why it now says what it
+        covers rather than what I assumed it covered.
         """
         use_model(monkeypatch, FakeModel())
         me = await onboard(api_client, "+14165572024")
@@ -364,6 +378,59 @@ class TestDedup:
         )
         for description, key in stored.all():
             assert key == normalized(description)
+
+
+class TestCandidates:
+    """The near-match candidate query, exercised directly.
+
+    Through the endpoint this filter is unreachable — candidates are read
+    before any insert, so a row from the current import is never in the
+    database yet. It earns its place as the second line of defence: if anyone
+    moves the query back inside the insert loop, this is what stops a statement
+    flagging its own rows.
+    """
+
+    async def test_a_row_from_the_same_import_is_not_a_candidate(
+        self, api_client, db_session
+    ):
+        from app.services.ledger import RowToSave, _candidates, _numbered
+
+        me = await onboard(api_client, "+14165582005")
+        account_id = uuid.UUID(await an_account(api_client))
+        import_id = uuid.UUID(await an_import(db_session, me["household"]["id"]))
+        db_session.add(
+            Transaction(
+                household_id=uuid.UUID(me["household"]["id"]),
+                account_id=account_id,
+                statement_import_id=import_id,
+                occurred_on=date(2026, 8, 2),
+                amount_minor_units=10_000,
+                currency="CAD",
+                direction=TransactionDirection.debit,
+                description="E-TRANSFER TO ALEX",
+                normalized_description="e transfer to alex",
+                source=TransactionSource.upload,
+            )
+        )
+        await db_session.flush()
+        numbered = _numbered(
+            [
+                RowToSave(
+                    occurred_on=date(2026, 8, 2),
+                    description="E-TRANSFER TO SAM",
+                    amount="100.00",
+                    direction=TransactionDirection.debit,
+                    confidence=95,
+                )
+            ],
+            "CAD",
+        )
+
+        same = await _candidates(db_session, account_id, import_id, numbered)
+        other = await _candidates(db_session, account_id, uuid.uuid4(), numbered)
+
+        assert same == {}, "a row from this import was offered as a duplicate"
+        assert other, "a row from a different import should be a candidate"
 
 
 class TestWhatAPersonTyped:

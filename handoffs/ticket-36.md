@@ -113,6 +113,25 @@ DATABASE_URL=$PG MIGRATION_DATABASE_URL=$PG SUPABASE_URL=https://local.test \
 - **A row with no merchant never reaches the model** — there is nothing to
   categorize with, and a guess that looks confident is worse than a flag.
 
+## What the tests actually hold up
+
+Mutation-tested, one invariant at a time, because a passing suite proved
+nothing twice in review:
+
+| Broken deliberately | Caught by |
+|---|---|
+| `occurrence` always 1 | 2 tests |
+| Near-match requires similar descriptions | 1 test |
+| Normalizer returns the raw description | 11 tests |
+| Same-import rows become candidates | 1 test |
+| Slug lookup always misses | 2 tests |
+
+The last two were added *because* the mutation survived. Worth knowing why the
+fourth one could: candidates are read once before any insert, so through the
+endpoint a row from the current import is never in the database yet and the
+filter is unreachable. It is second-line defence, pinned directly rather than
+through a request.
+
 ## A note on how these were tested
 
 The suite covered categorization's edges thoroughly — unknown slug, nameless

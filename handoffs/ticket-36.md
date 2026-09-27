@@ -70,6 +70,8 @@ DATABASE_URL=$PG MIGRATION_DATABASE_URL=$PG SUPABASE_URL=https://local.test \
 | Amounts round-trip, no float | Met — and a *bad* amount is 422 naming the row, not a 500 |
 | Only merchant and amount reach the model | Met — asserted on the wire |
 | Unknown slug → `other` + review, no category created | Met |
+| A recognised slug lands on the row | Met — and pinned by mutation: setting `by_slug = {}` fails it |
+| A household's corrections steer its own categorization | Met |
 | Corrections never cross households | Met |
 | Duplicate account name → 409 | Met |
 | Cross-household isolation | Met |
@@ -110,6 +112,17 @@ DATABASE_URL=$PG MIGRATION_DATABASE_URL=$PG SUPABASE_URL=https://local.test \
   than an unhandled MoneyError that took the whole import with it.
 - **A row with no merchant never reaches the model** — there is nothing to
   categorize with, and a guess that looks confident is worse than a flag.
+
+## A note on how these were tested
+
+The suite covered categorization's edges thoroughly — unknown slug, nameless
+row, missing key, corrections not crossing households — and not its middle.
+Switching categorization off entirely (`by_slug = {}`) left all 196 tests
+passing, because nothing asserted a good answer ever reached a row. Two tests
+close that, and the same mutation now fails both.
+
+Worth repeating on anything else here that matters: ask what would still pass
+if this were broken, rather than only whether it passes now.
 
 ## Open questions / follow-ups
 

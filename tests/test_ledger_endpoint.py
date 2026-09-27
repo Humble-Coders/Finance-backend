@@ -501,6 +501,74 @@ class TestWhatReachesTheModel:
         for forbidden in ("2026-08-02", account, "4821", "#", "debit"):
             assert forbidden not in sent, f"{forbidden!r} reached the model"
 
+    async def test_a_recognised_slug_lands_on_the_transaction(
+        self, api_client, db_session, monkeypatch
+    ):
+        """The middle of the feature, which the suite tested only at its edges.
+
+        Every other categorization test checks a *failure*: an unknown slug, a
+        nameless row, a missing key. Setting `by_slug = {}` — categorization
+        switched off entirely — left all 196 passing, because nothing asserted
+        that a good answer ever reaches the row. M4's budgets read this column.
+        """
+        use_model(monkeypatch, FakeModel(answer='["groceries"]'))
+        me = await onboard(api_client, "+14165582003")
+        account = await an_account(api_client)
+
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [row("134.02", "LOBLAWS 1042", "2026-08-03")],
+        )
+
+        transaction = (await db_session.execute(select(Transaction))).scalar_one()
+        groceries = await db_session.execute(
+            select(Category.id).where(
+                Category.slug == "groceries", Category.household_id.is_(None)
+            )
+        )
+        assert transaction.category_id == groceries.scalar_one()
+        assert transaction.needs_review is False
+
+    async def test_a_household_correction_steers_the_answer(
+        self, api_client, db_session, monkeypatch
+    ):
+        """Corrections were tested only negatively — that household A's never
+        reach B. Nothing checked they reach A, which is the entire point of
+        storing them (PRD F3)."""
+        model = FakeModel(answer='["shopping"]')
+        use_model(monkeypatch, model)
+        me = await onboard(api_client, "+14165582004")
+        shopping = await db_session.execute(
+            select(Category.id).where(
+                Category.slug == "shopping", Category.household_id.is_(None)
+            )
+        )
+        shopping_id = shopping.scalar_one()
+        db_session.add(
+            CategoryCorrection(
+                household_id=uuid.UUID(me["household"]["id"]),
+                merchant_pattern="canadian tire",
+                corrected_category_id=shopping_id,
+            )
+        )
+        await db_session.flush()
+        account = await an_account(api_client)
+
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [row("89.99", "CANADIAN TIRE #123", "2026-08-04")],
+        )
+
+        # The correction reached the prompt...
+        assert "canadian tire" in model.systems[-1].lower()
+        # ...and the answer reached the row.
+        transaction = (await db_session.execute(select(Transaction))).scalar_one()
+        assert transaction.category_id == shopping_id
+
     async def test_a_row_with_no_name_is_not_sent_to_the_model(
         self, api_client, db_session, monkeypatch
     ):

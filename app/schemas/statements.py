@@ -10,7 +10,7 @@ helpfully puts it back in by default.
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -137,7 +137,13 @@ class ConfirmRowIn(BaseModel):
         because nothing flags a date nobody checked. A day of tolerance ahead
         covers a timezone edge without admitting a typo'd year.
         """
-        today = date.today()
+        # `datetime.now(UTC).date()`, not `date.today()`: the latter reads the
+        # server's local timezone, so the boundary would depend on where the
+        # code runs. It is currently correct because Render happens to be UTC —
+        # correct by deployment accident, and the one-day tolerance would hide
+        # the difference until it did not. Everything else in this feature
+        # already uses UTC explicitly.
+        today = datetime.now(UTC).date()
         if value > today + timedelta(days=1):
             raise ValueError("cannot be in the future")
         if value < today - timedelta(days=OLDEST_IMPORTABLE_DAYS):

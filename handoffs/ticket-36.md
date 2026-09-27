@@ -92,6 +92,12 @@ DATABASE_URL=$PG MIGRATION_DATABASE_URL=$PG SUPABASE_URL=https://local.test \
   decision): nothing is ever missing from the ledger.
 - **`confirmed_at` is set only when nothing is outstanding**, which is what 3.4
   reads it to mean.
+- **A household's corrections are escaped into the prompt**, not interpolated.
+  `merchant_pattern` is text the user typed in 3.4, and raw interpolation let a
+  quote plus a newline add its own instructions to the system prompt. Contained
+  by design — own ledger, answers checked against known slugs, nothing
+  executing model output — but 3.4 is the ticket that starts creating those
+  patterns, so it is closed before that lands.
 - **The rules ticket #38 settled for typed transactions are enforced here**,
   because this endpoint takes typed rows too: the amount must not be negative
   (`direction` carries the sign — `-50.00` with `debit` is ambiguous by

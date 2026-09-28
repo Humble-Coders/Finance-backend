@@ -123,6 +123,17 @@ Python 3.11+ · FastAPI · SQLAlchemy 2 (async) · Alembic · Supabase Postgres 
   To rehearse locally see the script header. It drops every table and a developer
   `.env` points at production, so it refuses unless the DSN names localhost *and*
   reaches the same server as the container it inspects.
+- **Run the suite against the local container, not `.env`.** A developer `.env`
+  names the Supabase pooler, and pointing the tests there takes two hours instead
+  of twenty seconds while competing with the live app for its connection pool.
+  `conftest.py` refuses a non-local host for that reason; `ALLOW_REMOTE_TEST_DB=1`
+  overrides it when you genuinely mean to.
+
+  ```
+  docker run -d --name finai-pg -e POSTGRES_PASSWORD=postgres -p 55432:5432 \
+    ghcr.io/pgmq/pg17-pgmq:v1.5.1
+  DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres pytest
+  ```
 
 ## Workflow
 

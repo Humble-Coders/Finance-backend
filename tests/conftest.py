@@ -1,9 +1,15 @@
 """Fixtures for database-backed tests.
 
 Every test runs inside a transaction that is **always rolled back**, so the
-suite can be pointed at any database without leaving anything behind — CI's
-throwaway container (the `database` job, #15), or production, which is still
-where a developer's .env points.
+suite leaves nothing behind wherever it is pointed — CI's throwaway container
+(the `database` job, #15) or anywhere else.
+
+Rolling back is not the same as being harmless, which is why
+[pytest_configure] refuses a remote host by default. Pointed at the Supabase
+pooler the suite ran for two hours instead of twenty-four seconds, failed 21
+tests on connection exhaustion, and spent that whole time competing with the
+live application for a small connection pool. No data was harmed and the
+exercise was still a mistake.
 """
 
 from __future__ import annotations
@@ -50,6 +56,53 @@ def pytest_configure(config):
             "test would skip. Set DATABASE_URL (and SUPABASE_URL, which "
             "Settings also requires)."
         )
+    _refuse_a_remote_database()
+
+
+# Hosts the suite may run against without being asked twice. Everything else is
+# somebody's shared database until proven otherwise.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "host.docker.internal", ""})
+OVERRIDE = "ALLOW_REMOTE_TEST_DB"
+
+
+def _refuse_a_remote_database() -> None:
+    """Stop the suite before it runs against a database that is not local.
+
+    The rollback makes this safe for the *data*; it does nothing about the
+    rest. A developer's .env points at the Supabase pooler, so the obvious
+    `pytest` runs there — slowly, and holding connections the live application
+    needs. The local container (see the header of
+    `scripts/check_migrations.sh`) answers in seconds.
+
+    That script already refuses a non-localhost DSN for the same reason;
+    this is that rule applied to the suite as well.
+
+    Deliberately a refusal rather than a warning: the previous arrangement was
+    a comment in a docstring saying this might happen, and it happened.
+    """
+    if os.environ.get(OVERRIDE):
+        return
+    try:
+        from sqlalchemy.engine import make_url
+
+        from app.config import get_settings
+
+        host = (make_url(get_settings().database_dsn).host or "").lower()
+    except Exception:
+        # No usable DSN: the skip/REQUIRE_DB logic above already covers it, and
+        # a guard that cannot read the host has no opinion to offer.
+        return
+
+    if host in _LOCAL_HOSTS:
+        return
+
+    raise pytest.UsageError(
+        f"refusing to run the suite against {host!r}, which is not a local "
+        "database. Point DATABASE_URL at the local container, e.g.\n\n"
+        "  DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres"
+        " pytest\n\n"
+        f"If you really mean to use a remote database, set {OVERRIDE}=1."
+    )
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")

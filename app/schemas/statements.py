@@ -28,6 +28,8 @@ __all__ = [
     "ConfirmRowsIn",
     "SaveOutcomeOut",
     "StatementImportOut",
+    "amount_not_negative",
+    "date_within_living_memory",
 ]
 
 
@@ -92,6 +94,46 @@ class StatementParseOut(BaseModel):
     text_retained_until: date | None = None
 
 
+def amount_not_negative(value: str) -> str:
+    """`direction` carries the sign; the amount must not carry it too.
+
+    `-50.00` with `direction=debit` is ambiguous by construction — money
+    out, or a refund? Nothing downstream can tell, and the parse path only
+    ever produces positives. One typed minus would put a figure in the
+    ledger whose meaning depends on who reads it. Ticket #38 settled this
+    for manually typed transactions; every endpoint that takes a typed
+    amount shares this one rule rather than restating it.
+    """
+    if value.strip().startswith("-"):
+        raise ValueError(
+            "must not be negative — use direction to say which way it went"
+        )
+    return value
+
+
+def date_within_living_memory(value: date) -> date:
+    """A date the rest of the product can reason about.
+
+    Every period the product is built on keys off this: M4's budgets,
+    "spending this month", the health score's windows. A row dated 2999
+    sits outside all of them forever, and outside the review queue too,
+    because nothing flags a date nobody checked. A day of tolerance ahead
+    covers a timezone edge without admitting a typo'd year.
+    """
+    # `datetime.now(UTC).date()`, not `date.today()`: the latter reads the
+    # server's local timezone, so the boundary would depend on where the
+    # code runs. It is currently correct because Render happens to be UTC —
+    # correct by deployment accident, and the one-day tolerance would hide
+    # the difference until it did not. Everything else in this feature
+    # already uses UTC explicitly.
+    today = datetime.now(UTC).date()
+    if value > today + timedelta(days=1):
+        raise ValueError("cannot be in the future")
+    if value < today - timedelta(days=OLDEST_IMPORTABLE_DAYS):
+        raise ValueError("is too far in the past to be a statement line")
+    return value
+
+
 class ConfirmRowIn(BaseModel):
     """A row the user is saving, as they confirmed it — not as we parsed it.
 
@@ -112,43 +154,12 @@ class ConfirmRowIn(BaseModel):
     @field_validator("amount")
     @classmethod
     def _not_negative(cls, value: str) -> str:
-        """`direction` carries the sign; the amount must not carry it too.
-
-        `-50.00` with `direction=debit` is ambiguous by construction — money
-        out, or a refund? Nothing downstream can tell, and the parse path only
-        ever produces positives. One typed minus would put a figure in the
-        ledger whose meaning depends on who reads it. Ticket #38 settled this
-        for manually typed transactions; this endpoint takes typed rows too.
-        """
-        if value.strip().startswith("-"):
-            raise ValueError(
-                "must not be negative — use direction to say which way it went"
-            )
-        return value
+        return amount_not_negative(value)
 
     @field_validator("occurred_on")
     @classmethod
     def _within_living_memory(cls, value: date) -> date:
-        """A date the rest of the product can reason about.
-
-        Every period the product is built on keys off this: M4's budgets,
-        "spending this month", the health score's windows. A row dated 2999
-        sits outside all of them forever, and outside the review queue too,
-        because nothing flags a date nobody checked. A day of tolerance ahead
-        covers a timezone edge without admitting a typo'd year.
-        """
-        # `datetime.now(UTC).date()`, not `date.today()`: the latter reads the
-        # server's local timezone, so the boundary would depend on where the
-        # code runs. It is currently correct because Render happens to be UTC —
-        # correct by deployment accident, and the one-day tolerance would hide
-        # the difference until it did not. Everything else in this feature
-        # already uses UTC explicitly.
-        today = datetime.now(UTC).date()
-        if value > today + timedelta(days=1):
-            raise ValueError("cannot be in the future")
-        if value < today - timedelta(days=OLDEST_IMPORTABLE_DAYS):
-            raise ValueError("is too far in the past to be a statement line")
-        return value
+        return date_within_living_memory(value)
 
 
 class ConfirmRowsIn(BaseModel):

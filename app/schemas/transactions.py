@@ -5,11 +5,19 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.enums import ReviewReason, TransactionDirection
+from app.schemas.statements import amount_not_negative, date_within_living_memory
 
-__all__ = ["ReviewRowOut", "ReviewPageOut", "DuplicateOfOut"]
+__all__ = [
+    "ReviewRowOut",
+    "ReviewPageOut",
+    "DuplicateOfOut",
+    "TransactionPatchIn",
+    "TransactionOut",
+    "PatchOutcomeOut",
+]
 
 
 class DuplicateOfOut(BaseModel):
@@ -52,3 +60,52 @@ class ReviewPageOut(BaseModel):
     # here would become something it might construct, and a hand-built cursor
     # is how paging starts skipping rows.
     next_cursor: str | None = None
+
+
+class TransactionPatchIn(BaseModel):
+    """A person's correction to one row. Only the fields given a value change.
+
+    A field sent as null is treated as not sent. Nothing here can be cleared:
+    a correction replaces a wrong value with a right one, and "this row has no
+    date" or "no amount" is not an answer the review screen offers.
+    """
+
+    occurred_on: date | None = None
+    amount: str | None = None
+    direction: TransactionDirection | None = None
+    description: str | None = Field(default=None, min_length=1, max_length=512)
+    merchant: str | None = Field(default=None, min_length=1, max_length=255)
+    category_id: uuid.UUID | None = None
+
+    @field_validator("amount")
+    @classmethod
+    def _not_negative(cls, value: str | None) -> str | None:
+        return None if value is None else amount_not_negative(value)
+
+    @field_validator("occurred_on")
+    @classmethod
+    def _within_living_memory(cls, value: date | None) -> date | None:
+        return None if value is None else date_within_living_memory(value)
+
+    @model_validator(mode="after")
+    def _says_something(self) -> TransactionPatchIn:
+        # An empty correction would clear the review flag while changing
+        # nothing — "confirm" wearing a different verb. Confirming has its own
+        # endpoint so that the two stay distinguishable in what they mean.
+        sent = {
+            name for name in self.model_fields_set if getattr(self, name) is not None
+        }
+        if not sent:
+            raise ValueError("nothing to change — use confirm to accept a row as it is")
+        return self
+
+
+class TransactionOut(ReviewRowOut):
+    needs_review: bool
+
+
+class PatchOutcomeOut(BaseModel):
+    transaction: TransactionOut
+    # True when this was the last row from its import still waiting, so the
+    # client can say "statement done" without asking again.
+    import_finished: bool = False

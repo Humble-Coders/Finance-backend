@@ -285,3 +285,335 @@ class TestPaging:
         )
 
         assert response.status_code == 422
+
+
+# --- Correcting a row -------------------------------------------------------
+
+
+async def a_system_category(db_session) -> uuid.UUID:
+    from sqlalchemy import select
+
+    from app.models.categorization import Category
+
+    result = await db_session.execute(
+        select(Category.id).where(Category.household_id.is_(None)).limit(1)
+    )
+    return result.scalar_one()
+
+
+async def an_import(db_session, household_id: uuid.UUID) -> uuid.UUID:
+    from app.models.enums import SourceKind, StatementImportStatus
+    from app.models.money import StatementImport
+
+    record = StatementImport(
+        household_id=household_id,
+        source_kind=SourceKind.pdf_text,
+        status=StatementImportStatus.awaiting_review,
+    )
+    db_session.add(record)
+    await db_session.flush()
+    return record.id
+
+
+async def patch(api_client, row: Transaction, **fields):
+    return await api_client.patch(f"/transactions/{row.id}", json=fields)
+
+
+class TestCorrectingARow:
+    async def test_an_answered_row_leaves_the_queue(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165573030")
+        row = flagged(household, account, day=4, reason=ReviewReason.low_confidence)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await patch(api_client, row, description="SPOTIFY PREMIUM")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["transaction"]["needs_review"] is False
+        assert response.json()["transaction"]["review_reason"] is None
+        queue = (await api_client.get("/transactions/review")).json()["rows"]
+        assert queue == []
+
+    async def test_an_amount_goes_through_the_money_boundary(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573031")
+        row = flagged(household, account, day=4, minor=1099)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await patch(api_client, row, amount="1234.50")
+
+        assert response.status_code == 200, response.text
+        # Stored as integer minor units, returned as a decimal string.
+        await db_session.refresh(row)
+        assert row.amount_minor_units == 123450
+        assert response.json()["transaction"]["amount"] == "1234.50"
+
+    async def test_a_grouped_amount_is_refused_rather_than_guessed(
+        self, api_client, db_session
+    ):
+        # The API takes a plain decimal string. Accepting "1,234.50" would mean
+        # also deciding what "1.234,50" means, which is a locale question the
+        # server has no business guessing on someone's money — the client
+        # formats for display and sends the number.
+        household, account = await a_household(api_client, "+14165573035")
+        row = flagged(household, account, day=4, minor=1099)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await patch(api_client, row, amount="1,234.50")
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_amount"
+        await db_session.refresh(row)
+        assert row.amount_minor_units == 1099
+
+    async def test_a_new_description_re_derives_the_key_and_merchant(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573032")
+        row = flagged(household, account, day=4, description="SPTFY")
+        db_session.add(row)
+        await db_session.flush()
+
+        await patch(api_client, row, description="SPOTIFY P3A4B5C6")
+
+        await db_session.refresh(row)
+        assert row.normalized_description != "sptfy"
+        assert row.merchant is not None and "spotify" in row.merchant.lower()
+
+    async def test_a_merchant_the_user_names_wins_over_the_derived_one(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573033")
+        row = flagged(household, account, day=4, description="SQ *CAFE 123")
+        db_session.add(row)
+        await db_session.flush()
+
+        await patch(
+            api_client, row, description="SQ *CAFE 123 TORONTO", merchant="Cafe Luna"
+        )
+
+        await db_session.refresh(row)
+        assert row.merchant == "Cafe Luna"
+
+    async def test_answering_a_duplicate_question_drops_the_pointer(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573034")
+        original = flagged(household, account, day=3, needs_review=False)
+        db_session.add(original)
+        await db_session.flush()
+        suspect = flagged(
+            household,
+            account,
+            day=3,
+            minor=2000,
+            reason=ReviewReason.suspected_duplicate,
+            duplicate_of_id=original.id,
+        )
+        db_session.add(suspect)
+        await db_session.flush()
+
+        await patch(api_client, suspect, description="A DIFFERENT PURCHASE")
+
+        await db_session.refresh(suspect)
+        assert suspect.duplicate_of_id is None
+
+
+class TestAnEditThatWouldDuplicate:
+    async def test_changing_the_amount_onto_an_existing_row_is_refused(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573040")
+        existing = flagged(household, account, day=6, minor=5000, needs_review=False)
+        typo = flagged(household, account, day=6, minor=500)
+        db_session.add_all([existing, typo])
+        await db_session.flush()
+
+        response = await patch(api_client, typo, amount="50.00")
+
+        assert response.status_code == 409, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "would_duplicate"
+        assert detail["duplicate_of"] == str(existing.id)
+
+    async def test_a_refused_edit_changes_nothing(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165573041")
+        existing = flagged(household, account, day=6, minor=5000, needs_review=False)
+        typo = flagged(household, account, day=6, minor=500)
+        db_session.add_all([existing, typo])
+        await db_session.flush()
+
+        await patch(api_client, typo, amount="50.00")
+
+        # Still in the queue, still the old figure: the user has to decide
+        # what this row is, and a half-applied edit would decide for them.
+        queue = (await api_client.get("/transactions/review")).json()["rows"]
+        assert [r["id"] for r in queue] == [str(typo.id)]
+        assert queue[0]["amount"] == "5.00"
+
+    async def test_changing_the_date_onto_an_existing_row_is_refused(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573042")
+        existing = flagged(household, account, day=6, needs_review=False)
+        typo = flagged(household, account, day=16)
+        db_session.add_all([existing, typo])
+        await db_session.flush()
+
+        response = await patch(api_client, typo, occurred_on="2026-08-06")
+
+        assert response.status_code == 409, response.text
+
+    async def test_a_same_day_same_amount_row_with_another_description_is_allowed(
+        self, api_client, db_session
+    ):
+        # Two $20 withdrawals in one afternoon are two withdrawals. Import
+        # flags that shape for a person to compare; an edit must not be
+        # refused for it, or ordinary corrections become impossible.
+        household, account = await a_household(api_client, "+14165573043")
+        existing = flagged(
+            household,
+            account,
+            day=9,
+            minor=2000,
+            needs_review=False,
+            description="ATM WITHDRAWAL KING ST",
+        )
+        other = flagged(
+            household, account, day=9, minor=1500, description="ATM WITHDRAWAL QUEEN ST"
+        )
+        db_session.add_all([existing, other])
+        await db_session.flush()
+
+        response = await patch(api_client, other, amount="20.00")
+
+        assert response.status_code == 200, response.text
+
+
+class TestWhoseRowItIs:
+    async def test_another_household_s_row_is_not_found(self, api_client, db_session):
+        theirs, their_account = await a_household(api_client, "+14165573050")
+        row = flagged(theirs, their_account, day=2)
+        db_session.add(row)
+        await db_session.flush()
+
+        await a_household(api_client, "+14165573051")
+        response = await patch(api_client, row, description="MINE NOW")
+
+        # 404, not 403: a 403 would confirm the id exists.
+        assert response.status_code == 404
+        await db_session.refresh(row)
+        assert row.description == "SPOTIFY"
+
+
+class TestFilingIntoACategory:
+    async def test_a_system_category_is_accepted(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165573060")
+        row = flagged(household, account, day=2, reason=ReviewReason.unknown_category)
+        db_session.add(row)
+        await db_session.flush()
+        category = await a_system_category(db_session)
+
+        response = await patch(api_client, row, category_id=str(category))
+
+        assert response.status_code == 200, response.text
+        assert response.json()["transaction"]["category_id"] == str(category)
+
+    async def test_another_household_s_category_is_unknown(
+        self, api_client, db_session
+    ):
+        from app.models.categorization import Category
+
+        theirs, _ = await a_household(api_client, "+14165573061")
+        private = Category(household_id=theirs, slug="their-thing", name="Theirs")
+        db_session.add(private)
+        await db_session.flush()
+
+        mine, account = await a_household(api_client, "+14165573062")
+        row = flagged(mine, account, day=2)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await patch(api_client, row, category_id=str(private.id))
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "unknown_category"
+
+
+class TestWhatIsNotACorrection:
+    async def test_an_empty_patch_is_refused(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165573070")
+        row = flagged(household, account, day=2)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await patch(api_client, row)
+
+        assert response.status_code == 422
+        await db_session.refresh(row)
+        assert row.needs_review is True
+
+    async def test_a_negative_amount_is_refused(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165573071")
+        row = flagged(household, account, day=2)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await patch(api_client, row, amount="-5.00")
+
+        assert response.status_code == 422
+
+    async def test_a_future_date_is_refused(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165573072")
+        row = flagged(household, account, day=2)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await patch(api_client, row, occurred_on="2999-01-01")
+
+        assert response.status_code == 422
+
+
+class TestFinishingAnImport:
+    async def test_resolving_the_last_row_finishes_the_import(
+        self, api_client, db_session
+    ):
+        from app.models.money import StatementImport
+
+        household, account = await a_household(api_client, "+14165573080")
+        import_id = await an_import(db_session, household)
+        row = flagged(household, account, day=2)
+        row.statement_import_id = import_id
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await patch(api_client, row, description="SPOTIFY")
+
+        assert response.json()["import_finished"] is True
+        record = await db_session.get(StatementImport, import_id)
+        await db_session.refresh(record)
+        assert record.confirmed_at is not None
+
+    async def test_an_import_with_a_row_outstanding_is_not_finished(
+        self, api_client, db_session
+    ):
+        from app.models.money import StatementImport
+
+        household, account = await a_household(api_client, "+14165573081")
+        import_id = await an_import(db_session, household)
+        first = flagged(household, account, day=2)
+        second = flagged(household, account, day=3)
+        for row in (first, second):
+            row.statement_import_id = import_id
+        db_session.add_all([first, second])
+        await db_session.flush()
+
+        response = await patch(api_client, first, description="SPOTIFY")
+
+        assert response.json()["import_finished"] is False
+        record = await db_session.get(StatementImport, import_id)
+        await db_session.refresh(record)
+        assert record.confirmed_at is None

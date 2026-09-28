@@ -19,6 +19,7 @@ __all__ = [
     "PatchOutcomeOut",
     "ConfirmIn",
     "ConfirmOutcomeOut",
+    "DeleteOutcomeOut",
 ]
 
 
@@ -140,3 +141,10 @@ class ConfirmOutcomeOut(BaseModel):
     confirmed: int
     # Imports whose last outstanding row this request resolved.
     imports_finished: list[uuid.UUID] = []
+
+
+class DeleteOutcomeOut(BaseModel):
+    # A body rather than a bare 204, so deleting the last row still waiting
+    # from an import can say the import is done — the same answer PATCH and
+    # confirm give, so the client handles one shape for "a row was resolved".
+    import_finished: bool = False

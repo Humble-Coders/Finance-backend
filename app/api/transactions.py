@@ -23,6 +23,7 @@ from app.models.money import StatementImport, Transaction
 from app.schemas.transactions import (
     ConfirmIn,
     ConfirmOutcomeOut,
+    DeleteOutcomeOut,
     DuplicateOfOut,
     PatchOutcomeOut,
     ReviewPageOut,
@@ -341,6 +342,42 @@ async def confirm_transaction(
     finished = was_waiting and await _finish_import(session, import_id)
     await session.commit()
     return PatchOutcomeOut(transaction=_as_out(row), import_finished=finished)
+
+
+@router.delete("/transactions/{transaction_id}", response_model=DeleteOutcomeOut)
+async def delete_transaction(
+    transaction_id: uuid.UUID,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> DeleteOutcomeOut:
+    """Remove a row that was never a transaction.
+
+    A header the parser mistook for a line, or a copy the user recognises. It
+    is their own data and they are saying it is wrong, so it goes — a hard
+    delete, not a flag that every later query would have to remember to skip.
+
+    Not limited to rows still in the queue: a bogus row found after confirming
+    it is just as bogus.
+
+    Nothing else is deleted with it. The two things that can point at a
+    transaction both let go rather than follow it: a suspected duplicate that
+    matched this row keeps its own place in the queue, and a rule learned from
+    this row keeps teaching, because the rule was about the merchant, not
+    about this line.
+    """
+    household_id = identity.household.id
+    row = await _owned(session, household_id, transaction_id)
+    import_id, was_waiting = row.statement_import_id, row.needs_review
+
+    await session.delete(row)
+    await session.flush()
+
+    # Deleting a row still waiting is one way of answering it, so it can be the
+    # answer that finishes an import. Deleting one already confirmed changes
+    # nothing about what is outstanding.
+    finished = was_waiting and await _finish_import(session, import_id)
+    await session.commit()
+    return DeleteOutcomeOut(import_finished=finished)
 
 
 async def _owned(

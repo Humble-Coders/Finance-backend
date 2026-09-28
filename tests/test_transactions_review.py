@@ -857,3 +857,156 @@ class TestConfirmingMany:
             .where(CategoryCorrection.household_id == household)
         )
         assert count.scalar_one() == 0
+
+
+# --- Deleting a row that was never a transaction -----------------------------
+
+
+async def exists(db_session, row_id: uuid.UUID) -> bool:
+    from sqlalchemy import select
+
+    result = await db_session.execute(
+        select(Transaction.id).where(Transaction.id == row_id)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+class TestDeleting:
+    async def test_a_row_the_user_rejects_is_gone(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165576001")
+        row = flagged(household, account, day=4, description="OPENING BALANCE")
+        db_session.add(row)
+        await db_session.flush()
+        row_id = row.id
+
+        response = await api_client.delete(f"/transactions/{row_id}")
+
+        assert response.status_code == 200, response.text
+        assert not await exists(db_session, row_id)
+
+    async def test_another_household_s_row_survives(self, api_client, db_session):
+        theirs, their_account = await a_household(api_client, "+14165576002")
+        row = flagged(theirs, their_account, day=4)
+        db_session.add(row)
+        await db_session.flush()
+
+        await a_household(api_client, "+14165576003")
+        response = await api_client.delete(f"/transactions/{row.id}")
+
+        # 404, the same answer as an id that never existed.
+        assert response.status_code == 404
+        assert await exists(db_session, row.id)
+
+    async def test_deleting_twice_says_it_is_already_gone(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165576004")
+        row = flagged(household, account, day=4)
+        db_session.add(row)
+        await db_session.flush()
+
+        await api_client.delete(f"/transactions/{row.id}")
+        again = await api_client.delete(f"/transactions/{row.id}")
+
+        assert again.status_code == 404
+
+    async def test_a_confirmed_row_can_be_deleted_too(self, api_client, db_session):
+        # A bogus row found after confirming it is just as bogus.
+        household, account = await a_household(api_client, "+14165576005")
+        row = flagged(household, account, day=4, needs_review=False)
+        db_session.add(row)
+        await db_session.flush()
+        row_id = row.id
+
+        response = await api_client.delete(f"/transactions/{row_id}")
+
+        assert response.status_code == 200
+        assert not await exists(db_session, row_id)
+
+    async def test_deleting_the_last_waiting_row_finishes_the_import(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165576006")
+        import_id = await an_import(db_session, household)
+        row = flagged(household, account, day=4)
+        row.statement_import_id = import_id
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await api_client.delete(f"/transactions/{row.id}")
+
+        assert response.json()["import_finished"] is True
+
+    async def test_deleting_a_confirmed_row_finishes_nothing(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165576007")
+        import_id = await an_import(db_session, household)
+        done = flagged(household, account, day=4, needs_review=False)
+        waiting = flagged(household, account, day=5)
+        for row in (done, waiting):
+            row.statement_import_id = import_id
+        db_session.add_all([done, waiting])
+        await db_session.flush()
+
+        response = await api_client.delete(f"/transactions/{done.id}")
+
+        assert response.json()["import_finished"] is False
+
+
+class TestDeletingReachesNoFurtherThanTheRow:
+    async def test_a_suspected_duplicate_of_it_survives(self, api_client, db_session):
+        # The user deleted the row a suspect was compared against. The suspect
+        # is its own transaction and has not been answered: it must not be
+        # swept away with the row it happened to resemble.
+        household, account = await a_household(api_client, "+14165576010")
+        original = flagged(household, account, day=3, needs_review=False)
+        db_session.add(original)
+        await db_session.flush()
+        suspect = flagged(
+            household,
+            account,
+            day=3,
+            minor=2000,
+            reason=ReviewReason.suspected_duplicate,
+            duplicate_of_id=original.id,
+        )
+        db_session.add(suspect)
+        await db_session.flush()
+
+        await api_client.delete(f"/transactions/{original.id}")
+
+        assert await exists(db_session, suspect.id)
+        await db_session.refresh(suspect)
+        assert suspect.needs_review is True
+        assert suspect.duplicate_of_id is None
+
+    async def test_a_rule_learned_from_it_keeps_teaching(self, api_client, db_session):
+        # The rule is about the merchant, not about this line. Deleting the
+        # line it was learned from must not unlearn it.
+        from sqlalchemy import select
+
+        from app.models.categorization import Category, CategoryCorrection
+
+        household, account = await a_household(api_client, "+14165576011")
+        category = (
+            await db_session.execute(
+                select(Category.id).where(Category.household_id.is_(None)).limit(1)
+            )
+        ).scalar_one()
+        row = flagged(household, account, day=3)
+        row.merchant = "Spotify"
+        db_session.add(row)
+        await db_session.flush()
+        await patch(api_client, row, category_id=str(category))
+
+        await api_client.delete(f"/transactions/{row.id}")
+
+        rule = (
+            await db_session.execute(
+                select(CategoryCorrection).where(
+                    CategoryCorrection.household_id == household
+                )
+            )
+        ).scalar_one()
+        await db_session.refresh(rule)
+        assert rule.merchant_pattern == "spotify"
+        assert rule.transaction_id is None

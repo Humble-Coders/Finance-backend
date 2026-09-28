@@ -18,7 +18,14 @@ from app.services.categorization import _examples
 from tests.conftest import requires_db
 from tests.test_transactions_review import a_household, flagged, patch
 
-pytestmark = [pytest.mark.asyncio(loop_scope="session"), requires_db]
+pytestmark = [
+    # `integration` is what CI's database job selects (`pytest -m integration`).
+    # Without it these ran nowhere: that job deselected them, and the fast job
+    # has no database, so `requires_db` skipped them. Green, and untested.
+    pytest.mark.integration,
+    pytest.mark.asyncio(loop_scope="session"),
+    requires_db,
+]
 
 
 async def two_system_categories(db_session) -> tuple[uuid.UUID, uuid.UUID]:

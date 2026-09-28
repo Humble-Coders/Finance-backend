@@ -22,8 +22,8 @@ merchant. Rows the user already confirmed are never moved.
 every one it can file into (`GET /categories`). No request can create a system
 category.
 
-**Also in this PR:** a guard that refuses to run the test suite against a
-remote database, and production migrated to head — it had been one migration
+**Also in this PR:** two test-suite guards — one refuses a remote database,
+one refuses a database test CI would never run — and production migrated to head — it had been one migration
 behind the code already deployed (see *Production*).
 
 ## Files changed
@@ -46,7 +46,8 @@ behind the code already deployed (see *Production*).
 - `app/schemas/statements.py` — the amount-sign and date-range rules moved to module functions so the PATCH schema shares them.
 - `app/models/categorization.py` — the model carries the new unique index.
 - `app/main.py` — registers the two routers.
-- `tests/conftest.py` — refuses a non-local database unless `ALLOW_REMOTE_TEST_DB=1`.
+- `tests/conftest.py` — refuses a non-local database unless `ALLOW_REMOTE_TEST_DB=1`;
+  and refuses to collect any test marked `requires_db` without `integration` (see below).
 - `CLAUDE.md` — how to run the suite against the local container.
 
 ## How to test
@@ -94,7 +95,7 @@ container. Per-file runs and CI are the reliable signals locally.
 | `POST /categories` cannot create a system category however shaped, nor duplicate a slug (409, logged) | **met** | `TestNeverASystemCategory`, `test_the_same_name_twice_is_a_logged_409` |
 | An import whose last review resolves gets `confirmed_at`; one with a row outstanding does not | **met** | `TestFinishingAnImport` (PATCH), and the finished / not-finished pair for bulk confirm and for delete |
 | Corrections never cross households, in reads or prompts | **met** | `TestNeverAcrossHouseholds` — rows not moved, and `_examples()` for the other household does not contain the rule |
-| `ruff check`, `ruff format --check`, `pytest` pass; migrations apply, reverse, re-apply; CI green | **met locally** | CI result is on the PR |
+| `ruff check`, `ruff format --check`, `pytest` pass; migrations apply, reverse, re-apply; CI green | **met locally** | CI's first green run did **not** cover these tests — see below |
 
 ## Deviations & decisions
 
@@ -140,6 +141,20 @@ a plain decimal.
 only the most recently updated rules. An upsert does not fire the ORM's
 `onupdate`, and `now()` is fixed for a whole transaction, so rules written in
 one would tie.
+
+## The first CI run did not test this ticket
+
+CI's first run on this branch was green, and it had not run a single one of this
+ticket's database tests. The database job runs `pytest -m integration`; the new
+test files were marked `requires_db` but not `integration`, so that job
+deselected all 84 of them, and the fast job — which has no database — skipped
+them. The run reported `200 passed` either way.
+
+It was caught by checking the count rather than the tick: 200 is the same number
+the database job reported before this branch existed. The files now carry the
+marker, and `conftest.py` refuses to collect any test that needs a database but
+is not `integration`, so the mistake fails loudly instead of passing silently.
+The database job should report **284 passed** — 200 plus these 84.
 
 ## Production
 

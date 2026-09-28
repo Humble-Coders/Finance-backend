@@ -36,10 +36,37 @@ def _database_is_configured() -> bool:
         return False
 
 
-requires_db = pytest.mark.skipif(
-    not _database_is_configured(),
-    reason="no database configured (set DATABASE_URL in .env or the environment)",
-)
+NO_DATABASE = "no database configured (set DATABASE_URL in .env or the environment)"
+
+requires_db = pytest.mark.skipif(not _database_is_configured(), reason=NO_DATABASE)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Refuse a database test that CI would never run.
+
+    CI's database job runs `pytest -m integration`; the fast job has no
+    database. So a test marked `requires_db` but not `integration` is
+    deselected by the first and skipped by the second — it runs nowhere, and
+    the build is green regardless of whether it passes. Eighty-four database
+    tests in ticket 37 sat in exactly that state through a green CI run until
+    somebody looked at the counts.
+    """
+    stranded = [
+        item.nodeid
+        for item in items
+        if item.get_closest_marker("integration") is None
+        and any(
+            mark.name == "skipif" and mark.kwargs.get("reason") == NO_DATABASE
+            for mark in item.iter_markers()
+        )
+    ]
+    if stranded:
+        listed = "\n  ".join(stranded[:20])
+        raise pytest.UsageError(
+            f"{len(stranded)} test(s) need a database but are not marked "
+            "`integration`, so CI would run them nowhere. Add "
+            "`pytest.mark.integration` beside `requires_db`:\n  " + listed
+        )
 
 
 def pytest_configure(config):

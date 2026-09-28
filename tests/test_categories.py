@@ -52,7 +52,11 @@ class TestSlugs:
         assert all(part == "word" for part in slug.split("_"))
 
 
-db = [pytest.mark.asyncio(loop_scope="session"), requires_db]
+# Everything below needs a database. `integration` is what CI's database job
+# selects; without it these were deselected there and skipped everywhere else.
+# The slug tests above stay unmarked so the fast job, which has no database,
+# still runs them.
+db = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session"), requires_db]
 
 
 async def system_count(db_session) -> int:

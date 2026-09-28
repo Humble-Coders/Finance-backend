@@ -18,7 +18,14 @@ from app.models.enums import ReviewReason, TransactionDirection, TransactionSour
 from app.models.money import Transaction
 from tests.conftest import requires_db
 
-pytestmark = [pytest.mark.asyncio(loop_scope="session"), requires_db]
+pytestmark = [
+    # `integration` is what CI's database job selects (`pytest -m integration`).
+    # Without it these ran nowhere: that job deselected them, and the fast job
+    # has no database, so `requires_db` skipped them. Green, and untested.
+    pytest.mark.integration,
+    pytest.mark.asyncio(loop_scope="session"),
+    requires_db,
+]
 
 
 def authenticate_as(*, phone: str) -> None:

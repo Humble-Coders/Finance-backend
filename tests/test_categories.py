@@ -209,3 +209,62 @@ class TestAlreadyThere:
 
         assert response.status_code == 201, response.text
         assert response.json()["id"] != str(private.id)
+
+
+class TestListing:
+    pytestmark = db
+
+    async def test_the_shared_categories_are_all_listed(self, api_client, db_session):
+        await a_household(api_client, "+14165577030")
+
+        listed = (await api_client.get("/categories")).json()
+
+        assert sum(c["is_system"] for c in listed) == await system_count(db_session)
+
+    async def test_the_household_s_own_are_listed_with_them(self, api_client):
+        await a_household(api_client, "+14165577031")
+        made = (await api_client.post("/categories", json={"name": "Hobbies"})).json()
+
+        listed = (await api_client.get("/categories")).json()
+
+        mine = [c for c in listed if c["id"] == made["id"]]
+        assert mine == [
+            {"id": made["id"], "slug": "hobbies", "name": "Hobbies", "is_system": False}
+        ]
+
+    async def test_another_household_s_are_never_listed(self, api_client, db_session):
+        # Their category names would say what somebody else spends on.
+        theirs, _ = await a_household(api_client, "+14165577032")
+        private = Category(household_id=theirs, slug="fertility_clinic", name="Clinic")
+        db_session.add(private)
+        await db_session.flush()
+
+        await a_household(api_client, "+14165577033")
+        listed = (await api_client.get("/categories")).json()
+
+        assert str(private.id) not in {c["id"] for c in listed}
+        assert not any(c["slug"] == "fertility_clinic" for c in listed)
+
+    async def test_they_come_back_in_name_order(self, api_client):
+        await a_household(api_client, "+14165577034")
+        await api_client.post("/categories", json={"name": "aardvark care"})
+
+        names = [c["name"] for c in (await api_client.get("/categories")).json()]
+
+        assert names == sorted(names, key=str.lower)
+        assert names[0] == "aardvark care"
+
+    async def test_every_listed_id_can_be_filed_into(self, api_client, db_session):
+        # The point of listing them: whatever the picker offers, PATCH accepts.
+        household, account = await a_household(api_client, "+14165577035")
+        await api_client.post("/categories", json={"name": "Hobbies"})
+        listed = (await api_client.get("/categories")).json()
+
+        # A distinct amount per row: identical rows on one account and day
+        # would collide on the dedup index before the category was ever tried.
+        for i, category in enumerate(listed):
+            row = flagged(household, account, day=4, minor=100 + i)
+            db_session.add(row)
+            await db_session.flush()
+            response = await patch(api_client, row, category_id=category["id"])
+            assert response.status_code == 200, (category["slug"], response.text)

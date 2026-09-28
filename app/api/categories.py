@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,34 @@ router = APIRouter(tags=["categories"])
 
 CATEGORY_EXISTS = "category_exists"
 HOUSEHOLD_SLUG_UNIQUE = "uq_category_household_slug"
+
+
+@router.get("/categories", response_model=list[CategoryOut])
+async def list_categories(
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> list[CategoryOut]:
+    """Every category this household can file into: the shared ones and its own.
+
+    What a correction's picker offers, and the only way a client learns the ids
+    `PATCH /transactions/{id}` takes. Another household's categories are never
+    listed — their names would say what somebody else spends on.
+
+    Sorted by name, so the shared and household categories interleave the way a
+    person scanning for "Kids" expects; `is_system` is there for a client that
+    would rather group them.
+    """
+    result = await session.execute(
+        select(Category)
+        .where(
+            or_(
+                Category.household_id.is_(None),
+                Category.household_id == identity.household.id,
+            )
+        )
+        .order_by(func.lower(Category.name), Category.id)
+    )
+    return [_as_out(category) for category in result.scalars().all()]
 
 
 @router.post(
@@ -72,6 +100,10 @@ async def create_category(
             raise
         _refuse(household_id, "slug_created_concurrently", None)
 
+    return _as_out(category)
+
+
+def _as_out(category: Category) -> CategoryOut:
     return CategoryOut(
         id=category.id,
         slug=category.slug,

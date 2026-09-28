@@ -21,6 +21,8 @@ from app.db import get_session
 from app.models.categorization import Category
 from app.models.money import StatementImport, Transaction
 from app.schemas.transactions import (
+    ConfirmIn,
+    ConfirmOutcomeOut,
     DuplicateOfOut,
     PatchOutcomeOut,
     ReviewPageOut,
@@ -271,6 +273,74 @@ async def correct_transaction(
         rule_recorded=rule_recorded,
         recategorized=recategorized,
     )
+
+
+@router.post("/transactions/confirm", response_model=ConfirmOutcomeOut)
+async def confirm_transactions(
+    body: ConfirmIn,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> ConfirmOutcomeOut:
+    """Accept many rows as extracted, all or nothing.
+
+    Every id is checked before anything is written. One that is not this
+    household's — someone else's row, or one that does not exist — fails the
+    whole request with nothing applied. Partly confirming a list and then
+    refusing the rest would leave the user unsure which of their taps landed,
+    and a list that reached another household's ids was built wrongly anyway.
+    """
+    household_id = identity.household.id
+    wanted = set(body.ids)
+
+    # Locked for the rest of the request: between this check and the write, a
+    # row must not be deleted or moved out from under the answer being given.
+    result = await session.execute(
+        select(Transaction)
+        .where(
+            Transaction.id.in_(wanted),
+            Transaction.household_id == household_id,
+        )
+        .with_for_update()
+    )
+    rows = list(result.scalars().all())
+    if len(rows) != len(wanted):
+        # Which ids failed is deliberately not said: naming them would tell a
+        # caller which guessed ids exist in somebody else's household.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail={"code": "not_found"}
+        )
+
+    waiting = [row for row in rows if row.needs_review]
+    for row in waiting:
+        _resolve(row)
+    await session.flush()
+
+    finished = []
+    for import_id in {row.statement_import_id for row in waiting} - {None}:
+        if await _finish_import(session, import_id):
+            finished.append(import_id)
+    await session.commit()
+    return ConfirmOutcomeOut(confirmed=len(waiting), imports_finished=finished)
+
+
+@router.post("/transactions/{transaction_id}/confirm", response_model=PatchOutcomeOut)
+async def confirm_transaction(
+    transaction_id: uuid.UUID,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> PatchOutcomeOut:
+    """Accept one row as extracted. Idempotent: confirming twice is fine."""
+    household_id = identity.household.id
+    row = await _owned(session, household_id, transaction_id)
+    import_id = row.statement_import_id
+    was_waiting = row.needs_review
+
+    _resolve(row)
+    await session.flush()
+
+    finished = was_waiting and await _finish_import(session, import_id)
+    await session.commit()
+    return PatchOutcomeOut(transaction=_as_out(row), import_finished=finished)
 
 
 async def _owned(

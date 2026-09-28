@@ -17,6 +17,8 @@ __all__ = [
     "TransactionPatchIn",
     "TransactionOut",
     "PatchOutcomeOut",
+    "ConfirmIn",
+    "ConfirmOutcomeOut",
 ]
 
 
@@ -116,3 +118,25 @@ class PatchOutcomeOut(BaseModel):
     # How many other rows in the queue took the new category. Said out loud
     # because rows changing that the user did not touch should never be silent.
     recategorized: int = 0
+
+
+class ConfirmIn(BaseModel):
+    """Rows the user accepts exactly as extracted.
+
+    Bulk because the common case is twenty right rows and two wrong ones, and
+    making someone tap twenty times to say "yes" is how a review queue gets
+    abandoned. Capped well above any real statement so one request cannot be
+    made to lock half a table.
+    """
+
+    ids: list[uuid.UUID] = Field(min_length=1, max_length=1_000)
+
+
+class ConfirmOutcomeOut(BaseModel):
+    # Rows that left the queue because of this request. Confirming a row that
+    # was already confirmed is not an error — the request is idempotent — but
+    # it is not counted either, so a retry reports 0 rather than repeating
+    # the first answer.
+    confirmed: int
+    # Imports whose last outstanding row this request resolved.
+    imports_finished: list[uuid.UUID] = []

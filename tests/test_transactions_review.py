@@ -617,3 +617,243 @@ class TestFinishingAnImport:
         record = await db_session.get(StatementImport, import_id)
         await db_session.refresh(record)
         assert record.confirmed_at is None
+
+
+# --- Confirming rows as they are --------------------------------------------
+
+
+async def still_waiting(db_session, *rows: Transaction) -> list[bool]:
+    for row in rows:
+        await db_session.refresh(row)
+    return [row.needs_review for row in rows]
+
+
+class TestConfirmingOne:
+    async def test_a_confirmed_row_leaves_the_queue_unchanged(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165575001")
+        row = flagged(household, account, day=4, minor=4242, description="COSTCO")
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await api_client.post(f"/transactions/{row.id}/confirm")
+
+        assert response.status_code == 200, response.text
+        await db_session.refresh(row)
+        assert row.needs_review is False
+        assert row.review_reason is None
+        # Accepted as extracted: nothing about the row itself moved.
+        assert (row.amount_minor_units, row.description) == (4242, "COSTCO")
+
+    async def test_confirming_twice_is_fine(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165575002")
+        row = flagged(household, account, day=4)
+        db_session.add(row)
+        await db_session.flush()
+
+        first = await api_client.post(f"/transactions/{row.id}/confirm")
+        second = await api_client.post(f"/transactions/{row.id}/confirm")
+
+        assert (first.status_code, second.status_code) == (200, 200)
+
+    async def test_confirming_a_suspected_duplicate_drops_the_pointer(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165575003")
+        original = flagged(household, account, day=3, needs_review=False)
+        db_session.add(original)
+        await db_session.flush()
+        suspect = flagged(
+            household,
+            account,
+            day=3,
+            minor=2000,
+            reason=ReviewReason.suspected_duplicate,
+            duplicate_of_id=original.id,
+        )
+        db_session.add(suspect)
+        await db_session.flush()
+
+        await api_client.post(f"/transactions/{suspect.id}/confirm")
+
+        await db_session.refresh(suspect)
+        assert suspect.duplicate_of_id is None
+
+    async def test_another_household_s_row_is_not_found(self, api_client, db_session):
+        theirs, their_account = await a_household(api_client, "+14165575004")
+        row = flagged(theirs, their_account, day=4)
+        db_session.add(row)
+        await db_session.flush()
+
+        await a_household(api_client, "+14165575005")
+        response = await api_client.post(f"/transactions/{row.id}/confirm")
+
+        assert response.status_code == 404
+        assert await still_waiting(db_session, row) == [True]
+
+    async def test_confirming_the_last_row_finishes_the_import(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165575006")
+        import_id = await an_import(db_session, household)
+        row = flagged(household, account, day=4)
+        row.statement_import_id = import_id
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await api_client.post(f"/transactions/{row.id}/confirm")
+
+        assert response.json()["import_finished"] is True
+
+
+class TestConfirmingMany:
+    async def test_every_row_listed_leaves_the_queue(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165575010")
+        rows = [flagged(household, account, day=d) for d in (1, 2, 3)]
+        db_session.add_all(rows)
+        await db_session.flush()
+
+        response = await api_client.post(
+            "/transactions/confirm", json={"ids": [str(r.id) for r in rows]}
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["confirmed"] == 3
+        assert await still_waiting(db_session, *rows) == [False, False, False]
+
+    async def test_a_retry_is_harmless_and_reports_nothing_new(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165575011")
+        rows = [flagged(household, account, day=d) for d in (1, 2)]
+        db_session.add_all(rows)
+        await db_session.flush()
+        ids = {"ids": [str(r.id) for r in rows]}
+
+        await api_client.post("/transactions/confirm", json=ids)
+        again = await api_client.post("/transactions/confirm", json=ids)
+
+        assert again.status_code == 200
+        assert again.json()["confirmed"] == 0
+
+    async def test_an_id_listed_twice_counts_once(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165575012")
+        row = flagged(household, account, day=1)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await api_client.post(
+            "/transactions/confirm", json={"ids": [str(row.id), str(row.id)]}
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["confirmed"] == 1
+
+    @pytest.mark.parametrize("position", ["first", "middle", "last"])
+    async def test_one_foreign_id_anywhere_confirms_nothing(
+        self, api_client, db_session, position
+    ):
+        # The acceptance criterion: partial application across households is
+        # not an acceptable outcome. Tried at each end and in the middle,
+        # because an implementation that writes as it goes fails differently
+        # depending on where the bad id sits — at the end it has already
+        # written everything before it.
+        base = {"first": "+1416557502", "middle": "+1416557503", "last": "+1416557504"}
+        theirs, their_account = await a_household(api_client, base[position] + "0")
+        foreign = flagged(theirs, their_account, day=9)
+        db_session.add(foreign)
+        await db_session.flush()
+
+        mine, my_account = await a_household(api_client, base[position] + "1")
+        own = [flagged(mine, my_account, day=d) for d in (1, 2)]
+        db_session.add_all(own)
+        await db_session.flush()
+
+        ids = [str(r.id) for r in own]
+        ids.insert({"first": 0, "middle": 1, "last": 2}[position], str(foreign.id))
+        response = await api_client.post("/transactions/confirm", json={"ids": ids})
+
+        assert response.status_code == 404
+        assert await still_waiting(db_session, *own) == [True, True]
+        assert await still_waiting(db_session, foreign) == [True]
+
+    async def test_an_id_that_exists_nowhere_confirms_nothing(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165575050")
+        row = flagged(household, account, day=1)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await api_client.post(
+            "/transactions/confirm",
+            json={"ids": [str(row.id), str(uuid.uuid4())]},
+        )
+
+        assert response.status_code == 404
+        assert await still_waiting(db_session, row) == [True]
+
+    async def test_an_empty_list_is_refused(self, api_client):
+        await a_household(api_client, "+14165575051")
+
+        response = await api_client.post("/transactions/confirm", json={"ids": []})
+
+        assert response.status_code == 422
+
+    async def test_confirming_the_rest_of_an_import_finishes_it(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165575052")
+        import_id = await an_import(db_session, household)
+        rows = [flagged(household, account, day=d) for d in (1, 2)]
+        for row in rows:
+            row.statement_import_id = import_id
+        db_session.add_all(rows)
+        await db_session.flush()
+
+        response = await api_client.post(
+            "/transactions/confirm", json={"ids": [str(r.id) for r in rows]}
+        )
+
+        assert response.json()["imports_finished"] == [str(import_id)]
+
+    async def test_an_import_with_a_row_left_is_not_finished(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165575053")
+        import_id = await an_import(db_session, household)
+        rows = [flagged(household, account, day=d) for d in (1, 2)]
+        for row in rows:
+            row.statement_import_id = import_id
+        db_session.add_all(rows)
+        await db_session.flush()
+
+        response = await api_client.post(
+            "/transactions/confirm", json={"ids": [str(rows[0].id)]}
+        )
+
+        assert response.json()["imports_finished"] == []
+
+    async def test_confirming_teaches_the_categorizer_nothing(
+        self, api_client, db_session
+    ):
+        # Accepting the categorizer's answer is not a correction of it.
+        from sqlalchemy import func, select
+
+        from app.models.categorization import CategoryCorrection
+
+        household, account = await a_household(api_client, "+14165575054")
+        row = flagged(household, account, day=1)
+        row.merchant = "Spotify"
+        db_session.add(row)
+        await db_session.flush()
+
+        await api_client.post("/transactions/confirm", json={"ids": [str(row.id)]})
+
+        count = await db_session.execute(
+            select(func.count())
+            .select_from(CategoryCorrection)
+            .where(CategoryCorrection.household_id == household)
+        )
+        assert count.scalar_one() == 0

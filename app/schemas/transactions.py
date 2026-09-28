@@ -109,3 +109,10 @@ class PatchOutcomeOut(BaseModel):
     # True when this was the last row from its import still waiting, so the
     # client can say "statement done" without asking again.
     import_finished: bool = False
+    # Whether a category change was learned as a rule for this merchant. False
+    # when the category did not change, or the row has no merchant to learn
+    # from — the row is still corrected either way.
+    rule_recorded: bool = False
+    # How many other rows in the queue took the new category. Said out loud
+    # because rows changing that the user did not touch should never be silent.
+    recategorized: int = 0

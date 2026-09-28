@@ -29,6 +29,7 @@ from app.schemas.transactions import (
     TransactionPatchIn,
 )
 from app.services.conflicts import log_conflict
+from app.services.corrections import learn
 from app.services.identity import ResolvedIdentity
 from app.services.ledger import collides_with
 from app.services.normalization import merchant as readable_merchant
@@ -210,6 +211,13 @@ async def correct_transaction(
         if clash is not None:
             _refuse_duplicate(household_id, row.id, clash.id)
 
+    # Recorded before the row changes, because the correction is precisely the
+    # difference between the two. Setting the category it already has is the
+    # user agreeing with the categorizer, which teaches nothing.
+    predicted_category_id = row.category_id
+    recategorize = (
+        body.category_id is not None and body.category_id != predicted_category_id
+    )
     if body.category_id is not None:
         await _visible_category(session, household_id, body.category_id)
         row.category_id = body.category_id
@@ -242,9 +250,27 @@ async def correct_transaction(
             raise
         _refuse_duplicate(household_id, row_id, None)
 
+    # After the row is written, so the rule learns the merchant the user just
+    # confirmed rather than the one they were correcting.
+    recategorized, rule_recorded = 0, False
+    if recategorize:
+        learned = await learn(
+            session,
+            household_id=household_id,
+            row=row,
+            predicted_category_id=predicted_category_id,
+            corrected_category_id=body.category_id,
+        )
+        recategorized, rule_recorded = learned.recategorized, learned.rule_recorded
+
     finished = await _finish_import(session, import_id)
     await session.commit()
-    return PatchOutcomeOut(transaction=_as_out(row), import_finished=finished)
+    return PatchOutcomeOut(
+        transaction=_as_out(row),
+        import_finished=finished,
+        rule_recorded=rule_recorded,
+        recategorized=recategorized,
+    )
 
 
 async def _owned(

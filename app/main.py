@@ -16,6 +16,7 @@ from app.api import (
     legal,
     me,
     statements,
+    transactions,
 )
 from app.config import get_settings
 
@@ -40,3 +41,4 @@ app.include_router(me.router)
 app.include_router(legal.router)
 app.include_router(financial_setup.router)
 app.include_router(statements.router)
+app.include_router(transactions.router)

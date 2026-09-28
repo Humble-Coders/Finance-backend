@@ -52,6 +52,7 @@ __all__ = [
     "RowValidationError",
     "save_rows",
     "NEAR_MATCH_DAYS",
+    "collides_with",
 ]
 
 log = structlog.get_logger()
@@ -274,6 +275,43 @@ async def save_rows(
         flagged=outcome.flagged,
     )
     return outcome
+
+
+async def collides_with(
+    session: AsyncSession,
+    *,
+    transaction: Transaction,
+    occurred_on: date,
+    amount_minor_units: int,
+    normalized_description: str,
+) -> Transaction | None:
+    """The row an edited transaction would become a duplicate of, or None.
+
+    Mirrors `uq_transaction_dedup` exactly — account, date, amount,
+    normalized description, occurrence — because the question being asked is
+    "would the database refuse this?", and any looser definition answers a
+    different question than the one the insert will ask.
+
+    **Deliberately not the near-match rule `save_rows` uses.** At import time a
+    same-day same-amount row with a different description is *flagged* for a
+    person to compare; refusing an edit on those grounds would block a
+    perfectly ordinary correction, because two $20 withdrawals on one afternoon
+    are two withdrawals. Flagging is advice and refusing is a wall, and only
+    the exact key earns a wall.
+
+    Excludes the row being edited, which would otherwise always match itself.
+    """
+    result = await session.execute(
+        select(Transaction).where(
+            Transaction.account_id == transaction.account_id,
+            Transaction.occurred_on == occurred_on,
+            Transaction.amount_minor_units == amount_minor_units,
+            Transaction.normalized_description == normalized_description,
+            Transaction.occurrence == transaction.occurrence,
+            Transaction.id != transaction.id,
+        )
+    )
+    return result.scalars().first()
 
 
 def may_merge_onto(existing: Transaction) -> bool:

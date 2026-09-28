@@ -42,6 +42,7 @@ from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
 from app.services.ledger import RowToSave, RowValidationError, save_rows
 from app.services.llm import LlmError, build_client, close_client
+from app.services.review import stamp_if_finished
 from app.services.statements import (
     MAX_ROWS,
     MAX_TEXT_CHARS,
@@ -478,23 +479,11 @@ async def confirm_rows(
         await _apply_categories(session, settings, household.id, outcome.saved_ids)
 
     await session.flush()
-    outstanding = await session.execute(
-        select(func.count())
-        .select_from(Transaction)
-        .where(
-            Transaction.statement_import_id == record.id,
-            Transaction.needs_review.is_(True),
-        )
-    )
-    still_to_review = int(outstanding.scalar_one())
-
-    # `confirmed_at` means "the user has finished with this import", which 3.4
-    # reads to decide when a statement is done. Stamping it while rows are
-    # still flagged would mark an import complete that nobody has looked at —
-    # so it is set only when nothing is outstanding. 3.4 sets it as the last
-    # review is resolved.
-    if still_to_review == 0:
-        record.confirmed_at = datetime.now(UTC)
+    # Shared with the review queue (3.4), which resolves the rest of these rows
+    # one at a time. Two copies of "is this import finished?" is two chances to
+    # disagree about what finished means — and it counts once, for both the
+    # stamp and the number reported back.
+    still_to_review = await stamp_if_finished(session, record)
     await session.commit()
 
     return SaveOutcomeOut(

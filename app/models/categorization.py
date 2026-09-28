@@ -65,6 +65,19 @@ class CategoryCorrection(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     """
 
     __tablename__ = "category_correction"
+    __table_args__ = (
+        # One rule per merchant per household. The service upserts on this key,
+        # but the constraint is what makes it true: two review screens open on
+        # the same merchant, or a retried request, both reach here at once and
+        # an application-level check would let the second through — leaving a
+        # prompt fed two answers for one merchant.
+        Index(
+            "uq_category_correction_household_merchant",
+            "household_id",
+            "merchant_pattern",
+            unique=True,
+        ),
+    )
 
     transaction_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
@@ -73,9 +86,7 @@ class CategoryCorrection(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     )
     # The merchant string the correction generalizes from, so it can apply to
     # future transactions rather than only the one that was fixed.
-    merchant_pattern: Mapped[str] = mapped_column(
-        String(255), nullable=False, index=True
-    )
+    merchant_pattern: Mapped[str] = mapped_column(String(255), nullable=False)
 
     predicted_category_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True),

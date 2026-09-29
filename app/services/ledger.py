@@ -52,6 +52,7 @@ __all__ = [
     "RowValidationError",
     "save_rows",
     "NEAR_MATCH_DAYS",
+    "collides_with",
 ]
 
 log = structlog.get_logger()
@@ -276,11 +277,54 @@ async def save_rows(
     return outcome
 
 
+async def collides_with(
+    session: AsyncSession,
+    *,
+    transaction: Transaction,
+    occurred_on: date,
+    amount_minor_units: int,
+    normalized_description: str,
+) -> Transaction | None:
+    """The row an edited transaction would become a duplicate of, or None.
+
+    Mirrors `uq_transaction_dedup` exactly — account, date, amount,
+    normalized description, occurrence — because the question being asked is
+    "would the database refuse this?", and any looser definition answers a
+    different question than the one the insert will ask.
+
+    **Deliberately not the near-match rule `save_rows` uses.** At import time a
+    same-day same-amount row with a different description is *flagged* for a
+    person to compare; refusing an edit on those grounds would block a
+    perfectly ordinary correction, because two $20 withdrawals on one afternoon
+    are two withdrawals. Flagging is advice and refusing is a wall, and only
+    the exact key earns a wall.
+
+    Excludes the row being edited, which would otherwise always match itself.
+    """
+    result = await session.execute(
+        select(Transaction).where(
+            Transaction.account_id == transaction.account_id,
+            Transaction.occurred_on == occurred_on,
+            Transaction.amount_minor_units == amount_minor_units,
+            Transaction.normalized_description == normalized_description,
+            Transaction.occurrence == transaction.occurrence,
+            Transaction.id != transaction.id,
+        )
+    )
+    return result.scalars().first()
+
+
 def may_merge_onto(existing: Transaction) -> bool:
     """Whether a re-import may overwrite this row's description and category.
 
     No, once the user has touched it. We improved the parse; they told us what
     the transaction actually was, and a better guess does not outrank an answer.
-    Used by 3.4, which owns the merge itself.
+
+    **Nothing calls this yet.** It was written for 3.4 to use in a merge — the
+    review queue answering "yes, same transaction" by moving the better parse
+    onto the older row — but 3.4 (#37) did not include a merge, and a suspected
+    duplicate is answered today by deleting one of the two rows. Kept because
+    the rule it states is the one a merge will need; see the follow-ups in
+    `handoffs/ticket-37.md`.
     """
     return existing.needs_review

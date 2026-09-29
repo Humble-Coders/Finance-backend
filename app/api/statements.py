@@ -39,9 +39,11 @@ from app.services.ai_consent import CONSENT_REQUIRED, current_policy, has_consen
 from app.services.capabilities import currency_for, require_feature
 from app.services.categorization import categorize
 from app.services.conflicts import log_conflict
+from app.services.corrections import apply_rules
 from app.services.identity import ResolvedIdentity
 from app.services.ledger import RowToSave, RowValidationError, save_rows
 from app.services.llm import LlmError, build_client, close_client
+from app.services.review import stamp_if_finished
 from app.services.statements import (
     MAX_ROWS,
     MAX_TEXT_CHARS,
@@ -478,23 +480,11 @@ async def confirm_rows(
         await _apply_categories(session, settings, household.id, outcome.saved_ids)
 
     await session.flush()
-    outstanding = await session.execute(
-        select(func.count())
-        .select_from(Transaction)
-        .where(
-            Transaction.statement_import_id == record.id,
-            Transaction.needs_review.is_(True),
-        )
-    )
-    still_to_review = int(outstanding.scalar_one())
-
-    # `confirmed_at` means "the user has finished with this import", which 3.4
-    # reads to decide when a statement is done. Stamping it while rows are
-    # still flagged would mark an import complete that nobody has looked at —
-    # so it is set only when nothing is outstanding. 3.4 sets it as the last
-    # review is resolved.
-    if still_to_review == 0:
-        record.confirmed_at = datetime.now(UTC)
+    # Shared with the review queue (3.4), which resolves the rest of these rows
+    # one at a time. Two copies of "is this import finished?" is two chances to
+    # disagree about what finished means — and it counts once, for both the
+    # stamp and the number reported back.
+    still_to_review = await stamp_if_finished(session, record)
     await session.commit()
 
     return SaveOutcomeOut(
@@ -541,6 +531,16 @@ async def _apply_categories(session, settings, household_id, saved_ids) -> None:
     send_to_review([row for row in all_rows if not row.merchant])
 
     rows = [row for row in all_rows if row.merchant]
+    if not rows:
+        return
+
+    # The household's own rules first, applied exactly. Before the client is
+    # built, so a rule still holds when the model is unreachable; and the rows
+    # it files are never sent to the model at all, which is both less to send
+    # and the only way a rule into the household's *own* category can work —
+    # the model may only answer with shared ones.
+    ruled = {row.id for row in await apply_rules(session, household_id, rows)}
+    rows = [row for row in rows if row.id not in ruled]
     if not rows:
         return
 

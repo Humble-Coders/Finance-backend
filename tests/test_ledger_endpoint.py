@@ -630,9 +630,48 @@ class TestWhatReachesTheModel:
             [row("89.99", "CANADIAN TIRE #123", "2026-08-04")],
         )
 
-        # The correction reached the prompt...
+        # An exact match is filed by the rule itself (3.4). It used to reach the
+        # row only by way of the prompt, which cannot work for a household's
+        # own category — the model may only answer with shared ones.
+        transaction = (await db_session.execute(select(Transaction))).scalar_one()
+        assert transaction.category_id == shopping_id
+        # ...and the model was never asked about it.
+        assert model.prompts == []
+
+    async def test_a_correction_still_guides_a_merchant_it_does_not_match_exactly(
+        self, api_client, db_session, monkeypatch
+    ):
+        """The other half of what a correction is for. "Canadian Tire Gas Bar"
+        is not the rule's merchant, so it goes to the model — and the rule
+        goes with it, as an example to generalise from."""
+        model = FakeModel(answer='["shopping"]')
+        use_model(monkeypatch, model)
+        me = await onboard(api_client, "+14165582010")
+        shopping_id = (
+            await db_session.execute(
+                select(Category.id).where(
+                    Category.slug == "shopping", Category.household_id.is_(None)
+                )
+            )
+        ).scalar_one()
+        db_session.add(
+            CategoryCorrection(
+                household_id=uuid.UUID(me["household"]["id"]),
+                merchant_pattern="canadian tire",
+                corrected_category_id=shopping_id,
+            )
+        )
+        await db_session.flush()
+        account = await an_account(api_client)
+
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [row("54.10", "CANADIAN TIRE GAS BAR", "2026-08-04")],
+        )
+
         assert "canadian tire" in model.systems[-1].lower()
-        # ...and the answer reached the row.
         transaction = (await db_session.execute(select(Transaction))).scalar_one()
         assert transaction.category_id == shopping_id
 
@@ -895,3 +934,225 @@ class TestTheImportRecord:
 
         saved = await db_session.execute(select(Transaction))
         assert saved.scalar_one().review_reason is ReviewReason.low_confidence
+
+
+class TestAHouseholdsRulesAtImport:
+    """A correction is an exact rule and is applied as one (3.4, option a).
+
+    The review of 3.4 found that a rule into a household's *own* category could
+    never apply at import: the model was shown "etsy is side_business" and then
+    refused for answering side_business, because only shared categories are
+    accepted. Every month's Etsy charge went back to review.
+    """
+
+    async def _own_category_rule(self, db_session, household_id, pattern="etsy"):
+        custom = Category(
+            household_id=uuid.UUID(household_id),
+            slug="side_business",
+            name="Side business",
+        )
+        db_session.add(custom)
+        await db_session.flush()
+        db_session.add(
+            CategoryCorrection(
+                household_id=uuid.UUID(household_id),
+                merchant_pattern=pattern,
+                corrected_category_id=custom.id,
+            )
+        )
+        await db_session.flush()
+        return custom.id
+
+    async def test_a_rule_into_the_household_s_own_category_holds(
+        self, api_client, db_session, monkeypatch
+    ):
+        model = FakeModel()
+        use_model(monkeypatch, model)
+        me = await onboard(api_client, "+14165582020")
+        side_business = await self._own_category_rule(db_session, me["household"]["id"])
+        account = await an_account(api_client)
+
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [row("42.00", "ETSY", "2026-08-05")],
+        )
+
+        transaction = (await db_session.execute(select(Transaction))).scalar_one()
+        assert transaction.category_id == side_business
+        assert transaction.needs_review is False
+        assert model.prompts == []
+
+    async def test_the_household_s_own_category_name_never_reaches_the_model(
+        self, api_client, db_session, monkeypatch
+    ):
+        # A rule into the household's own category is applied here and needs
+        # nothing from the model, so its name has no reason to leave. Checked
+        # with a different merchant, so that the model *is* called.
+        model = FakeModel()
+        use_model(monkeypatch, model)
+        me = await onboard(api_client, "+14165582021")
+        await self._own_category_rule(db_session, me["household"]["id"])
+        account = await an_account(api_client)
+
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [row("12.00", "NETFLIX.COM", "2026-08-05")],
+        )
+
+        sent = " ".join(model.systems + model.prompts).lower()
+        assert model.prompts, "the model should have been asked about Netflix"
+        assert "side_business" not in sent
+        assert "side business" not in sent
+        assert "etsy" not in sent
+
+    async def test_a_rule_holds_when_the_model_is_unreachable(
+        self, api_client, db_session, monkeypatch
+    ):
+        from app.services.llm import LlmError as _LlmError
+
+        def unconfigured(_settings):
+            raise _LlmError("LLM_API_KEY is not set")
+
+        monkeypatch.setattr(endpoint, "build_client", unconfigured)
+        me = await onboard(api_client, "+14165582022")
+        side_business = await self._own_category_rule(db_session, me["household"]["id"])
+        account = await an_account(api_client)
+
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [
+                row("42.00", "ETSY", "2026-08-05"),
+                row("12.00", "NETFLIX.COM", "2026-08-06"),
+            ],
+        )
+
+        rows = {
+            t.description: t
+            for t in (await db_session.execute(select(Transaction))).scalars().all()
+        }
+        assert rows["ETSY"].category_id == side_business
+        assert rows["ETSY"].needs_review is False
+        # The one the rule did not cover still goes to a person.
+        assert rows["NETFLIX.COM"].needs_review is True
+
+    async def test_a_rule_answers_the_category_not_a_doubtful_amount(
+        self, api_client, db_session, monkeypatch
+    ):
+        # The rule says what Etsy *is*. It says nothing about whether this line
+        # was read correctly, so a low-confidence row stays in the queue.
+        use_model(monkeypatch, FakeModel())
+        me = await onboard(api_client, "+14165582023")
+        side_business = await self._own_category_rule(db_session, me["household"]["id"])
+        account = await an_account(api_client)
+
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [row("42.00", "ETSY", "2026-08-05", confidence=40)],
+        )
+
+        transaction = (await db_session.execute(select(Transaction))).scalar_one()
+        assert transaction.category_id == side_business
+        assert transaction.needs_review is True
+        assert transaction.review_reason is ReviewReason.low_confidence
+
+    async def test_each_answer_lands_on_the_row_it_was_about(
+        self, api_client, db_session, monkeypatch
+    ):
+        # Rule-matched rows are taken out before the model is asked, and its
+        # answers are zipped back onto the rest. Zip them onto the wrong list
+        # and every other test here still passed: the Etsy row took Netflix's
+        # category, overwriting the user's own rule, and the last row was left
+        # with none — and, because the zip truncates, was not even flagged.
+        #
+        # The model answers by merchant, not by position, so the test holds
+        # whatever order the rows come back in.
+        class ByMerchant(FakeModel):
+            ANSWERS = {"Netflix.com": "entertainment", "Loblaws": "groceries"}
+
+            async def complete(self, *, system, user, max_output_tokens):
+                self.systems.append(system)
+                self.prompts.append(user)
+                return json.dumps([self.ANSWERS[name] for name, _ in json.loads(user)])
+
+        model = ByMerchant()
+        use_model(monkeypatch, model)
+        me = await onboard(api_client, "+14165582026")
+        side_business = await self._own_category_rule(db_session, me["household"]["id"])
+        account = await an_account(api_client)
+        shared = dict(
+            (
+                await db_session.execute(
+                    select(Category.slug, Category.id).where(
+                        Category.household_id.is_(None),
+                        Category.slug.in_(["entertainment", "groceries"]),
+                    )
+                )
+            ).all()
+        )
+
+        # Rule-matched rows first and in the middle, so a misaligned zip cannot
+        # hide behind them all sitting at the end.
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [
+                row("42.00", "ETSY", "2026-08-05"),
+                row("12.00", "NETFLIX.COM", "2026-08-06"),
+                row("17.50", "ETSY", "2026-08-07"),
+                row("88.10", "LOBLAWS", "2026-08-08"),
+            ],
+        )
+
+        filed = {
+            (t.description, t.amount_minor_units): t
+            for t in (await db_session.execute(select(Transaction))).scalars().all()
+        }
+        assert filed[("ETSY", 4200)].category_id == side_business
+        assert filed[("ETSY", 1750)].category_id == side_business
+        assert filed[("NETFLIX.COM", 1200)].category_id == shared["entertainment"]
+        assert filed[("LOBLAWS", 8810)].category_id == shared["groceries"]
+        assert not any(t.needs_review for t in filed.values())
+        # Only the two the rule did not cover were asked about.
+        [asked] = model.prompts
+        assert sorted(name for name, _ in json.loads(asked)) == [
+            "Loblaws",
+            "Netflix.com",
+        ]
+
+    async def test_another_household_s_rule_files_nothing_of_mine(
+        self, api_client, db_session, monkeypatch
+    ):
+        model = FakeModel()
+        use_model(monkeypatch, model)
+        theirs = await onboard(api_client, "+14165582024")
+        their_category = await self._own_category_rule(
+            db_session, theirs["household"]["id"]
+        )
+
+        me = await onboard(api_client, "+14165582025")
+        account = await an_account(api_client)
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [row("42.00", "ETSY", "2026-08-05")],
+        )
+
+        mine = (
+            await db_session.execute(
+                select(Transaction).where(
+                    Transaction.household_id == uuid.UUID(me["household"]["id"])
+                )
+            )
+        ).scalar_one()
+        assert mine.category_id != their_category
+        assert model.prompts, "without their rule, mine goes to the model"

@@ -60,7 +60,7 @@ Start the local container once:
 
 ```
 docker run -d --name finai-pg -e POSTGRES_PASSWORD=postgres -p 55432:5432 \
-  ghcr.io/pgmq/pg17-pgmq:v1.5.1
+  ghcr.io/pgmq/pg17-pgmq:v1.5.1@sha256:e6f893a793751ed30c89f5f88e95aa52b77c1a03440b7d118a996866489ac0c6
 ```
 
 Then:
@@ -255,9 +255,24 @@ confirming that exactly the named test fails, and no others. Across the ticket:
    difference between a correction working once and working at all. Fixing it
    changes merchant names everywhere, so it needs its own ticket; given the
    above, it is worth scheduling ahead of 6.2 rather than waiting for it.
-2. **For 3.7 — a suspected duplicate can lose its match.** Deleting the row a
+2. **No merge was built, though ticket 3.3 expected one here.**
+   `ledger.may_merge_onto` was written by 3.3 "for 3.4, which owns the merge
+   itself", but ticket 37 never asked for a merge and this PR does not build
+   one. The helper has no callers; its docstring now says so instead of claiming
+   3.4 uses it.
+
+   A merge would answer a suspected duplicate with "yes, same transaction":
+   move the better description from a re-import onto the older row — only if
+   the user has not touched that row yet, which is the rule `may_merge_onto`
+   states — and remove the newer one, keeping the older row and its history.
+   Without it, the user deletes one of the two rows: keeping the old one keeps
+   the worse description, and keeping the new one loses any category they had
+   set on the old one. **Needs a decision on whether it gets its own ticket,
+   and 3.7's duplicate screen should know which way it went** — today it can
+   offer only "delete this one" or "delete that one".
+3. **For 3.7 — a suspected duplicate can lose its match.** Deleting the row a
    suspect was compared against leaves the suspect in the queue as
    `suspected_duplicate` with `duplicate_of: null`. There is no better reason to
    give it, so the screen should treat that as "nothing left to compare".
-3. **The 21 local full-suite failures** are worth their own look. They make the
+4. **The 21 local full-suite failures** are worth their own look. They make the
    local full run useless as a signal.

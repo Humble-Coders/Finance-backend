@@ -319,6 +319,12 @@ def may_merge_onto(existing: Transaction) -> bool:
 
     No, once the user has touched it. We improved the parse; they told us what
     the transaction actually was, and a better guess does not outrank an answer.
-    Used by 3.4, which owns the merge itself.
+
+    **Nothing calls this yet.** It was written for 3.4 to use in a merge — the
+    review queue answering "yes, same transaction" by moving the better parse
+    onto the older row — but 3.4 (#37) did not include a merge, and a suspected
+    duplicate is answered today by deleting one of the two rows. Kept because
+    the rule it states is the one a merge will need; see the follow-ups in
+    `handoffs/ticket-37.md`.
     """
     return existing.needs_review

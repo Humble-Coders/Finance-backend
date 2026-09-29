@@ -131,7 +131,7 @@ Python 3.11+ · FastAPI · SQLAlchemy 2 (async) · Alembic · Supabase Postgres 
 
   ```
   docker run -d --name finai-pg -e POSTGRES_PASSWORD=postgres -p 55432:5432 \
-    ghcr.io/pgmq/pg17-pgmq:v1.5.1
+    ghcr.io/pgmq/pg17-pgmq:v1.5.1@sha256:e6f893a793751ed30c89f5f88e95aa52b77c1a03440b7d118a996866489ac0c6
   DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres pytest
   ```
 

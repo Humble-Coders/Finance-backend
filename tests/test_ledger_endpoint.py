@@ -1063,6 +1063,71 @@ class TestAHouseholdsRulesAtImport:
         assert transaction.needs_review is True
         assert transaction.review_reason is ReviewReason.low_confidence
 
+    async def test_each_answer_lands_on_the_row_it_was_about(
+        self, api_client, db_session, monkeypatch
+    ):
+        # Rule-matched rows are taken out before the model is asked, and its
+        # answers are zipped back onto the rest. Zip them onto the wrong list
+        # and every other test here still passed: the Etsy row took Netflix's
+        # category, overwriting the user's own rule, and the last row was left
+        # with none — and, because the zip truncates, was not even flagged.
+        #
+        # The model answers by merchant, not by position, so the test holds
+        # whatever order the rows come back in.
+        class ByMerchant(FakeModel):
+            ANSWERS = {"Netflix.com": "entertainment", "Loblaws": "groceries"}
+
+            async def complete(self, *, system, user, max_output_tokens):
+                self.systems.append(system)
+                self.prompts.append(user)
+                return json.dumps([self.ANSWERS[name] for name, _ in json.loads(user)])
+
+        model = ByMerchant()
+        use_model(monkeypatch, model)
+        me = await onboard(api_client, "+14165582026")
+        side_business = await self._own_category_rule(db_session, me["household"]["id"])
+        account = await an_account(api_client)
+        shared = dict(
+            (
+                await db_session.execute(
+                    select(Category.slug, Category.id).where(
+                        Category.household_id.is_(None),
+                        Category.slug.in_(["entertainment", "groceries"]),
+                    )
+                )
+            ).all()
+        )
+
+        # Rule-matched rows first and in the middle, so a misaligned zip cannot
+        # hide behind them all sitting at the end.
+        await save(
+            api_client,
+            await an_import(db_session, me["household"]["id"]),
+            account,
+            [
+                row("42.00", "ETSY", "2026-08-05"),
+                row("12.00", "NETFLIX.COM", "2026-08-06"),
+                row("17.50", "ETSY", "2026-08-07"),
+                row("88.10", "LOBLAWS", "2026-08-08"),
+            ],
+        )
+
+        filed = {
+            (t.description, t.amount_minor_units): t
+            for t in (await db_session.execute(select(Transaction))).scalars().all()
+        }
+        assert filed[("ETSY", 4200)].category_id == side_business
+        assert filed[("ETSY", 1750)].category_id == side_business
+        assert filed[("NETFLIX.COM", 1200)].category_id == shared["entertainment"]
+        assert filed[("LOBLAWS", 8810)].category_id == shared["groceries"]
+        assert not any(t.needs_review for t in filed.values())
+        # Only the two the rule did not cover were asked about.
+        [asked] = model.prompts
+        assert sorted(name for name, _ in json.loads(asked)) == [
+            "Loblaws",
+            "Netflix.com",
+        ]
+
     async def test_another_household_s_rule_files_nothing_of_mine(
         self, api_client, db_session, monkeypatch
     ):

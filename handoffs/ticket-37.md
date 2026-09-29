@@ -238,13 +238,23 @@ confirming that exactly the named test fails, and no others. Across the ticket:
 
 ## Follow-ups
 
-1. **Bare reference codes defeat merchant rules.** `normalization.merchant()`
-   strips codes marked `#`, `*` or `•` but keeps bare ones, so
-   `SPOTIFY P3A4B5C6` becomes `Spotify P3a4b5c6`. If a merchant's code changes
-   each month, correcting one charge will not move the next in the queue. The
-   categorizer likely still generalises from the example, but that is not
-   guaranteed. Fixing it changes merchant names everywhere, so it belongs in its
-   own ticket or in 6.2.
+1. **Bare reference codes defeat merchant rules — completely, for a household's
+   own categories.** `normalization.merchant()` strips codes marked `#`, `*` or
+   `•` but keeps bare ones, so `SPOTIFY P3A4B5C6` becomes `Spotify P3a4b5c6`, and
+   a rule matches exact merchants only. If a merchant's code changes each month,
+   correcting one charge does not file the next. What happens then depends on
+   the category the rule points at:
+
+   - **Shared category:** the rule is shown to the model as an example, so it
+     *may* still generalise to the new code. Not guaranteed.
+   - **Household category:** nothing helps. By design these rules are never
+     shown to the model, and the model could not answer with a household
+     category anyway, so the charge goes to review every month.
+
+   So for anyone using their own categories on subscriptions, this is the
+   difference between a correction working once and working at all. Fixing it
+   changes merchant names everywhere, so it needs its own ticket; given the
+   above, it is worth scheduling ahead of 6.2 rather than waiting for it.
 2. **For 3.7 — a suspected duplicate can lose its match.** Deleting the row a
    suspect was compared against leaves the suspect in the queue as
    `suspected_duplicate` with `duplicate_of: null`. There is no better reason to

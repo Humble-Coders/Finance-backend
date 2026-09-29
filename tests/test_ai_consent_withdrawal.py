@@ -8,6 +8,7 @@ Postgres, counting rows.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -20,9 +21,10 @@ from app.models.enums import (
     TransactionDirection,
     TransactionSource,
 )
-from app.models.identity import ConsentChange, ConsentEvent, User
+from app.models.identity import ConsentChange, ConsentEvent, Household, User
 from app.models.money import Transaction
 from app.models.platform import DisclaimerVersion
+from app.services.ai_consent import withdraw
 from tests.conftest import requires_db
 from tests.test_ledger_endpoint import FakeModel as CategorizingModel
 from tests.test_ledger_endpoint import use_model as use_categorizer
@@ -342,7 +344,79 @@ class TestThePolicyText:
         assert "withdraw this consent at any time" in text
         assert "you cannot import statements" in text
         assert "does not delete the transactions you have already saved" in text
-        # #38: typed-in entries are covered, and only name and amount go.
-        assert "shop name and amount are sent" in text
+        # #38: typed-in entries are covered, and only name and amount go — and
+        # only when the household's own rules did not already file the entry.
+        assert "shop name and amount may be sent" in text
+        assert "unless your own earlier corrections already cover it" in text
+        assert "amount are sent" not in text
         # Account deletion is not built, so the policy must not point at it.
         assert "delet" not in text.replace("does not delete", "")
+
+
+class TestTwoAtOnce:
+    """The lock in `ai_consent._lock`, exercised with two real connections.
+
+    Every other test here runs inside one rolled-back transaction, where two
+    requests can never overlap. This one commits real rows — to the local test
+    database only; conftest refuses any other — and removes them afterwards.
+    """
+
+    async def test_two_simultaneous_withdrawals_record_one(self):
+        from sqlalchemy import delete
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from app.db import get_engine
+
+        engine = get_engine()
+        household = Household()
+        user = User(household=household, auth_user_id=f"race-{uuid.uuid4()}")
+        async with AsyncSession(engine, expire_on_commit=False) as setup:
+            setup.add_all([household, user])
+            await setup.flush()
+            policy = (
+                await setup.execute(
+                    select(DisclaimerVersion).where(
+                        DisclaimerVersion.version == "ai-v1"
+                    )
+                )
+            ).scalar_one()
+            setup.add(ConsentEvent(user_id=user.id, disclaimer_version_id=policy.id))
+            await setup.commit()
+
+        try:
+            async with (
+                AsyncSession(engine) as first,
+                AsyncSession(engine) as second,
+            ):
+                # The first withdrawal holds the user's row, uncommitted.
+                assert await withdraw(first, user) is True
+                racing = asyncio.create_task(withdraw(second, user))
+                await asyncio.sleep(0.3)
+                # Without the lock the second would already have read "consented"
+                # and written a second withdrawal. With it, it is still waiting.
+                assert not racing.done()
+
+                await first.commit()
+                assert await racing is False
+                await second.commit()
+
+            async with AsyncSession(engine) as check:
+                withdrawals = (
+                    await check.execute(
+                        select(func.count())
+                        .select_from(ConsentChange)
+                        .where(
+                            ConsentChange.user_id == user.id,
+                            ConsentChange.action == ConsentAction.withdrawn,
+                        )
+                    )
+                ).scalar_one()
+            assert withdrawals == 1
+        finally:
+            async with AsyncSession(engine) as cleanup:
+                # CASCADE from user removes its consent rows.
+                await cleanup.execute(delete(User).where(User.id == user.id))
+                await cleanup.execute(
+                    delete(Household).where(Household.id == household.id)
+                )
+                await cleanup.commit()

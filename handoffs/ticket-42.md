@@ -24,7 +24,8 @@ Policy version `ai-v2` restores the withdrawal sentence and covers typed-in entr
 | `app/services/ai_consent.py` | `has_consented`: the latest change decides; with no changes, `consent_event` decides as before. `record_consent`: writes the consent row (no-op if it exists) and a `given` change. `withdraw`: idempotent, and records nothing if there's nothing to withdraw. Both lock the user's row, and stamp changes with `clock_timestamp()`. |
 | `app/api/legal.py`, `app/schemas/legal.py` | `DELETE` and `GET /legal/ai-processing/consent`, both answering `{consented, version}`. `POST` now goes through `record_consent`. Log lines carry only the user id. |
 | `app/config.py` | A note next to `llm_no_training_tier`: **put ai-v2 in force before turning this on.** |
-| `tests/test_ai_consent_withdrawal.py` (new) | 14 tests, all marked `integration`. |
+| `alembic/versions/85ad4e1e92a0_ai_policy_v2_draft_wording.py` (review fix) | ai-v2 said typed-in entries' shop name and amount "are sent"; now "may be sent … unless your own earlier corrections already cover it", because the household's rules file an entry first. It's a new migration rather than an edit, because 4f4b1595e986 had already run on production. The UPDATE only touches ai-v2 while it is undated **and** referenced by no consent, so it can never rewrite text someone agreed to. |
+| `tests/test_ai_consent_withdrawal.py` (new) | 15 tests, all marked `integration`. One of them (`TestTwoAtOnce`) uses two real connections and commits, then cleans up after itself. |
 | `tests/test_models.py` | `consent_change` joins `consent_event` in the "reached through the user" list, because consent belongs to a person, not a household. |
 
 ## How to test
@@ -47,7 +48,7 @@ No database, as in CI's `test` job: **253 passed**.
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres pytest -q -m integration
 ```
 
-CI's `database` job: **347 passed**, up from 333 on `main`; the 14 extra are this ticket's.
+CI's `database` job: **348 passed**, up from 333 on `main`; the 15 extra are this ticket's.
 
 The migration check is `scripts/check_migrations.sh`. It passed ("All migration checks passed") against a throwaway container on port 55433, because it needs an empty database.
 
@@ -60,6 +61,7 @@ The migration check is `scripts/check_migrations.sh`. It passed ("All migration 
 | Withdrawing twice records twice | `test_withdrawing_twice_records_one_withdrawal` |
 | A withdrawal is recorded with nothing to withdraw | `test_withdrawing_without_ever_consenting_is_a_quiet_no_op` |
 | `clock_timestamp()` dropped | 5 tests, on every one of three runs, because the order of changes would come down to a random id |
+| The user-row lock removed | `test_two_simultaneous_withdrawals_record_one` alone: a second withdrawal no longer waits and records twice |
 
 **By hand, after deploy.** With a session token:
 1. `GET /legal/ai-processing/consent` returns `{"consented": true, "version": "ai-v1"}` for someone who consented.
@@ -99,9 +101,10 @@ Also:
 
 ## Production database
 
-Both migrations were applied to production by the developer after this PR was opened (see the PR comment for the before and after revision). They are additive, and `ai-v2` goes in undated, so nothing changes for anyone until the code deploys, and nobody is asked to re-consent.
+All three migrations were applied to production by the developer while this PR was open: the first two when it was opened, and the wording fix after the review (see the PR comments for each before and after revision). They are additive, and `ai-v2` goes in undated, so nothing changes for anyone until the code deploys, and nobody is asked to re-consent.
 
 ## Open questions / follow-ups
 
 - **Date `ai-v2`** (a one-line migration) when the mobile Settings row for withdrawing ships. **This must happen before `LLM_NO_TRAINING_TIER` is turned on in production**, as the note in `app/config.py` says.
+- **Consent is per person, but a household's data can be shared.** Today every household has one member (two-member households are Phase 2, PRD §8 Q9). When they arrive, a member who withdrew can still have shared transactions sent to the AI through the other member's imports or typed entries. Settle it with the partner-privacy model; nothing here needs to change before then.
 - **The mobile Settings row** (not yet ticketed on the mobile side, as far as I can see). It reads `GET /legal/ai-processing/consent`, withdraws with `DELETE`, and reuses the existing consent screen to consent again.

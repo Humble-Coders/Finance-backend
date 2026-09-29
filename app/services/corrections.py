@@ -28,7 +28,7 @@ __all__ = ["Learned", "merchant_key", "learn"]
 
 
 def merchant_key(merchant: str | None) -> str | None:
-    """The form a merchant is matched on: lower case, single spaces.
+    r"""The form a merchant is matched on: lower case, single spaces.
 
     Normalisation, not fuzziness. "Cafe Luna" typed by one person and
     "cafe  luna" typed by the next are the same merchant, and without this they

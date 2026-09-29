@@ -21,10 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_identity
 from app.config import get_settings
-from app.core.money import from_minor_units
 from app.db import get_session
-from app.models.categorization import Category
-from app.models.enums import ReviewReason, StatementImportStatus
+from app.models.enums import StatementImportStatus
 from app.models.identity import Household
 from app.models.money import Account, StatementImport, StatementImportText, Transaction
 from app.schemas.statements import (
@@ -37,9 +35,8 @@ from app.schemas.statements import (
 )
 from app.services.ai_consent import CONSENT_REQUIRED, current_policy, has_consented
 from app.services.capabilities import currency_for, require_feature
-from app.services.categorization import categorize
 from app.services.conflicts import log_conflict
-from app.services.corrections import apply_rules
+from app.services.filing import file_rows
 from app.services.identity import ResolvedIdentity
 from app.services.ledger import RowToSave, RowValidationError, save_rows
 from app.services.llm import LlmError, build_client, close_client
@@ -477,7 +474,11 @@ async def confirm_rows(
         ) from exc
 
     if outcome.saved_ids:
-        await _apply_categories(session, settings, household.id, outcome.saved_ids)
+        # The parse endpoint already required consent to AI processing, so an
+        # import may always ask the model.
+        await file_rows(
+            session, settings, household.id, outcome.saved_ids, may_ask_model=True
+        )
 
     await session.flush()
     # Shared with the review queue (3.4), which resolves the rest of these rows
@@ -494,102 +495,6 @@ async def confirm_rows(
         flagged=outcome.flagged,
         needs_review=still_to_review,
     )
-
-
-async def _apply_categories(session, settings, household_id, saved_ids) -> None:
-    """Categorize what was just saved, on merchant and amount alone.
-
-    Runs after the rows exist so a model outage cannot cost the import: the
-    transactions are already written, and an uncategorized row simply goes to
-    review, which is where it belongs anyway.
-    """
-    result = await session.execute(
-        select(Transaction).where(Transaction.id.in_(saved_ids))
-    )
-    all_rows = list(result.scalars().all())
-
-    # A row whose description held no name — all reference numbers, say — has
-    # nothing to categorize *with*. Asking the model to file `["", "5.25"]`
-    # buys an answer that looks confident and cannot be better than a guess.
-    # It goes straight to a person instead, which is cheaper and honest.
-    def send_to_review(rows) -> None:
-        """A transaction with no category belongs in front of a person.
-
-        Every path out of this function that leaves a row uncategorized has to
-        call this. Rows are written before categorization runs precisely so a
-        model problem costs nothing — but "costs nothing" means the row still
-        reaches somebody, not that it lands silently with an empty category
-        while the review queue says all is well. M4's budgets read categories.
-        """
-        for row in rows:
-            row.needs_review = True
-            row.review_reason = row.review_reason or ReviewReason.unknown_category
-
-    # A row whose description held no name — all reference numbers, say — has
-    # nothing to categorize *with*. Asking the model to file `["", "5.25"]`
-    # buys an answer that looks confident and cannot be better than a guess.
-    send_to_review([row for row in all_rows if not row.merchant])
-
-    rows = [row for row in all_rows if row.merchant]
-    if not rows:
-        return
-
-    # The household's own rules first, applied exactly. Before the client is
-    # built, so a rule still holds when the model is unreachable; and the rows
-    # it files are never sent to the model at all, which is both less to send
-    # and the only way a rule into the household's *own* category can work —
-    # the model may only answer with shared ones.
-    ruled = {row.id for row in await apply_rules(session, household_id, rows)}
-    rows = [row for row in rows if row.id not in ruled]
-    if not rows:
-        return
-
-    try:
-        # Inside the try: `build_client` raises LlmError for a missing key,
-        # model or provider. Outside it, that misconfiguration propagates, the
-        # transaction rolls back, and the import the user just confirmed is
-        # lost to a 500 — which is the opposite of why categorization runs
-        # after the rows are written. `categorize` already degrades on its own
-        # once it has a client; this is the same promise, one step earlier.
-        client = build_client(settings)
-    except LlmError:
-        # The likely failure, not the exotic one: a misspelled LLM_PROVIDER is
-        # a deployment mistake somebody makes once. Without this, a month of
-        # imports would land with no categories and nothing in the review queue
-        # saying so — and `categorize` flags this same condition when it fails
-        # further in, so the two paths disagreed about the same event.
-        log.warning("categorization_skipped", reason="client_unavailable")
-        send_to_review(rows)
-        return
-
-    try:
-        # The entire payload: a shop name and a price. Nothing else may be
-        # added here (PRD Appendix A.3) — there is a test that asserts it.
-        suggestions = await categorize(
-            session,
-            client,
-            household_id=household_id,
-            pairs=[
-                (
-                    row.merchant or "",
-                    from_minor_units(row.amount_minor_units, row.currency),
-                )
-                for row in rows
-            ],
-        )
-    finally:
-        await close_client(client)
-
-    slugs = await session.execute(
-        select(Category.slug, Category.id).where(Category.household_id.is_(None))
-    )
-    by_slug = {slug: ident for slug, ident in slugs.all()}
-
-    for row, suggestion in zip(rows, suggestions, strict=False):
-        row.category_id = by_slug.get(suggestion.slug)
-        if not suggestion.recognised:
-            row.needs_review = True
-            row.review_reason = row.review_reason or ReviewReason.unknown_category
 
 
 @router.get("/statements/{import_id}", response_model=StatementImportOut)

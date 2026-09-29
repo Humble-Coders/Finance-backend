@@ -230,7 +230,17 @@ confirming that exactly the named test fails, and no others. Across the ticket:
   Both tests are needed: offset paging still passes the first.
 - **Isolation** — dropping the household filter from the queue, the duplicate
   lookup, PATCH, bulk confirm, delete, the category check, the category list,
-  the rule update or the categorizer's prompt query each fails its own test.
+  the rules applied at import or the categorizer's prompt query each fails its
+  own test.
+- **Isolation, with one exception to the above.** Applying a rule to rows
+  already in the queue (`corrections.learn`) filters by household *twice* — on
+  the rows it reads (`corrections.py:133`) and on the rows it updates
+  (`corrections.py:156`). Either one alone is enough, so removing **one** fails
+  nothing; removing **both** fails
+  `test_one_household_s_rule_does_not_move_another_s_rows`. The test guards the
+  pair, not each filter. An earlier version of this report said removing "the"
+  filter failed the test; that was checked against the version before round 2,
+  which had only one.
 - **Correction** — removing the upsert crashes the second correction with a
   unique violation; removing the timestamp fails the prompt-order test.
 - **Deletion** — sweeping away a suspected duplicate or a learned rule with the

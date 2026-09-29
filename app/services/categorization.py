@@ -84,7 +84,15 @@ async def _examples(session: AsyncSession, household_id: uuid.UUID) -> str:
     result = await session.execute(
         select(CategoryCorrection.merchant_pattern, Category.slug)
         .join(Category, Category.id == CategoryCorrection.corrected_category_id)
-        .where(CategoryCorrection.household_id == household_id)
+        .where(
+            CategoryCorrection.household_id == household_id,
+            # Shared categories only. A rule into the household's own category
+            # is applied exactly before the model is asked (3.4), and the model
+            # may not answer with one anyway — showing it would teach an answer
+            # it is refused for giving, and send the user's own category name
+            # to the provider for nothing.
+            Category.household_id.is_(None),
+        )
         .order_by(CategoryCorrection.updated_at.desc())
         .limit(MAX_EXAMPLES)
     )

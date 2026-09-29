@@ -301,6 +301,10 @@ async def confirm_transactions(
             Transaction.id.in_(wanted),
             Transaction.household_id == household_id,
         )
+        # In id order, so two overlapping requests take their locks in the
+        # same order. Unordered, each can hold a row the other is waiting for,
+        # and Postgres ends the stand-off by failing one of them with a 500.
+        .order_by(Transaction.id)
         .with_for_update()
     )
     rows = list(result.scalars().all())

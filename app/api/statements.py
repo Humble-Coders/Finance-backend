@@ -39,6 +39,7 @@ from app.services.ai_consent import CONSENT_REQUIRED, current_policy, has_consen
 from app.services.capabilities import currency_for, require_feature
 from app.services.categorization import categorize
 from app.services.conflicts import log_conflict
+from app.services.corrections import apply_rules
 from app.services.identity import ResolvedIdentity
 from app.services.ledger import RowToSave, RowValidationError, save_rows
 from app.services.llm import LlmError, build_client, close_client
@@ -530,6 +531,16 @@ async def _apply_categories(session, settings, household_id, saved_ids) -> None:
     send_to_review([row for row in all_rows if not row.merchant])
 
     rows = [row for row in all_rows if row.merchant]
+    if not rows:
+        return
+
+    # The household's own rules first, applied exactly. Before the client is
+    # built, so a rule still holds when the model is unreachable; and the rows
+    # it files are never sent to the model at all, which is both less to send
+    # and the only way a rule into the household's *own* category can work —
+    # the model may only answer with shared ones.
+    ruled = {row.id for row in await apply_rules(session, household_id, rows)}
+    rows = [row for row in rows if row.id not in ruled]
     if not rows:
         return
 

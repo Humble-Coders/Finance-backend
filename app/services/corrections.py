@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.categorization import CategoryCorrection
 from app.models.money import Transaction
 
-__all__ = ["Learned", "merchant_key", "learn"]
+__all__ = ["Learned", "merchant_key", "learn", "apply_rules"]
 
 
 def merchant_key(merchant: str | None) -> str | None:
@@ -160,3 +160,49 @@ async def learn(
         .execution_options(synchronize_session=False)
     )
     return Learned(rule_recorded=True, recategorized=moved.rowcount or 0)
+
+
+async def apply_rules(
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    rows: list[Transaction],
+) -> list[Transaction]:
+    """File every row this household has already taught us about.
+
+    A correction is an exact rule — this merchant is this category, for this
+    household — so it is applied as one, before any model is asked. Returns the
+    rows it categorised; only the rest need the categorizer.
+
+    This is what makes a rule into a household's *own* category work at all.
+    The model may only answer with shared categories, so an example saying
+    "etsy is side_business" taught it an answer it would be refused for giving,
+    and every month's Etsy charge went back to review. Applied here, the rule
+    holds whether or not the category is shared, and whether or not the model
+    is reachable.
+
+    Only the category is answered. A row flagged for a doubtful amount or a
+    suspected duplicate keeps that flag: the rule says what Etsy *is*, not that
+    this line was read correctly.
+    """
+    wanted = {key for row in rows if (key := merchant_key(row.merchant))}
+    if not wanted:
+        return []
+
+    result = await session.execute(
+        select(
+            CategoryCorrection.merchant_pattern,
+            CategoryCorrection.corrected_category_id,
+        ).where(
+            CategoryCorrection.household_id == household_id,
+            CategoryCorrection.merchant_pattern.in_(wanted),
+        )
+    )
+    rules = dict(result.all())
+
+    ruled = []
+    for row in rows:
+        category_id = rules.get(merchant_key(row.merchant))
+        if category_id is not None:
+            row.category_id = category_id
+            ruled.append(row)
+    return ruled

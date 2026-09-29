@@ -14,9 +14,12 @@ was never a transaction. An edit that would make a row a copy of one already
 recorded is refused with the row it would duplicate named.
 
 **The learning:** changing a row's category records one rule per merchant per
-household. It is shown to the categorizer on every later import and applied
-straight away to that household's other rows still waiting for the same
-merchant. Rows the user already confirmed are never moved.
+household. On every later import the rule is **applied exactly** — a row with
+that merchant takes that category without the model being asked — and it is
+applied straight away to that household's other rows still waiting for the same
+merchant. Rows the user already confirmed are never moved. A rule into a
+*shared* category is also shown to the model as an example, so near-variants of
+the merchant benefit; a rule into the household's own category never is.
 
 **Categories:** a household can create its own (`POST /categories`) and list
 every one it can file into (`GET /categories`). No request can create a system
@@ -118,6 +121,31 @@ open question; once the row is kept, the answer was "no".
 **Merchant rules match on lower case and single spaces, nothing looser.**
 "Cafe Luna" and "cafe  luna" are one merchant. "Spotify P3a4b5c6" and
 "Spotify Q9r8s7t6" are two — see *Follow-ups*.
+
+**Rules are applied exactly at import, before the model is asked** (review
+round 3, the manager's option (a)). Before this, a correction reached later
+imports only as an example in the prompt, and a rule into a household's own
+category could never work: the prompt said `"etsy" is side_business`, but the
+categorizer accepts only shared-category answers, so the model's
+`side_business` was thrown away and every month's Etsy charge went back to
+review — while the household's category name was still sent to the provider.
+Now a matching row is filed by the rule and never sent; the prompt shows only
+rules into shared categories; and rules still apply when the model is
+unreachable. A rule answers the category only — a row flagged for a doubtful
+amount keeps that flag. This reads PRD §4.5's "prompt-side, never training" as
+permitting an exact lookup, which trains nothing; that interpretation was the
+manager's call.
+
+This changed ticket 3.3's `test_a_household_correction_steers_the_answer`, which
+asserted the correction reached the prompt for an *exact* match. It no longer
+does, by design, so the test now asserts the rule filed the row and the model
+was not asked; a new sibling test keeps the prompt path covered for a merchant
+the rule does *not* match exactly.
+
+**Bulk confirm takes its row locks in id order**, so two overlapping requests
+cannot each hold a row the other waits for — Postgres would otherwise fail one
+with a 500. This is **not covered by a test**: a deadlock needs two concurrent
+transactions, which this suite does not simulate.
 
 **There is one definition of "the same merchant", in Python.** Review found a
 second, in SQL, used to pick which rows a rule reaches. It disagreed with the

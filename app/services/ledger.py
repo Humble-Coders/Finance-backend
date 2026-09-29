@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.money import MoneyError, to_minor_units
 from app.models.enums import ReviewReason, TransactionDirection, TransactionSource
-from app.models.money import Transaction
+from app.models.money import Account, Transaction
 from app.services.normalization import merchant as readable_merchant
 from app.services.normalization import normalized
 
@@ -53,6 +53,8 @@ __all__ = [
     "save_rows",
     "NEAR_MATCH_DAYS",
     "collides_with",
+    "ExactDuplicate",
+    "save_manual",
 ]
 
 log = structlog.get_logger()
@@ -328,3 +330,152 @@ def may_merge_onto(existing: Transaction) -> bool:
     `handoffs/ticket-37.md`.
     """
     return existing.needs_review
+
+
+# How many times a manual save re-reads the next free occurrence after losing a
+# race for it. Two people in one household tapping "keep both" on the same
+# entry in the same instant is already unlikely; three in a row is a bug.
+_OCCURRENCE_ATTEMPTS = 3
+
+
+@dataclass(frozen=True)
+class ExactDuplicate(Exception):
+    """A typed-in entry is exactly one already recorded — same account, day,
+    amount and description. `match` is the recorded one, for the person to see.
+    """
+
+    match: Transaction
+
+
+async def _same_key(
+    session: AsyncSession, account_id, occurred_on: date, minor: int, key: str
+) -> list[Transaction]:
+    """Every recorded row with this dedup key, lowest occurrence first."""
+    result = await session.execute(
+        select(Transaction)
+        .where(
+            Transaction.account_id == account_id,
+            Transaction.occurred_on == occurred_on,
+            Transaction.amount_minor_units == minor,
+            Transaction.normalized_description == key,
+        )
+        .order_by(Transaction.occurrence)
+    )
+    return list(result.scalars().all())
+
+
+async def _near_match_for_one(
+    session: AsyncSession, account_id, occurred_on: date, minor: int, key: str
+) -> Transaction | None:
+    """The import rule for a suspected duplicate, asked about one typed row.
+
+    Same account and amount, within `NEAR_MATCH_DAYS`, a *different*
+    description — the manager chose (2026-09-29) to flag manual entries by the
+    very rule imports use, so the review queue asks the same question whichever
+    way a row arrived.
+    """
+    window = timedelta(days=NEAR_MATCH_DAYS)
+    result = await session.execute(
+        select(Transaction).where(
+            Transaction.account_id == account_id,
+            Transaction.amount_minor_units == minor,
+            Transaction.occurred_on >= occurred_on - window,
+            Transaction.occurred_on <= occurred_on + window,
+        )
+    )
+    candidates: dict[tuple[date, int], list[Transaction]] = {}
+    for existing in result.scalars().all():
+        candidates.setdefault(
+            (existing.occurred_on, existing.amount_minor_units), []
+        ).append(existing)
+    return _near_match(candidates, occurred_on, minor, key)
+
+
+async def save_manual(
+    session: AsyncSession,
+    *,
+    household_id,
+    account: Account,
+    occurred_on: date,
+    amount: str,
+    direction: TransactionDirection,
+    description: str,
+    category_id=None,
+    allow_duplicate: bool = False,
+) -> Transaction:
+    """Write one transaction a person typed in (#38). Nothing is committed.
+
+    **An exact copy is refused, unless the person said it is real.** Someone
+    typing in a coffee they already imported should be told, not quietly given
+    two — so the same account, day, amount and description raises
+    `ExactDuplicate` naming the recorded row. With `allow_duplicate` the entry
+    is saved as the *next occurrence* of that key instead: two identical
+    coffees on one day are two coffees, and `occurrence` exists to say so.
+
+    The database still has the last word. The check above and the insert race
+    a second request doing the same thing, so the insert does nothing on a
+    collision and the answer is read back from what is actually there.
+
+    Raises `MoneyError` for an amount the account's currency cannot hold.
+    """
+    minor = to_minor_units(amount, account.currency)
+    key = normalized(description)
+
+    for _ in range(_OCCURRENCE_ATTEMPTS):
+        same = await _same_key(session, account.id, occurred_on, minor, key)
+        if same and not allow_duplicate:
+            raise ExactDuplicate(same[0])
+        occurrence = max((row.occurrence for row in same), default=0) + 1
+
+        existing = await _near_match_for_one(
+            session, account.id, occurred_on, minor, key
+        )
+        inserted = (
+            await session.execute(
+                pg_insert(Transaction)
+                .values(
+                    household_id=household_id,
+                    account_id=account.id,
+                    statement_import_id=None,
+                    occurred_on=occurred_on,
+                    amount_minor_units=minor,
+                    currency=account.currency,
+                    direction=direction,
+                    description=description,
+                    normalized_description=key,
+                    merchant=readable_merchant(description),
+                    occurrence=occurrence,
+                    source=TransactionSource.manual,
+                    category_id=category_id,
+                    needs_review=existing is not None,
+                    review_reason=(
+                        ReviewReason.suspected_duplicate if existing else None
+                    ),
+                    duplicate_of_id=existing.id if existing else None,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        "account_id",
+                        "occurred_on",
+                        "amount_minor_units",
+                        "normalized_description",
+                        "occurrence",
+                    ]
+                )
+                .returning(Transaction.id)
+            )
+        ).scalar_one_or_none()
+        if inserted is not None:
+            log.info(
+                "manual_transaction_saved",
+                transaction_id=str(inserted),
+                occurrence=occurrence,
+                flagged=existing is not None,
+            )
+            return await session.get(Transaction, inserted)
+
+    # Lost the race every time: somebody else keeps taking the next number.
+    same = await _same_key(session, account.id, occurred_on, minor, key)
+    if same:
+        raise ExactDuplicate(same[0])
+    raise RuntimeError("could not find a free occurrence for a manual transaction")

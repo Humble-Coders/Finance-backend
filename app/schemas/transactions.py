@@ -1,14 +1,16 @@
-"""Request and response shapes for the review queue."""
+"""Request and response shapes for transactions: the review queue, and one
+typed in by hand (#38)."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import date
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.models.enums import ReviewReason, TransactionDirection
+from app.models.enums import ReviewReason, TransactionDirection, TransactionSource
 from app.schemas.statements import amount_not_negative, date_within_living_memory
+from app.services.normalization import normalized
 
 __all__ = [
     "ReviewRowOut",
@@ -20,6 +22,7 @@ __all__ = [
     "ConfirmIn",
     "ConfirmOutcomeOut",
     "DeleteOutcomeOut",
+    "ManualTransactionIn",
 ]
 
 
@@ -122,6 +125,61 @@ class TransactionPatchIn(BaseModel):
 
 class TransactionOut(ReviewRowOut):
     needs_review: bool
+    # Where the row came from. The phone reads it to tell a typed-in entry from
+    # an imported one.
+    source: TransactionSource
+
+
+class ManualTransactionIn(BaseModel):
+    """A transaction a person typed in (#38).
+
+    The same shape the phone sends (mobile #30). Every refusal here is a 422
+    naming the field, so the form can point at the box that needs changing.
+    """
+
+    # A field this model does not know is refused rather than dropped, so a
+    # client sending `source`, `occurrence` or `needs_review` learns it cannot
+    # set them instead of believing it did.
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: uuid.UUID
+    occurred_on: date
+    # Decimal string, per the money boundary; `direction` carries the sign.
+    amount: str
+    direction: TransactionDirection
+    description: str = Field(max_length=512)
+    category_id: uuid.UUID | None = None
+    # "Yes, it's a second one" — the answer to a duplicate warning, and only
+    # ever that. Never inferred: without an explicit true, an exact copy of a
+    # recorded transaction is refused.
+    allow_duplicate: bool = False
+
+    @field_validator("amount")
+    @classmethod
+    def _not_negative(cls, value: str) -> str:
+        return amount_not_negative(value)
+
+    @field_validator("occurred_on")
+    @classmethod
+    def _within_living_memory(cls, value: date) -> date:
+        return date_within_living_memory(value)
+
+    @field_validator("description")
+    @classmethod
+    def _names_something(cls, value: str) -> str:
+        """Trimmed, and with a name in it — not only numbers and punctuation.
+
+        A description like `12345` normalizes to an empty key. That key cannot
+        be categorized (there is no merchant to send), cannot be recognised
+        next month, and would make every such entry on a day a "duplicate" of
+        every other. Asking for a name costs the person a word.
+        """
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be blank")
+        if not normalized(text):
+            raise ValueError("needs a name, like where the money went")
+        return text
 
 
 class PatchOutcomeOut(BaseModel):

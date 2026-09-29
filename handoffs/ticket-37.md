@@ -36,7 +36,7 @@ behind the code already deployed (see *Production*).
 - `app/api/transactions.py` — the queue: list, correct, confirm (single and bulk), delete.
 - `app/api/categories.py` — create and list household categories.
 - `app/services/review.py` — the keyset cursor, and the one definition of "this import is finished".
-- `app/services/corrections.py` — recording a correction as a rule and applying it to the queue.
+- `app/services/corrections.py` — recording a correction as a rule (`learn`), applying it to the queue, and applying a household's rules exactly at import (`apply_rules`).
 - `app/services/categories.py` — turning a category name into a slug.
 - `app/schemas/transactions.py`, `app/schemas/categories.py` — request and response shapes.
 - `alembic/versions/a3f91c2e77b4_one_correction_per_merchant.py` — unique index on `category_correction (household_id, merchant_pattern)`.
@@ -44,11 +44,13 @@ behind the code already deployed (see *Production*).
 
 **Changed**
 
-- `app/services/ledger.py` — adds `collides_with`, the exact dedup-key check an edit is held to.
-- `app/api/statements.py` — the confirmed-at decision moved to `review.stamp_if_finished` so both paths share it.
+- `app/services/ledger.py` — adds `collides_with`, the exact dedup-key check an edit is held to; corrects `may_merge_onto`'s docstring, which claimed 3.4 used it (see Follow-ups).
+- `app/api/statements.py` — the confirmed-at decision moved to `review.stamp_if_finished` so both paths share it; and at import, rows matching a household rule are filed by it before the model is asked, so only the rest are sent.
 - `app/schemas/statements.py` — the amount-sign and date-range rules moved to module functions so the PATCH schema shares them.
 - `app/models/categorization.py` — the model carries the new unique index.
 - `app/main.py` — registers the two routers.
+- `app/services/categorization.py` — **ticket 3.3's code.** The prompt's examples now include only rules into *shared* categories, so a household's own category name is never sent to the model. Privacy-relevant: worth reading even if nothing else of 3.3's is.
+- `tests/test_ledger_endpoint.py` — **ticket 3.3's tests.** `test_a_household_correction_steers_the_answer` rewritten for option (a); a non-exact-match prompt test added; `TestAHouseholdsRulesAtImport` added, including the test that each model answer lands on its own row.
 - `tests/conftest.py` — refuses a non-local database unless `ALLOW_REMOTE_TEST_DB=1`;
   and refuses to collect any test marked `requires_db` without `integration` (see below).
 - `CLAUDE.md` — how to run the suite against the local container.
@@ -69,7 +71,7 @@ Then:
 export DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres
 export MIGRATION_DATABASE_URL=$DATABASE_URL
 alembic upgrade head
-pytest tests/test_transactions_review.py tests/test_corrections.py tests/test_categories.py
+pytest tests/test_transactions_review.py tests/test_corrections.py tests/test_categories.py tests/test_ledger_endpoint.py
 ruff check . && ruff format --check .
 ```
 
@@ -97,7 +99,7 @@ container. Per-file runs and CI are the reliable signals locally.
 | Bulk confirm takes a list, is idempotent, and one foreign row fails the whole request | **met** | `test_one_foreign_id_anywhere_confirms_nothing` (first / middle / last), `test_a_retry_is_harmless_and_reports_nothing_new` |
 | `POST /categories` cannot create a system category however shaped, nor duplicate a slug (409, logged) | **met** | `TestNeverASystemCategory`, `test_the_same_name_twice_is_a_logged_409` |
 | An import whose last review resolves gets `confirmed_at`; one with a row outstanding does not | **met** | `TestFinishingAnImport` (PATCH), and the finished / not-finished pair for bulk confirm and for delete |
-| Corrections never cross households, in reads or prompts | **met** | `TestNeverAcrossHouseholds` — rows not moved, and `_examples()` for the other household does not contain the rule |
+| Corrections never cross households — in reads, in rules applied at import, and in prompts | **met** | `TestNeverAcrossHouseholds` (rows not moved; the other household's `_examples()` lacks the rule) and `test_another_household_s_rule_files_nothing_of_mine` (rules at import) |
 | `ruff check`, `ruff format --check`, `pytest` pass; migrations apply, reverse, re-apply; CI green | **met locally** | CI's first green run did **not** cover these tests — see below |
 
 ## Deviations & decisions

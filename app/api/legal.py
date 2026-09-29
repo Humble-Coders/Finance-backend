@@ -1,4 +1,5 @@
-"""The legal copy a user is shown, and the consent they give to it.
+"""The legal copy a user is shown, and the consent they give to it — or take
+back (#42).
 
 Two policies live here and are kept apart on purpose: the account terms, agreed
 at signup, and consent to AI processing of financial data, asked before the
@@ -8,21 +9,31 @@ unbundled — one screen covering both would be neither.
 
 from __future__ import annotations
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_identity
 from app.auth import AuthenticatedUser, current_user
 from app.db import get_session
-from app.models.identity import ConsentEvent
-from app.schemas.legal import ConsentAcceptedOut, PolicyConsentIn, TermsOut
-from app.services.ai_consent import current_policy, has_consented
+from app.schemas.legal import (
+    ConsentAcceptedOut,
+    ConsentStatusOut,
+    PolicyConsentIn,
+    TermsOut,
+)
+from app.services.ai_consent import (
+    current_policy,
+    has_consented,
+    record_consent,
+    withdraw,
+)
 from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
 from app.services.onboarding import current_terms
 
 router = APIRouter(tags=["legal"])
+log = structlog.get_logger()
 
 NO_TERMS = "no_terms"
 NO_AI_POLICY = "no_ai_policy"
@@ -100,12 +111,55 @@ async def accept_ai_policy(
             },
         )
 
-    if not await has_consented(session, identity.user, policy):
-        await session.execute(
-            pg_insert(ConsentEvent)
-            .values(user_id=identity.user.id, disclaimer_version_id=policy.id)
-            .on_conflict_do_nothing(index_elements=["user_id", "disclaimer_version_id"])
-        )
-        await session.commit()
+    # Also how consent comes back after a withdrawal — to this same version,
+    # if it is still the one in force (#42).
+    if await record_consent(session, identity.user, policy):
+        log.info("ai_consent_given", user_id=str(identity.user.id))
+    await session.commit()
 
     return ConsentAcceptedOut(version=policy.version)
+
+
+@router.get("/legal/ai-processing/consent", response_model=ConsentStatusOut)
+async def ai_consent_status(
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> ConsentStatusOut:
+    """Whether this person currently consents to the policy in force.
+
+    What the Settings row reads to offer "withdraw" or "give consent". False
+    when the policy changed since they agreed: consent to old text is not
+    consent to the new one, and the row should say so.
+    """
+    policy = await current_policy(session)
+    consented = policy is not None and await has_consented(
+        session, identity.user, policy
+    )
+    return ConsentStatusOut(
+        consented=consented, version=policy.version if policy else None
+    )
+
+
+@router.delete("/legal/ai-processing/consent", response_model=ConsentStatusOut)
+async def withdraw_ai_consent(
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> ConsentStatusOut:
+    """Withdraw consent to AI processing (#42) — PIPEDA's right, at any time.
+
+    Idempotent: withdrawing twice, or without ever having consented, answers
+    the same 200 and records nothing new. From here on `/statements/parse`
+    answers `409 consent_required`, which the app already handles by showing
+    the consent screen, and a typed-in transaction is filed by the household's
+    own rules or left for the person rather than sent to a model (#38).
+
+    What it does **not** do: delete a transaction. Those are the person's own
+    financial records; removing them is account deletion (Appendix A.5 §3).
+    The consent that was given is not deleted either — it is evidence that the
+    processing before this moment was agreed to.
+    """
+    if await withdraw(session, identity.user):
+        log.info("ai_consent_withdrawn", user_id=str(identity.user.id))
+    await session.commit()
+    policy = await current_policy(session)
+    return ConsentStatusOut(consented=False, version=policy.version if policy else None)

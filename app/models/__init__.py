@@ -9,6 +9,7 @@ from app.models.derived import ChatConversation, HealthScoreSnapshot
 from app.models.enums import (
     AccountKind,
     AuthProvider,
+    ConsentAction,
     GoalHorizon,
     PlanTier,
     PolicyKind,
@@ -19,6 +20,7 @@ from app.models.enums import (
     TransactionSource,
 )
 from app.models.identity import (
+    ConsentChange,
     ConsentEvent,
     Household,
     HouseholdRegionChange,
@@ -47,6 +49,7 @@ __all__ = [
     "UserIdentity",
     "UserPhoneChange",
     "HouseholdRegionChange",
+    "ConsentChange",
     "ConsentEvent",
     "Account",
     "Transaction",
@@ -74,6 +77,7 @@ __all__ = [
     "GoalHorizon",
     "PlanTier",
     "PolicyKind",
+    "ConsentAction",
     "RegionSource",
     "TransactionDirection",
     "TransactionSource",

@@ -27,3 +27,14 @@ class PolicyConsentIn(BaseModel):
 
 class ConsentAcceptedOut(BaseModel):
     version: str
+
+
+class ConsentStatusOut(BaseModel):
+    """Where this person stands on AI processing, for the Settings row (#42).
+
+    `version` is the policy in force — what consenting now would mean agreeing
+    to — or null when none is configured.
+    """
+
+    consented: bool
+    version: str | None

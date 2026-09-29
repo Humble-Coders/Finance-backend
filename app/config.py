@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # parse without it: a promise nobody can enforce is one we will eventually
     # break, and the free tier M3 develops against permits exactly what the
     # screen says is forbidden.
+    #
+    # **Before turning this on: put ai-v2 of the AI-processing policy in force**
+    # (seeded undated by #42). Until this is on, production sends nothing to a
+    # model at all; once it is, a transaction typed in without a category has
+    # its shop name and amount sent (#38), which ai-v1 does not mention and
+    # ai-v2 does. Consent to text that does not describe what happens is not
+    # consent.
     llm_no_training_tier: bool = False
     llm_provider: str = "gemini"
     llm_model: str = "gemini-2.0-flash"

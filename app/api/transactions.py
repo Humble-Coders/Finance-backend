@@ -238,7 +238,7 @@ async def correct_transaction(
         if body.merchant is None:
             row.merchant = readable_merchant(description)
     if body.merchant is not None:
-        row.merchant = body.merchant.strip()
+        row.merchant = body.merchant
 
     _resolve(row)
 

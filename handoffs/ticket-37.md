@@ -119,6 +119,18 @@ open question; once the row is kept, the answer was "no".
 "Cafe Luna" and "cafe  luna" are one merchant. "Spotify P3a4b5c6" and
 "Spotify Q9r8s7t6" are two — see *Follow-ups*.
 
+**There is one definition of "the same merchant", in Python.** Review found a
+second, in SQL, used to pick which rows a rule reaches. It disagreed with the
+first: Postgres `trim()` strips only spaces and its `\s` misses a non-breaking
+space, so a merchant with a leading tab or a U+00A0 was one merchant to the rule
+and another to the rows. Candidates are now read and matched with
+`merchant_key` itself, and a test puts a waiting row through every one of the
+29 characters `str.split()` treats as whitespace. A merchant typed through
+`PATCH` is stored in the same single-spaced form import writes, and a blank one
+is refused. The mismatch could not fire yet — import only writes canonical
+merchants and a typed one always resolves its row — but it would have the day
+anything else writes a merchant onto a waiting row.
+
 **Agreeing with the categorizer records nothing.** Setting a row to the category
 it already has, or confirming it, is not a correction.
 
@@ -154,7 +166,7 @@ It was caught by checking the count rather than the tick: 200 is the same number
 the database job reported before this branch existed. The files now carry the
 marker, and `conftest.py` refuses to collect any test that needs a database but
 is not `integration`, so the mistake fails loudly instead of passing silently.
-The database job should report **284 passed** — 200 plus these 84.
+The database job reported **284 passed** — 200 plus these 84.
 
 ## Production
 
@@ -168,6 +180,17 @@ container and confirming `category_correction` was empty. Production is at
 `a3f91c2e77b4`, and the columns, enum and index were checked read-only
 afterwards. **This PR's migration is therefore already live**; merging applies
 no schema change.
+
+**Until this merges, production is on a revision `main` does not have.** The live
+app is unaffected — Render runs no migrations on deploy (`render.yaml:18-19`)
+and its health check, `/healthz`, does not touch the database. But:
+
+- any `alembic` command run from `main` against production fails with "Can't
+  locate revision a3f91c2e77b4";
+- if another PR adds a migration on top of `c7e1a93b4d82` and merges first,
+  production ends up on a sibling branch and the history has two heads.
+
+**Merge this before any other PR that adds a migration.**
 
 ## What the tests actually hold up
 

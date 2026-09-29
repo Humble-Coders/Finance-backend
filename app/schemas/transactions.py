@@ -90,6 +90,23 @@ class TransactionPatchIn(BaseModel):
     def _within_living_memory(cls, value: date | None) -> date | None:
         return None if value is None else date_within_living_memory(value)
 
+    @field_validator("merchant")
+    @classmethod
+    def _one_way_to_write_a_name(cls, value: str | None) -> str | None:
+        """Single spaces, no padding — the form import already writes.
+
+        A merchant typed as "Cafe  Luna" or with a non-breaking space would
+        otherwise be stored as typed and shown that way, beside imported rows
+        that say "Cafe Luna". Case is left alone: that is the user's choice of
+        how a name reads, and matching ignores it anyway.
+        """
+        if value is None:
+            return None
+        tidy = " ".join(value.split())
+        if not tidy:
+            raise ValueError("must not be blank")
+        return tidy
+
     @model_validator(mode="after")
     def _says_something(self) -> TransactionPatchIn:
         # An empty correction would clear the review flag while changing

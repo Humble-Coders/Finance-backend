@@ -283,3 +283,75 @@ class TestTheRuleShowsUpNext:
 
         prompt = await _examples(db_session, household)
         assert prompt.index('"spotify"') < prompt.index('"netflix.com"')
+
+
+# Every character Python's str.split() treats as whitespace — which is what
+# merchant_key collapses. Recomputed here rather than listed, so a test that
+# claims "every whitespace character" cannot quietly cover fewer.
+WHITESPACE = [chr(c) for c in range(0x110000) if chr(c).isspace()]
+
+
+class TestOneDefinitionOfAMerchant:
+    async def test_a_rule_reaches_a_merchant_written_with_any_whitespace(
+        self, api_client, db_session
+    ):
+        # Import writes merchants in one canonical form today, so a waiting row
+        # holding a tab or a non-breaking space cannot happen yet. It will the
+        # moment anything else writes a merchant onto a waiting row — manual
+        # entry, a bank feed. The version of this that matched rows in SQL
+        # missed both of those characters; this is the property that it must
+        # not miss any.
+        # The claim is "every whitespace character"; hold it to the definition
+        # str.split() actually uses, so it cannot quietly cover fewer.
+        assert WHITESPACE == [
+            chr(c) for c in range(0x110000) if len(("a" + chr(c) + "b").split()) == 2
+        ]
+        household, account = await a_household(api_client, "+14165574040")
+        _, new = await two_system_categories(db_session)
+        corrected = flagged(household, account, day=1, minor=1, description="CAFE LUNA")
+        corrected.merchant = "Cafe Luna"
+        waiting = []
+        for i, space in enumerate(WHITESPACE):
+            for j, spelled in enumerate(
+                (f"Cafe{space}Luna", f"{space}Cafe Luna{space}")
+            ):
+                row = flagged(
+                    household,
+                    account,
+                    day=2,
+                    minor=100 + 2 * i + j,
+                    description=f"CAFE LUNA {i} {j}",
+                )
+                row.merchant = spelled
+                waiting.append(row)
+        db_session.add_all([corrected, *waiting])
+        await db_session.flush()
+
+        response = await patch(api_client, corrected, category_id=str(new))
+
+        assert response.json()["recategorized"] == len(waiting) == 2 * len(WHITESPACE)
+
+    async def test_a_typed_merchant_is_stored_the_way_import_writes_one(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165574041")
+        row = flagged(household, account, day=3)
+        db_session.add(row)
+        await db_session.flush()
+
+        await patch(api_client, row, merchant=" Cafe  \tLuna ")
+
+        await db_session.refresh(row)
+        assert row.merchant == "Cafe Luna"
+
+    async def test_a_blank_merchant_is_refused(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165574042")
+        row = flagged(household, account, day=3)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await patch(api_client, row, merchant="  \t ")
+
+        assert response.status_code == 422
+        await db_session.refresh(row)
+        assert row.needs_review is True

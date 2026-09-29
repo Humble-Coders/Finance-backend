@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import func, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,21 +38,17 @@ def merchant_key(merchant: str | None) -> str | None:
     Anything looser — "Spotify P3a4b5c6" matching "Spotify Q9r8s7t6" — is
     similarity rather than normalisation, and belongs to merchant search (6.2).
 
-    `lower()` rather than `casefold()` on purpose: the database compares with
-    Postgres's `lower()`, and the two differ on characters like `ß`. Matching
-    the key the database computes is worth more than matching Unicode's ideal.
+    **This is the only definition.** Rows are matched against a rule by calling
+    this on each candidate, not by a second version of it written in SQL. There
+    used to be one, and it disagreed: Postgres `trim()` strips only spaces and
+    its `\s` misses a non-breaking space, so `"\tCafe Luna"` and
+    `"Cafe\u00a0Luna"` were one merchant here and two in the database. Two
+    definitions of "the same merchant" is two chances to disagree about it.
     """
     if not merchant:
         return None
     key = " ".join(merchant.split()).lower()
     return key or None
-
-
-def _sql_merchant_key():
-    """`merchant_key`, computed by the database, so the two always agree."""
-    return func.lower(
-        func.regexp_replace(func.trim(Transaction.merchant), r"\s+", " ", "g")
-    )
 
 
 @dataclass(frozen=True)
@@ -128,14 +124,37 @@ async def learn(
     # The rows take the category and stay in the queue. The user has not looked
     # at them — a low-confidence row may still have the wrong amount — and
     # marking them reviewed would say otherwise.
-    moved = await session.execute(
-        update(Transaction)
-        .where(
+    #
+    # Candidates are read and matched with `merchant_key` itself, so the rule
+    # and the rows it reaches use one definition of "the same merchant". A
+    # household's queue is tens or hundreds of rows, so reading it is cheap.
+    candidates = await session.execute(
+        select(Transaction.id, Transaction.merchant).where(
             Transaction.household_id == household_id,
             Transaction.needs_review.is_(True),
             Transaction.id != row.id,
-            _sql_merchant_key() == pattern,
+            Transaction.merchant.is_not(None),
             Transaction.category_id.is_distinct_from(corrected_category_id),
+        )
+    )
+    matching = [
+        ident
+        for ident, merchant in candidates.all()
+        if merchant_key(merchant) == pattern
+    ]
+    if not matching:
+        return Learned(rule_recorded=True, recategorized=0)
+
+    # `needs_review` and the household are checked again in the write itself:
+    # a row confirmed by another request between the read and this update was
+    # answered by the user, and must not have its category moved from under
+    # that answer.
+    moved = await session.execute(
+        update(Transaction)
+        .where(
+            Transaction.id.in_(matching),
+            Transaction.household_id == household_id,
+            Transaction.needs_review.is_(True),
         )
         .values(category_id=corrected_category_id)
         .execution_options(synchronize_session=False)

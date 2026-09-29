@@ -99,7 +99,7 @@ Also:
 - The old-date message no longer says "statement line".
 
 ## Open questions / follow-ups
-- **The phone's review screen (when built) must expect confirm to leave a row waiting**, now asking for a category (`needs_review: true`, `review_reason: unknown_category` in the response), and offer the category picker next rather than treating confirm as the end.
+- **The phone's review screen (when built) must expect confirm to leave a row waiting**, now asking for a category (`needs_review: true`, `review_reason: unknown_category` in the response), and offer the category picker next rather than treating confirm as the end. **Done:** Humble-Coders/FinAI-Mobile-2026#32 was amended on 2026-09-29. Its confirm-all now covers only rows that have a category, and counts only those.
 
 - **A flagged manual entry looks the same as any other on the phone.** Mobile #30 shows "Transaction saved" and doesn't yet show `needs_review` / `review_reason`, so a near-match or an uncategorized entry reaches the review queue without the person being told. Worth a line on the phone's confirmation, as a small mobile follow-up.
 - **The review queue will show every manual entry from someone without AI consent** (as `unknown_category`), unless a rule covers it. That is decision 1 working as intended, but it's worth watching once people use it.

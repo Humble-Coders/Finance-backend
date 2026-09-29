@@ -18,7 +18,6 @@ from datetime import date
 import pytest
 from sqlalchemy import select
 
-from app.api import statements as endpoint
 from app.auth import AuthenticatedUser, current_user
 from app.models.categorization import Category, CategoryCorrection
 from app.models.enums import (
@@ -29,6 +28,7 @@ from app.models.enums import (
     TransactionSource,
 )
 from app.models.money import StatementImport, Transaction
+from app.services import filing
 from app.services.normalization import normalized
 from tests.conftest import requires_db
 
@@ -71,7 +71,8 @@ def authenticate_as(*, phone: str) -> None:
 
 
 def use_model(monkeypatch, model) -> None:
-    monkeypatch.setattr(endpoint, "build_client", lambda _s: model)
+    # Categorizing lives in `app.services.filing`, shared with manual entry.
+    monkeypatch.setattr(filing, "build_client", lambda _s: model)
 
 
 async def onboard(api_client, phone: str) -> dict:
@@ -895,7 +896,7 @@ class TestTheImportRecord:
         def unconfigured(_settings):
             raise _LlmError("LLM_API_KEY is not set")
 
-        monkeypatch.setattr(endpoint, "build_client", unconfigured)
+        monkeypatch.setattr(filing, "build_client", unconfigured)
         me = await onboard(api_client, "+14165572027")
         account = await an_account(api_client)
 
@@ -1017,7 +1018,7 @@ class TestAHouseholdsRulesAtImport:
         def unconfigured(_settings):
             raise _LlmError("LLM_API_KEY is not set")
 
-        monkeypatch.setattr(endpoint, "build_client", unconfigured)
+        monkeypatch.setattr(filing, "build_client", unconfigured)
         me = await onboard(api_client, "+14165582022")
         side_business = await self._own_category_rule(db_session, me["household"]["id"])
         account = await an_account(api_client)

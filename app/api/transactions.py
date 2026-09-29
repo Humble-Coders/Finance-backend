@@ -16,25 +16,30 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_identity
+from app.config import Settings, get_settings
 from app.core.money import MoneyError, from_minor_units, to_minor_units
 from app.db import get_session
 from app.models.categorization import Category
-from app.models.money import StatementImport, Transaction
+from app.models.enums import ReviewReason
+from app.models.money import Account, StatementImport, Transaction
 from app.schemas.transactions import (
     ConfirmIn,
     ConfirmOutcomeOut,
     DeleteOutcomeOut,
     DuplicateOfOut,
+    ManualTransactionIn,
     PatchOutcomeOut,
     ReviewPageOut,
     ReviewRowOut,
     TransactionOut,
     TransactionPatchIn,
 )
+from app.services.ai_consent import current_policy, has_consented
 from app.services.conflicts import log_conflict
 from app.services.corrections import learn
+from app.services.filing import file_rows
 from app.services.identity import ResolvedIdentity
-from app.services.ledger import collides_with
+from app.services.ledger import ExactDuplicate, collides_with, save_manual
 from app.services.normalization import merchant as readable_merchant
 from app.services.normalization import normalized
 from app.services.review import PAGE_SIZE, Cursor, CursorError, stamp_if_finished
@@ -42,6 +47,8 @@ from app.services.review import PAGE_SIZE, Cursor, CursorError, stamp_if_finishe
 router = APIRouter(tags=["transactions"])
 
 WOULD_DUPLICATE = "would_duplicate"
+DUPLICATE_TRANSACTION = "duplicate_transaction"
+UNKNOWN_ACCOUNT = "unknown_account"
 DEDUP_INDEX = "uq_transaction_dedup"
 
 
@@ -159,6 +166,136 @@ def _as_row(row: Transaction, duplicate: Transaction | None) -> ReviewRowOut:
             else None
         ),
     )
+
+
+@router.post(
+    "/transactions",
+    response_model=TransactionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_transaction(
+    body: ManualTransactionIn,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> TransactionOut:
+    """A transaction the person typed in (#38).
+
+    Since the vision fallback was removed (PRD §9, 2026-09-21) this is the only
+    way in when a document cannot be read, so it writes the same row an import
+    does: same normalization, same dedup key, same categorizing — differing
+    only in `source = manual` and having no import behind it.
+
+    Editing one later is `PATCH /transactions/{id}` (3.4), which already
+    corrects any row the household owns; there is deliberately no second
+    editing endpoint.
+    """
+    household_id = identity.household.id
+    account = await _owned_account(session, household_id, body.account_id)
+    if body.category_id is not None:
+        await _visible_category(session, household_id, body.category_id)
+
+    try:
+        row = await save_manual(
+            session,
+            household_id=household_id,
+            account=account,
+            occurred_on=body.occurred_on,
+            amount=body.amount,
+            direction=body.direction,
+            description=body.description,
+            category_id=body.category_id,
+            allow_duplicate=body.allow_duplicate,
+        )
+    except MoneyError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "invalid_amount", "field": "amount", "message": str(error)},
+        ) from error
+    except ExactDuplicate as duplicate:
+        match = duplicate.match
+        log_conflict(
+            DUPLICATE_TRANSACTION,
+            "manual_entry_matches_existing_transaction",
+            household_id=str(household_id),
+            transaction_id=str(match.id),
+        )
+        # Under `detail`, like every other coded error here: the phone reads
+        # `detail.code` and `detail.duplicate_of` (mobile #30), and names the
+        # match in full so it can ask "is this a second one?" without a
+        # second request.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": DUPLICATE_TRANSACTION,
+                "message": "You already have this transaction.",
+                "duplicate_of": {
+                    "id": str(match.id),
+                    "occurred_on": match.occurred_on.isoformat(),
+                    "amount": from_minor_units(
+                        match.amount_minor_units, match.currency
+                    ),
+                    "description": match.description,
+                },
+            },
+        ) from duplicate
+
+    # A category the person chose is kept exactly: only an entry without one
+    # is filed, by the same rules an import is.
+    if body.category_id is None:
+        await file_rows(
+            session,
+            get_settings(),
+            household_id,
+            [row.id],
+            may_ask_model=await _may_ask_model(session, identity, get_settings()),
+        )
+
+    await session.flush()
+    await session.commit()
+    await session.refresh(row)
+    return _as_out(row)
+
+
+async def _owned_account(
+    session: AsyncSession, household_id: uuid.UUID, account_id: uuid.UUID
+) -> Account:
+    """The household's account, or the same 404 whether it is missing or not
+    theirs — answering differently would tell a caller which ids exist."""
+    result = await session.execute(
+        select(Account).where(
+            Account.id == account_id, Account.household_id == household_id
+        )
+    )
+    account = result.scalars().first()
+    if account is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": UNKNOWN_ACCOUNT,
+                "field": "account_id",
+                "message": "No such account.",
+            },
+        )
+    return account
+
+
+async def _may_ask_model(
+    session: AsyncSession, identity: ResolvedIdentity, settings: Settings
+) -> bool:
+    """Whether a typed-in entry may be sent to the categorizing model.
+
+    The two conditions the import path enforces at `/statements/parse`, asked
+    here because nothing before this endpoint asked them: the person agreed to
+    AI processing (express and unbundled, PRD Appendix A.5), and in production
+    the provider is on a tier that does not train on inputs — the consent text
+    says so as fact. Someone trying FinAI with three typed entries may have
+    done neither, and their rows still get the household's own rules; only the
+    model is skipped, and what it would have filed goes to review instead.
+    """
+    if settings.is_production and not settings.llm_no_training_tier:
+        return False
+    policy = await current_policy(session)
+    return policy is not None and await has_consented(session, identity.user, policy)
 
 
 @router.patch("/transactions/{transaction_id}", response_model=PatchOutcomeOut)
@@ -316,8 +453,9 @@ async def confirm_transactions(
         )
 
     waiting = [row for row in rows if row.needs_review]
-    for row in waiting:
-        _resolve(row)
+    # Counted by what actually left: a row with no category stays, asking for
+    # one (see `_resolve`).
+    left = [row for row in waiting if _resolve(row)]
     await session.flush()
 
     finished = []
@@ -325,7 +463,7 @@ async def confirm_transactions(
         if await _finish_import(session, import_id):
             finished.append(import_id)
     await session.commit()
-    return ConfirmOutcomeOut(confirmed=len(waiting), imports_finished=finished)
+    return ConfirmOutcomeOut(confirmed=len(left), imports_finished=finished)
 
 
 @router.post("/transactions/{transaction_id}/confirm", response_model=PatchOutcomeOut)
@@ -432,17 +570,34 @@ async def _visible_category(
     return category
 
 
-def _resolve(row: Transaction) -> None:
-    """The row has been answered; it leaves the queue.
+def _resolve(row: Transaction) -> bool:
+    """The row has been answered; it leaves the queue — if it has a category.
 
-    `duplicate_of_id` goes with it. The pointer is evidence for an open
+    `duplicate_of_id` goes either way. The pointer is evidence for an open
     question — "is this the same as that?" — and a row kept after that question
     was asked has been answered "no". Leaving the pointer would keep asserting
     a suspicion the user has already rejected.
+
+    **A row with no category stays**, now asking for one. A row carries a
+    single reason, so one that was both a suspected duplicate and
+    uncategorized — an entry typed in without AI consent (#38), or an import
+    row the model could not reach — showed only the duplicate question.
+    Answering it used to release the row with no category, and M4's budgets
+    read categories: the silent gap `file_rows` exists to prevent, reached
+    through the back door. Confirming cannot file it either, retries included;
+    a category does (`PATCH`, where "other" exists for what fits nothing), or
+    deleting it does.
+
+    Returns whether the row left the queue.
     """
+    row.duplicate_of_id = None
+    if row.category_id is None:
+        row.needs_review = True
+        row.review_reason = ReviewReason.unknown_category
+        return False
     row.needs_review = False
     row.review_reason = None
-    row.duplicate_of_id = None
+    return True
 
 
 async def _finish_import(session: AsyncSession, import_id: uuid.UUID | None) -> bool:
@@ -479,4 +634,5 @@ def _as_out(row: Transaction) -> TransactionOut:
     return TransactionOut(
         **_as_row(row, None).model_dump(),
         needs_review=row.needs_review,
+        source=row.source,
     )

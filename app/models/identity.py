@@ -6,13 +6,13 @@ import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import ForeignKey, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.base import HouseholdScopedMixin, TimestampMixin, UUIDMixin
-from app.models.enums import AuthProvider, RegionSource
+from app.models.enums import AuthProvider, ConsentAction, PolicyKind, RegionSource
 
 if TYPE_CHECKING:
     pass
@@ -181,4 +181,49 @@ class ConsentEvent(UUIDMixin, TimestampMixin, Base):
         ForeignKey("disclaimer_version.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
+    )
+
+
+class ConsentChange(UUIDMixin, TimestampMixin, Base):
+    """A person giving or withdrawing consent to a kind of policy, in order (#42).
+
+    `consent_event` proves *which text* someone agreed to, one row per version,
+    and is never changed or deleted. It cannot say that consent was later taken
+    back — and re-consent to the same version cannot add a second row there,
+    because that table's uniqueness is what makes a double-tapped "I agree"
+    harmless. This table is the sequence: the latest row for a person and a
+    kind says where they stand now, and the rows before it say how they got
+    there.
+
+    Consent given before this table existed has no `given` row here; with no
+    row at all, `consent_event` alone decides, exactly as it did before.
+
+    Deleted with the user (CASCADE), like `consent_event`, so account deletion
+    (Appendix A.5 §3) removes it.
+    """
+
+    __tablename__ = "consent_change"
+    __table_args__ = (
+        # "This person's latest change for this kind" — the one read every gate
+        # makes. Leads with user_id so it serves per-user lookups too.
+        Index("ix_consent_change_user_kind_created", "user_id", "kind", "created_at"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[PolicyKind] = mapped_column(
+        SAEnum(PolicyKind, name="policy_kind"), nullable=False
+    )
+    action: Mapped[ConsentAction] = mapped_column(
+        SAEnum(ConsentAction, name="consent_action"), nullable=False
+    )
+    # The version agreed to, for a `given`. Empty for a `withdrawn`: withdrawal
+    # is of the processing, whichever version it had been given under.
+    disclaimer_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("disclaimer_version.id", ondelete="RESTRICT"),
+        nullable=True,
     )

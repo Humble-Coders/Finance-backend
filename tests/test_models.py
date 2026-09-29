@@ -30,12 +30,14 @@ NO_HOUSEHOLD = {
 #   user_identity      -> user      budget_line -> budget
 #   user_phone_change  -> user
 #   consent_event      -> user
+#   consent_change     -> user     (consent is a person's, not a household's)
 #   category           -> nullable, because system rows are shared by everyone
 HOUSEHOLD_VIA_PARENT = {
     "user_identity",
     "budget_line",
     "user_phone_change",
     "consent_event",
+    "consent_change",
 }
 HOUSEHOLD_NULLABLE = {"category"}
 

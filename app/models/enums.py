@@ -137,3 +137,16 @@ class PolicyKind(enum.Enum):
     # Bundling it with the account terms would make it not-express, which is the
     # one thing the requirement is about.
     ai_processing = "ai_processing"
+
+
+class ConsentAction(enum.Enum):
+    """One change to a person's consent, as `consent_change` records it (#42).
+
+    PIPEDA, Quebec Law 25 and GDPR Art. 7(3) all give the right to withdraw
+    consent at any time. Withdrawal is written down as an event rather than by
+    removing the consent it withdraws, so "given, then withdrawn, then given
+    again" stays provable after the fact.
+    """
+
+    given = "given"
+    withdrawn = "withdrawn"

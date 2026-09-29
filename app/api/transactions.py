@@ -20,6 +20,7 @@ from app.config import Settings, get_settings
 from app.core.money import MoneyError, from_minor_units, to_minor_units
 from app.db import get_session
 from app.models.categorization import Category
+from app.models.enums import ReviewReason
 from app.models.money import Account, StatementImport, Transaction
 from app.schemas.transactions import (
     ConfirmIn,
@@ -452,8 +453,9 @@ async def confirm_transactions(
         )
 
     waiting = [row for row in rows if row.needs_review]
-    for row in waiting:
-        _resolve(row)
+    # Counted by what actually left: a row with no category stays, asking for
+    # one (see `_resolve`).
+    left = [row for row in waiting if _resolve(row)]
     await session.flush()
 
     finished = []
@@ -461,7 +463,7 @@ async def confirm_transactions(
         if await _finish_import(session, import_id):
             finished.append(import_id)
     await session.commit()
-    return ConfirmOutcomeOut(confirmed=len(waiting), imports_finished=finished)
+    return ConfirmOutcomeOut(confirmed=len(left), imports_finished=finished)
 
 
 @router.post("/transactions/{transaction_id}/confirm", response_model=PatchOutcomeOut)
@@ -568,17 +570,34 @@ async def _visible_category(
     return category
 
 
-def _resolve(row: Transaction) -> None:
-    """The row has been answered; it leaves the queue.
+def _resolve(row: Transaction) -> bool:
+    """The row has been answered; it leaves the queue — if it has a category.
 
-    `duplicate_of_id` goes with it. The pointer is evidence for an open
+    `duplicate_of_id` goes either way. The pointer is evidence for an open
     question — "is this the same as that?" — and a row kept after that question
     was asked has been answered "no". Leaving the pointer would keep asserting
     a suspicion the user has already rejected.
+
+    **A row with no category stays**, now asking for one. A row carries a
+    single reason, so one that was both a suspected duplicate and
+    uncategorized — an entry typed in without AI consent (#38), or an import
+    row the model could not reach — showed only the duplicate question.
+    Answering it used to release the row with no category, and M4's budgets
+    read categories: the silent gap `file_rows` exists to prevent, reached
+    through the back door. Confirming cannot file it either, retries included;
+    a category does (`PATCH`, where "other" exists for what fits nothing), or
+    deleting it does.
+
+    Returns whether the row left the queue.
     """
+    row.duplicate_of_id = None
+    if row.category_id is None:
+        row.needs_review = True
+        row.review_reason = ReviewReason.unknown_category
+        return False
     row.needs_review = False
     row.review_reason = None
-    row.duplicate_of_id = None
+    return True
 
 
 async def _finish_import(session: AsyncSession, import_id: uuid.UUID | None) -> bool:

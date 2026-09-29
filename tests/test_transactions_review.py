@@ -62,6 +62,7 @@ def flagged(
     reason: ReviewReason | None = ReviewReason.low_confidence,
     description: str = "SPOTIFY",
     duplicate_of_id: uuid.UUID | None = None,
+    category_id: uuid.UUID | None = None,
 ) -> Transaction:
     return Transaction(
         household_id=household_id,
@@ -76,6 +77,7 @@ def flagged(
         needs_review=needs_review,
         review_reason=reason if needs_review else None,
         duplicate_of_id=duplicate_of_id,
+        category_id=category_id,
     )
 
 
@@ -329,7 +331,13 @@ async def patch(api_client, row: Transaction, **fields):
 class TestCorrectingARow:
     async def test_an_answered_row_leaves_the_queue(self, api_client, db_session):
         household, account = await a_household(api_client, "+14165573030")
-        row = flagged(household, account, day=4, reason=ReviewReason.low_confidence)
+        row = flagged(
+            household,
+            account,
+            day=4,
+            reason=ReviewReason.low_confidence,
+            category_id=await a_system_category(db_session),
+        )
         db_session.add(row)
         await db_session.flush()
 
@@ -592,7 +600,9 @@ class TestFinishingAnImport:
 
         household, account = await a_household(api_client, "+14165573080")
         import_id = await an_import(db_session, household)
-        row = flagged(household, account, day=2)
+        row = flagged(
+            household, account, day=2, category_id=await a_system_category(db_session)
+        )
         row.statement_import_id = import_id
         db_session.add(row)
         await db_session.flush()
@@ -640,7 +650,14 @@ class TestConfirmingOne:
         self, api_client, db_session
     ):
         household, account = await a_household(api_client, "+14165575001")
-        row = flagged(household, account, day=4, minor=4242, description="COSTCO")
+        row = flagged(
+            household,
+            account,
+            day=4,
+            minor=4242,
+            description="COSTCO",
+            category_id=await a_system_category(db_session),
+        )
         db_session.add(row)
         await db_session.flush()
 
@@ -704,7 +721,9 @@ class TestConfirmingOne:
     ):
         household, account = await a_household(api_client, "+14165575006")
         import_id = await an_import(db_session, household)
-        row = flagged(household, account, day=4)
+        row = flagged(
+            household, account, day=4, category_id=await a_system_category(db_session)
+        )
         row.statement_import_id = import_id
         db_session.add(row)
         await db_session.flush()
@@ -717,7 +736,10 @@ class TestConfirmingOne:
 class TestConfirmingMany:
     async def test_every_row_listed_leaves_the_queue(self, api_client, db_session):
         household, account = await a_household(api_client, "+14165575010")
-        rows = [flagged(household, account, day=d) for d in (1, 2, 3)]
+        category = await a_system_category(db_session)
+        rows = [
+            flagged(household, account, day=d, category_id=category) for d in (1, 2, 3)
+        ]
         db_session.add_all(rows)
         await db_session.flush()
 
@@ -746,7 +768,9 @@ class TestConfirmingMany:
 
     async def test_an_id_listed_twice_counts_once(self, api_client, db_session):
         household, account = await a_household(api_client, "+14165575012")
-        row = flagged(household, account, day=1)
+        row = flagged(
+            household, account, day=1, category_id=await a_system_category(db_session)
+        )
         db_session.add(row)
         await db_session.flush()
 
@@ -813,7 +837,10 @@ class TestConfirmingMany:
     ):
         household, account = await a_household(api_client, "+14165575052")
         import_id = await an_import(db_session, household)
-        rows = [flagged(household, account, day=d) for d in (1, 2)]
+        category = await a_system_category(db_session)
+        rows = [
+            flagged(household, account, day=d, category_id=category) for d in (1, 2)
+        ]
         for row in rows:
             row.statement_import_id = import_id
         db_session.add_all(rows)
@@ -1017,3 +1044,85 @@ class TestDeletingReachesNoFurtherThanTheRow:
         await db_session.refresh(rule)
         assert rule.merchant_pattern == "spotify"
         assert rule.transaction_id is None
+
+
+class TestAnUncategorizedRowStaysUntilFiled:
+    """Answering a row's other question never releases it without a category.
+
+    A row carries one reason, so an uncategorized suspected duplicate asked
+    only "is this the same as that?" — and answering it used to let the row go
+    with no category, which M4's budgets would then silently miss (#38 review).
+    """
+
+    async def test_confirming_a_suspected_duplicate_asks_for_a_category_next(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165576101")
+        original = flagged(household, account, day=5, needs_review=False)
+        db_session.add(original)
+        await db_session.flush()
+        row = flagged(
+            household,
+            account,
+            day=5,
+            description="SPOTIFY USA",
+            reason=ReviewReason.suspected_duplicate,
+            duplicate_of_id=original.id,
+        )
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await api_client.post(f"/transactions/{row.id}/confirm")
+
+        assert response.status_code == 200, response.text
+        body = response.json()["transaction"]
+        # The duplicate question is answered — "no" — so the pointer goes…
+        assert body["duplicate_of"] is None
+        # …but the row stays, now asking the question it was hiding.
+        assert body["needs_review"] is True
+        assert body["review_reason"] == "unknown_category"
+        await db_session.refresh(row)
+        assert (row.needs_review, row.duplicate_of_id) == (True, None)
+
+    async def test_confirming_again_does_not_release_it_either(
+        self, api_client, db_session
+    ):
+        # A retried confirm is not a person choosing "no category".
+        household, account = await a_household(api_client, "+14165576102")
+        row = flagged(household, account, day=6, reason=ReviewReason.unknown_category)
+        db_session.add(row)
+        await db_session.flush()
+        ids = {"ids": [str(row.id)]}
+
+        first = await api_client.post("/transactions/confirm", json=ids)
+        again = await api_client.post("/transactions/confirm", json=ids)
+
+        assert (first.json()["confirmed"], again.json()["confirmed"]) == (0, 0)
+        assert await still_waiting(db_session, row) == [True]
+
+    async def test_an_import_is_not_finished_while_one_waits_for_a_category(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165576103")
+        import_id = await an_import(db_session, household)
+        row = flagged(household, account, day=7)
+        row.statement_import_id = import_id
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await api_client.post(f"/transactions/{row.id}/confirm")
+
+        assert response.json()["import_finished"] is False
+
+    async def test_filing_it_is_what_lets_it_go(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165576104")
+        row = flagged(household, account, day=8, reason=ReviewReason.unknown_category)
+        db_session.add(row)
+        await db_session.flush()
+
+        response = await patch(
+            api_client, row, category_id=str(await a_system_category(db_session))
+        )
+
+        assert response.json()["transaction"]["needs_review"] is False
+        assert await still_waiting(db_session, row) == [False]

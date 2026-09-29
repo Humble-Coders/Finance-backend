@@ -130,6 +130,11 @@ class TransactionOut(ReviewRowOut):
     source: TransactionSource
 
 
+# The `transaction.normalized_description` column is 512 wide, and the key is
+# never longer than the text it came from.
+DESCRIPTION_MAX = 512
+
+
 class ManualTransactionIn(BaseModel):
     """A transaction a person typed in (#38).
 
@@ -147,7 +152,10 @@ class ManualTransactionIn(BaseModel):
     # Decimal string, per the money boundary; `direction` carries the sign.
     amount: str
     direction: TransactionDirection
-    description: str = Field(max_length=512)
+    # 512 is checked after trimming, in the validator below: counted here it
+    # would refuse a valid description for its surrounding spaces. This outer
+    # bound only stops an absurd body from being normalized at all.
+    description: str = Field(max_length=4 * DESCRIPTION_MAX)
     category_id: uuid.UUID | None = None
     # "Yes, it's a second one" — the answer to a duplicate warning, and only
     # ever that. Never inferred: without an explicit true, an exact copy of a
@@ -177,6 +185,8 @@ class ManualTransactionIn(BaseModel):
         text = value.strip()
         if not text:
             raise ValueError("must not be blank")
+        if len(text) > DESCRIPTION_MAX:
+            raise ValueError(f"must be at most {DESCRIPTION_MAX} characters")
         if not normalized(text):
             raise ValueError("needs a name, like where the money went")
         return text

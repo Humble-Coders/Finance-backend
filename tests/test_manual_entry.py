@@ -426,6 +426,40 @@ class TestRefusals:
         assert field in named
         assert await count(db_session, account) == 0
 
+    async def test_the_length_limit_counts_the_trimmed_text(
+        self, api_client, db_session, monkeypatch
+    ):
+        use_model(monkeypatch, FakeModel())
+        _, account = await a_household(api_client, "+14165590034")
+        text = "Tim Hortons " * 42 + "Oakville"
+        assert len(text) == 512
+
+        exactly = await add(api_client, entry(account, description=f"  {text}   "))
+        over = await add(
+            api_client,
+            entry(account, description=f"  {text}x  ", amount="6.25"),
+        )
+
+        # Spaces around a valid description do not count against it…
+        assert exactly.status_code == 201, exactly.text
+        assert exactly.json()["description"] == text
+        # …and the limit still holds for the text itself.
+        assert over.status_code == 422
+        assert over.json()["detail"][0]["loc"][-1] == "description"
+
+    async def test_a_date_decades_back_is_refused_without_mentioning_statements(
+        self, api_client, monkeypatch
+    ):
+        use_model(monkeypatch, FakeModel())
+        _, account = await a_household(api_client, "+14165590035")
+
+        response = await add(api_client, entry(account, occurred_on="1990-01-01"))
+
+        assert response.status_code == 422
+        (error,) = response.json()["detail"]
+        assert error["loc"][-1] == "occurred_on"
+        assert "statement" not in error["msg"]
+
     async def test_a_day_ahead_is_tolerated_for_timezones(
         self, api_client, monkeypatch
     ):
@@ -456,6 +490,32 @@ class TestRefusals:
         # Identical, so the answer says nothing about which ids exist.
         assert missing.json() == not_mine.json()
         assert await count(db_session, theirs) == 0
+
+
+class TestTheReviewQueue:
+    async def test_an_uncategorized_near_match_still_asks_for_a_category(
+        self, api_client, monkeypatch
+    ):
+        # The case the #38 review found: no AI consent, so no category, and a
+        # same-day same-amount row, so flagged as a suspected duplicate. The
+        # review screen shows the duplicate question; answering it must not
+        # release the row with no category.
+        use_model(monkeypatch, FakeModel())
+        _, account = await a_household(api_client, "+14165590050")
+        await add(api_client, entry(account))
+        made = (await add(api_client, entry(account, description="Starbucks"))).json()
+        assert (made["category_id"], made["review_reason"]) == (
+            None,
+            "suspected_duplicate",
+        )
+
+        confirmed = await api_client.post(f"/transactions/{made['id']}/confirm")
+
+        row = confirmed.json()["transaction"]
+        assert row["needs_review"] is True
+        assert row["review_reason"] == "unknown_category"
+        queue = (await api_client.get("/transactions/review")).json()["rows"]
+        assert made["id"] in {r["id"] for r in queue}
 
 
 class TestEditing:

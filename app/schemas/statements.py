@@ -130,7 +130,9 @@ def date_within_living_memory(value: date) -> date:
     if value > today + timedelta(days=1):
         raise ValueError("cannot be in the future")
     if value < today - timedelta(days=OLDEST_IMPORTABLE_DAYS):
-        raise ValueError("is too far in the past to be a statement line")
+        # Shared by imports, corrections and typed-in entries (#38), so it names
+        # no one of them.
+        raise ValueError("is too far in the past")
     return value
 
 

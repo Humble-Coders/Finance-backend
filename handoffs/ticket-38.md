@@ -24,8 +24,11 @@ Editing reuses #37's `PATCH`. There is no migration: `source = manual`, `occurre
 | `app/api/statements.py` | Calls `file_rows(..., may_ask_model=True)` and loses the moved code. No behaviour change. |
 | `app/services/ledger.py` | `save_manual`: converts the amount with `to_minor_units` (in the account's currency), computes `normalized()`, and refuses an exact copy by raising `ExactDuplicate`. `allow_duplicate` takes the highest occurrence + 1, and the insert uses `ON CONFLICT DO NOTHING` then re-reads if it loses a race (3 attempts). The near-match rule is `_near_match` from import. |
 | `app/api/transactions.py` | `POST /transactions` (201, `TransactionOut`). `_owned_account` gives the same 404 `unknown_account` (with `field: account_id`) for a missing account and another household's. `_may_ask_model` checks consent and the no-training tier. The 409 calls `log_conflict` first. `TransactionOut` now also carries `source`. |
-| `app/schemas/transactions.py` | `ManualTransactionIn` (`extra="forbid"`). It reuses `amount_not_negative` and `date_within_living_memory`. The description is trimmed, 1–512 characters, and must contain a name (it can't normalize to an empty key). `TransactionOut.source`. |
-| `tests/test_manual_entry.py` (new) | 21 test functions, 32 cases with the parametrized ones. All are marked `integration`, so CI's database job runs them. |
+| `app/schemas/transactions.py` | `ManualTransactionIn` (`extra="forbid"`). It reuses `amount_not_negative` and `date_within_living_memory`. The description is trimmed, then must be 1–512 characters (counted after trimming) and contain a name (it can't normalize to an empty key). `TransactionOut.source`. |
+| `tests/test_manual_entry.py` (new) | 24 test functions, 35 cases with the parametrized ones. All are marked `integration`, so CI's database job runs them. |
+| `app/api/transactions.py` `_resolve` (review fix) | **A row with no category no longer leaves the review queue.** Confirming it, or PATCHing it without a category, drops the duplicate pointer and switches its reason to `unknown_category`; only a category (PATCH) or deleting it lets it go. The bulk confirm counts only rows that actually left. |
+| `app/schemas/statements.py` | The old-date refusal says "is too far in the past"; it no longer says "statement line", because typed entries use it too. |
+| `tests/test_transactions_review.py` | Seven #37 tests about leaving the queue now give their rows a category, since an uncategorized row can't leave any more. New `TestAnUncategorizedRowStaysUntilFiled` (4 tests) covers the rule. |
 | `tests/test_ledger_endpoint.py` | `use_model` and two "model unavailable" tests now patch `app.services.filing.build_client`, the function's new home. |
 
 ## How to test
@@ -42,13 +45,13 @@ ruff check . && ruff format --check .
 pytest -q
 ```
 
-That last one is CI's `test` job, with no database: **251 passed**, 326 skipped.
+That last one is CI's `test` job, with no database: **251 passed**, 333 skipped.
 
 ```bash
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres pytest -q -m integration
 ```
 
-That is CI's `database` job: **326 passed**. `main` has 294, and the 32 extra are this ticket's cases.
+That is CI's `database` job: **333 passed**. `main` has 294; the 39 extra are this ticket's 35 cases plus the 4 review-queue tests.
 
 **Don't run everything in one go with `DATABASE_URL` set.** That mixes the fast and database tests in one process, and locally 74 of them fail with asyncpg "attached to a different loop". The same 74 fail on untouched `main` (checked by stashing this branch). CI never runs them that way.
 
@@ -57,6 +60,7 @@ That is CI's `database` job: **326 passed**. `main` has 294, and the 32 extra ar
 - Always let the AI be asked → `test_without_consent_the_model_is_never_asked`, `test_production_without_the_no_training_tier_never_asks_the_model`, and the review-queue test.
 - Drop the near-match flag → `test_same_day_and_amount_with_another_name_is_flagged_not_refused`. This test first survived the break; it now picks a category, so the flag is the only thing that can put the row in review.
 - Accept an empty key → the two "no name" 422 cases.
+- Let an uncategorized row leave the queue again → the 4 `TestAnUncategorizedRowStaysUntilFiled` tests and `test_an_uncategorized_near_match_still_asks_for_a_category`.
 - Remove the 409's `log_conflict` → `test_an_exact_copy_is_refused_naming_the_match`.
 
 **By hand, once deployed.** Use mobile #30 (PR Humble-Coders/FinAI-Mobile-2026#37), handoff step 9:
@@ -89,7 +93,13 @@ Also:
 - **Grouping separators are refused** (`"1,234.56"` → 422 on `amount`). The money boundary doesn't guess; the phone already sends the normalized form.
 - **`TransactionOut` gains `source`.** It's additive; the review screen can ignore it.
 
+**From the manager review (PR #48):**
+- **A row with no category never leaves the review queue without one.** This applies to every row, not only manual ones. A row carries a single reason, so a manual entry that was both uncategorized (no AI consent) and a near match showed only the duplicate question. Confirming it then released the row with no category, and M4's budgets would silently miss it. Import had the same gap when the AI was unreachable. Now confirming (a retry included) or PATCHing without a category leaves the row waiting, as `unknown_category`. **This changes #37's confirm:** an `unknown_category` row can no longer be "accepted as is"; the person picks a category (`other` exists for what fits nothing) or deletes the row.
+- The 512-character description limit is counted after trimming. The raw field is capped at 2048, only to bound the work.
+- The old-date message no longer says "statement line".
+
 ## Open questions / follow-ups
+- **The phone's review screen (when built) must expect confirm to leave a row waiting**, now asking for a category (`needs_review: true`, `review_reason: unknown_category` in the response), and offer the category picker next rather than treating confirm as the end.
 
 - **A flagged manual entry looks the same as any other on the phone.** Mobile #30 shows "Transaction saved" and doesn't yet show `needs_review` / `review_reason`, so a near-match or an uncategorized entry reaches the review queue without the person being told. Worth a line on the phone's confirmation, as a small mobile follow-up.
 - **The review queue will show every manual entry from someone without AI consent** (as `unknown_category`), unless a rule covers it. That is decision 1 working as intended, but it's worth watching once people use it.

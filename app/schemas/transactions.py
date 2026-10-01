@@ -51,6 +51,12 @@ class ReviewRowOut(BaseModel):
     description: str | None = None
     merchant: str | None = None
     category_id: uuid.UUID | None = None
+    # Whether this row is still asking for a person. Always true in the review
+    # queue, which is why it was not here before; `GET /transactions` returns
+    # both kinds in one page, and a client that had to infer this from
+    # `review_reason` being null would be guessing — a row can be settled and
+    # still carry the reason it once needed looking at.
+    needs_review: bool = False
     # Why this row is here. Each reason wants a different affordance, and
     # without it the queue is one undifferentiated list in which the user
     # re-reads rows that were never in doubt.

@@ -1126,3 +1126,130 @@ class TestAnUncategorizedRowStaysUntilFiled:
 
         assert response.json()["transaction"]["needs_review"] is False
         assert await still_waiting(db_session, row) == [False]
+
+
+class TestListingEverythingNotJustTheQueue:
+    """`GET /transactions`, which exists so a person can see what the model
+    filed with confidence. Until it did, a row the model was sure about was
+    saved and shown to nobody."""
+
+    async def test_it_returns_settled_rows_as_well_as_flagged_ones(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573801")
+        db_session.add_all(
+            [
+                flagged(household, account, day=1),
+                flagged(household, account, day=2, needs_review=False),
+                flagged(household, account, day=3, needs_review=False),
+            ]
+        )
+        await db_session.commit()
+
+        everything = (await api_client.get("/transactions")).json()["rows"]
+        queue = (await api_client.get("/transactions/review")).json()["rows"]
+
+        assert len(everything) == 3
+        assert len(queue) == 1, "the queue itself must not have changed"
+
+    async def test_each_row_says_which_kind_it_is(self, api_client, db_session):
+        """Without this the client has to infer it from `review_reason` being
+        null, which is a guess: a settled row can still carry the reason it
+        once needed looking at."""
+        household, account = await a_household(api_client, "+14165573802")
+        db_session.add_all(
+            [
+                flagged(household, account, day=1),
+                flagged(household, account, day=2, needs_review=False),
+            ]
+        )
+        await db_session.commit()
+
+        rows = (await api_client.get("/transactions")).json()["rows"]
+
+        assert sorted(row["needs_review"] for row in rows) == [False, True]
+
+    async def test_needs_review_false_selects_only_the_settled(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573803")
+        db_session.add_all(
+            [
+                flagged(household, account, day=1),
+                flagged(household, account, day=2, needs_review=False),
+            ]
+        )
+        await db_session.commit()
+
+        rows = (
+            await api_client.get("/transactions", params={"needs_review": "false"})
+        ).json()["rows"]
+
+        assert [row["needs_review"] for row in rows] == [False]
+
+    async def test_an_import_id_scopes_the_page_to_that_import(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573804")
+        from app.models.money import StatementImport
+
+        wanted = StatementImport(household_id=household, source_kind="pdf_text")
+        other = StatementImport(household_id=household, source_kind="pdf_text")
+        db_session.add_all([wanted, other])
+        await db_session.flush()
+
+        mine = flagged(household, account, day=1, needs_review=False)
+        mine.statement_import_id = wanted.id
+        theirs = flagged(household, account, day=2, needs_review=False)
+        theirs.statement_import_id = other.id
+        typed_in = flagged(household, account, day=3, needs_review=False)
+        db_session.add_all([mine, theirs, typed_in])
+        await db_session.commit()
+
+        rows = (
+            await api_client.get(
+                "/transactions", params={"statement_import_id": str(wanted.id)}
+            )
+        ).json()["rows"]
+
+        assert [row["id"] for row in rows] == [str(mine.id)]
+
+    async def test_another_household_s_import_returns_nothing_not_a_404(
+        self, api_client, db_session
+    ):
+        """An empty page, not a 404. A 404 that differs from an empty page
+        tells the caller whether an import id exists, which is a membership
+        oracle for ids they do not own."""
+        from app.models.money import StatementImport
+
+        stranger, stranger_account = await a_household(api_client, "+14165573805")
+        theirs = StatementImport(household_id=stranger, source_kind="pdf_text")
+        db_session.add(theirs)
+        await db_session.flush()
+        row = flagged(stranger, stranger_account, day=1, needs_review=False)
+        row.statement_import_id = theirs.id
+        db_session.add(row)
+        await db_session.commit()
+
+        await a_household(api_client, "+14165573806")
+        response = await api_client.get(
+            "/transactions", params={"statement_import_id": str(theirs.id)}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["rows"] == []
+
+    async def test_it_never_reaches_another_household(self, api_client, db_session):
+        stranger, stranger_account = await a_household(api_client, "+14165573807")
+        db_session.add(flagged(stranger, stranger_account, day=1, needs_review=False))
+        await db_session.commit()
+
+        mine, my_account = await a_household(api_client, "+14165573808")
+        db_session.add(flagged(mine, my_account, day=2, needs_review=False))
+        await db_session.commit()
+
+        rows = (await api_client.get("/transactions")).json()["rows"]
+
+        assert len(rows) == 1
+        assert rows[0]["account_id"] == str(my_account)
+

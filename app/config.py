@@ -62,6 +62,21 @@ class Settings(BaseSettings):
     # entitlements, where per-plan limits belong.
     free_imports_per_month: int = 1
 
+    # Households the monthly import limit does not apply to: comma-separated
+    # UUIDs, empty by default so the exemption exists only where it is
+    # configured. For test accounts — importing the same statement twenty times
+    # while working on the parser otherwise costs twenty months.
+    #
+    # An env var rather than a column, deliberately. There is one database and
+    # it is production, so a schema change for a testing affordance is a
+    # migration against real data; this is reversible by clearing a variable.
+    # It also keeps the ids out of a public repository.
+    #
+    # It exempts from the COUNT, not from consent, ownership or any other
+    # check — see app/api/statements.py. 7.1 folds this into entitlements with
+    # the rest of the quota accounting.
+    unlimited_import_households: str = ""
+
     @property
     def database_dsn(self) -> str:
         """`database_url` coerced into a form asyncpg accepts.
@@ -79,6 +94,22 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def unlimited_import_household_ids(self) -> frozenset[str]:
+        """[unlimited_import_households] parsed, lowercased and de-blanked.
+
+        Lowercased because a UUID pasted from the Supabase dashboard may be
+        upper case while the one `str(household.id)` produces is not, and a
+        quota exemption that silently does not apply is worse than none: the
+        429 arrives looking like a bug in the limit rather than a typo in the
+        configuration.
+        """
+        return frozenset(
+            part.strip().lower()
+            for part in self.unlimited_import_households.split(",")
+            if part.strip()
+        )
 
     @property
     def jwks_url(self) -> str:

@@ -1252,4 +1252,3 @@ class TestListingEverythingNotJustTheQueue:
 
         assert len(rows) == 1
         assert rows[0]["account_id"] == str(my_account)
-

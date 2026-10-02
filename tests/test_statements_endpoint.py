@@ -360,9 +360,7 @@ class TestTheTestAccountExemption:
         from app.config import Settings, get_settings
 
         live = get_settings()
-        default = Settings(
-            **{**live.model_dump(), "unlimited_import_households": ""}
-        )
+        default = Settings(**{**live.model_dump(), "unlimited_import_households": ""})
         assert default.unlimited_import_household_ids == frozenset()
 
         use_model(monkeypatch, FakeModel())

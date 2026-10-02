@@ -11,6 +11,7 @@ from app.api import (
     accounts,
     capabilities,
     categories,
+    dashboard,
     errors,
     financial_setup,
     health,
@@ -38,6 +39,7 @@ app.add_exception_handler(RequestValidationError, errors.validation_error)
 app.include_router(health.router)
 app.include_router(accounts.router)
 app.include_router(capabilities.router)
+app.include_router(dashboard.router)
 app.include_router(categories.router)
 app.include_router(me.router)
 app.include_router(legal.router)

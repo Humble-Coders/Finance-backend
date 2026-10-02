@@ -273,6 +273,107 @@ class TestQuota:
         assert detail["resets_at"], "a limit must say when it lifts"
 
 
+class TestTheTestAccountExemption:
+    """`UNLIMITED_IMPORT_HOUSEHOLDS`, so working on the parser does not cost a
+    month per attempt. An env var rather than a column: there is one database
+    and it is production."""
+
+    @staticmethod
+    def _settings_with(monkeypatch, households: str):
+        from app.config import Settings, get_settings
+
+        live = get_settings()
+        patched = Settings(
+            **{**live.model_dump(), "unlimited_import_households": households}
+        )
+        monkeypatch.setattr(endpoint, "get_settings", lambda: patched)
+
+    async def test_a_listed_household_imports_without_limit(
+        self, api_client, monkeypatch
+    ):
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571030")
+        await consent_to_ai(api_client)
+        household = (await api_client.get("/me")).json()["household"]["id"]
+
+        self._settings_with(monkeypatch, household)
+        first = await api_client.post(PARSE, json=body())
+        second = await api_client.post(PARSE, json=body())
+        third = await api_client.post(PARSE, json=body())
+
+        assert [first.status_code, second.status_code, third.status_code] == [
+            200,
+            200,
+            200,
+        ], third.text
+
+    async def test_everybody_else_is_still_refused(self, api_client, monkeypatch):
+        """The point of an allowlist is that it is one. A broken exemption that
+        lifts the cap for all of production would look identical from the test
+        account's side."""
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571031")
+        await consent_to_ai(api_client)
+
+        self._settings_with(monkeypatch, str(uuid.uuid4()))
+        first = await api_client.post(PARSE, json=body())
+        second = await api_client.post(PARSE, json=body())
+
+        assert first.status_code == 200
+        assert second.status_code == 429
+        assert second.json()["detail"]["code"] == "import_quota_exceeded"
+
+    async def test_the_id_is_matched_without_regard_to_case(
+        self, api_client, monkeypatch
+    ):
+        """A UUID pasted from the Supabase dashboard may be upper case. An
+        exemption that silently does not apply is worse than none: the 429
+        reads as a bug in the limit rather than a typo in the configuration."""
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571032")
+        await consent_to_ai(api_client)
+        household = (await api_client.get("/me")).json()["household"]["id"]
+
+        self._settings_with(monkeypatch, household.upper())
+        await api_client.post(PARSE, json=body())
+        second = await api_client.post(PARSE, json=body())
+
+        assert second.status_code == 200, second.text
+
+    async def test_an_entry_among_others_still_matches(self, api_client, monkeypatch):
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571033")
+        await consent_to_ai(api_client)
+        household = (await api_client.get("/me")).json()["household"]["id"]
+
+        self._settings_with(
+            monkeypatch, f" {uuid.uuid4()}, {household} ,, {uuid.uuid4()} "
+        )
+        await api_client.post(PARSE, json=body())
+        second = await api_client.post(PARSE, json=body())
+
+        assert second.status_code == 200, second.text
+
+    async def test_the_default_exempts_nobody(self, api_client, monkeypatch):
+        """An empty setting must not parse into a set containing "", which
+        would match nothing today and anything that ever stringifies to blank."""
+        from app.config import Settings, get_settings
+
+        live = get_settings()
+        default = Settings(**{**live.model_dump(), "unlimited_import_households": ""})
+        assert default.unlimited_import_household_ids == frozenset()
+
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571034")
+        await consent_to_ai(api_client)
+        monkeypatch.setattr(endpoint, "get_settings", lambda: default)
+
+        await api_client.post(PARSE, json=body())
+        second = await api_client.post(PARSE, json=body())
+
+        assert second.status_code == 429
+
+
 class TestFeatureGate:
     async def test_403_before_any_model_call_when_the_feature_is_off(
         self, api_client, db_session, monkeypatch

@@ -66,10 +66,80 @@ async def review_queue(
     insertion time interleaves two statements imported minutes apart into
     something that matches neither.
     """
-    where = [
-        Transaction.household_id == identity.household.id,
-        Transaction.needs_review.is_(True),
-    ]
+    return await _page(
+        session=session,
+        household_id=identity.household.id,
+        needs_review=True,
+        statement_import_id=None,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
+@router.get("/transactions", response_model=ReviewPageOut)
+async def list_transactions(
+    statement_import_id: uuid.UUID | None = Query(default=None),
+    needs_review: bool | None = Query(default=None),
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=PAGE_SIZE, ge=1, le=PAGE_SIZE),
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> ReviewPageOut:
+    """This household's rows, newest first — filed ones included.
+
+    `/transactions/review` answers "what still needs me". This answers "what
+    did you do", which until now nothing did: a row the model filed with
+    confidence was saved and shown to nobody, so the one question a person
+    actually has after an import — *did it get my categories right* — had no
+    screen that could answer it. Confidently wrong is the failure mode that
+    matters, and it was the invisible one.
+
+    `statement_import_id` scopes to a single import, which is the form the app
+    uses straight after one. `needs_review` filters within that; omitted, the
+    page holds both kinds, and each row says which it is.
+
+    The same shape as the review queue, deliberately: the client already
+    renders these rows and can already correct them, so the screen that shows
+    the flagged ones can show all of them by changing a query parameter rather
+    than growing a second list.
+    """
+    return await _page(
+        session=session,
+        household_id=identity.household.id,
+        needs_review=needs_review,
+        statement_import_id=statement_import_id,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
+async def _page(
+    *,
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    needs_review: bool | None,
+    statement_import_id: uuid.UUID | None,
+    cursor: str | None,
+    limit: int,
+) -> ReviewPageOut:
+    """One page of this household's rows, newest first.
+
+    Shared by both routes above so there is exactly one implementation of the
+    ordering and the cursor. Two would be two chances to walk the keyset
+    differently, and a paging bug does not announce itself — it silently skips
+    a row.
+    """
+    where = [Transaction.household_id == household_id]
+
+    if needs_review is not None:
+        where.append(Transaction.needs_review.is_(needs_review))
+
+    # No household check on the import id itself: the household filter above
+    # already bounds the rows, so another household's import matches nothing
+    # and returns an empty page rather than their data. A 404 here would be a
+    # membership oracle for import ids.
+    if statement_import_id is not None:
+        where.append(Transaction.statement_import_id == statement_import_id)
 
     if cursor is not None:
         try:
@@ -102,7 +172,7 @@ async def review_queue(
     found = list(result.scalars().all())
     rows, has_more = found[:limit], len(found) > limit
 
-    duplicates = await _duplicates_for(session, identity.household.id, rows)
+    duplicates = await _duplicates_for(session, household_id, rows)
 
     return ReviewPageOut(
         rows=[_as_row(row, duplicates.get(row.duplicate_of_id)) for row in rows],
@@ -151,6 +221,7 @@ def _as_row(row: Transaction, duplicate: Transaction | None) -> ReviewRowOut:
         description=row.description,
         merchant=row.merchant,
         category_id=row.category_id,
+        needs_review=row.needs_review,
         review_reason=row.review_reason,
         extraction_confidence=row.extraction_confidence,
         duplicate_of=(
@@ -631,8 +702,9 @@ def _refuse_duplicate(
 
 
 def _as_out(row: Transaction) -> TransactionOut:
+    # `needs_review` is not passed here: it is part of the row now, so spreading
+    # `_as_row` already carries it and naming it again is a duplicate keyword.
     return TransactionOut(
         **_as_row(row, None).model_dump(),
-        needs_review=row.needs_review,
         source=row.source,
     )

@@ -212,24 +212,38 @@ async def parse(
     # It needs simultaneous requests from one account to trigger and costs a
     # single parse when it does. 7.1 moves quotas into entitlements, where the
     # accounting belongs and can be done in one statement.
-    used = await _imports_this_month(session, household)
-    if used >= settings.free_imports_per_month:
-        resets_at = _next_month(datetime.now(UTC))
-        log.info(
-            "import_quota_exceeded",
-            household_id=str(household.id),
-            used=used,
-            limit=settings.free_imports_per_month,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "code": QUOTA_EXCEEDED,
-                "message": "You have used this month's imports.",
-                "limit": settings.free_imports_per_month,
-                "resets_at": resets_at.isoformat(),
-            },
-        )
+    # A configured test household skips the count and the refusal, and nothing
+    # else: consent, ownership, the text and page limits and the parse itself
+    # are all still ahead of this point and all still apply.
+    #
+    # Written as one branch rather than a flag threaded through the condition
+    # so there is no arrangement of settings that half-exempts somebody — with
+    # `free_imports_per_month = 0`, "count as zero and compare" would still
+    # refuse the account that is supposed to be exempt.
+    #
+    # Logged every time: a test account quietly behaving unlike production is
+    # how "it works on mine" starts.
+    if str(household.id).lower() in settings.unlimited_import_household_ids:
+        log.info("import_quota_exempt", household_id=str(household.id))
+    else:
+        used = await _imports_this_month(session, household)
+        if used >= settings.free_imports_per_month:
+            resets_at = _next_month(datetime.now(UTC))
+            log.info(
+                "import_quota_exceeded",
+                household_id=str(household.id),
+                used=used,
+                limit=settings.free_imports_per_month,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": QUOTA_EXCEEDED,
+                    "message": "You have used this month's imports.",
+                    "limit": settings.free_imports_per_month,
+                    "resets_at": resets_at.isoformat(),
+                },
+            )
 
     if body.account_id is not None:
         owned = await session.execute(

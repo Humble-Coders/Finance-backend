@@ -77,6 +77,26 @@ DEBT_PAYMENT_SLUG = "debt_payment"
 SAVINGS_SLUG = "savings"
 
 
+_MONTH = re.compile(r"^(\d{4})-(\d{2})$")
+
+
+def parse_month(raw: str) -> date:
+    """`YYYY-MM` as the first of that month, or `ValueError`.
+
+    Shared by `/dashboard` and `/transactions` so the two cannot disagree about
+    what a month is. Raises rather than returning None: a caller needs to tell
+    "not asked for" from "asked for badly", and only the router knows that one
+    is a 422.
+    """
+    found = _MONTH.match(raw.strip())
+    if found is None:
+        raise ValueError(f"expected YYYY-MM, got {raw!r}")
+    year, month = int(found.group(1)), int(found.group(2))
+    if not 1 <= month <= 12 or not 1970 <= year <= 2999:
+        raise ValueError(f"expected YYYY-MM, got {raw!r}")
+    return date(year, month, 1)
+
+
 def month_bounds(month: date) -> tuple[date, date]:
     """First and last day of [month]'s calendar month, inclusive.
 

@@ -8,7 +8,6 @@ differently eventually.
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -31,10 +30,8 @@ from app.services.identity import ResolvedIdentity
 
 router = APIRouter(tags=["dashboard"])
 
-_MONTH = re.compile(r"^(\d{4})-(\d{2})$")
 
-
-def _parse_month(raw: str | None) -> date:
+def _month_or_now(raw: str | None) -> date:
     """`YYYY-MM`, or the current UTC month.
 
     UTC rather than the household's own timezone, which we do not store.
@@ -45,20 +42,13 @@ def _parse_month(raw: str | None) -> date:
     if raw is None:
         now = datetime.now(UTC)
         return date(now.year, now.month, 1)
-
-    found = _MONTH.match(raw)
-    if found is None:
+    try:
+        return service.parse_month(raw)
+    except ValueError as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "invalid_month", "message": "Expected YYYY-MM."},
-        )
-    year, month = int(found.group(1)), int(found.group(2))
-    if not 1 <= month <= 12 or not 1970 <= year <= 2999:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "invalid_month", "message": "Expected YYYY-MM."},
-        )
-    return date(year, month, 1)
+        ) from error
 
 
 @router.get("/dashboard", response_model=DashboardOut)
@@ -75,7 +65,7 @@ async def read_dashboard(
     """
     currency = await currency_for(session, identity.household)
     built = await service.build(
-        session, identity.household.id, currency, _parse_month(month)
+        session, identity.household.id, currency, _month_or_now(month)
     )
 
     def money(minor: int) -> str:

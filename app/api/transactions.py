@@ -9,6 +9,7 @@ where "we could not tell" goes (PRD F2 stage 7).
 from __future__ import annotations
 
 import uuid
+from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
@@ -37,6 +38,7 @@ from app.schemas.transactions import (
 from app.services.ai_consent import current_policy, has_consented
 from app.services.conflicts import log_conflict
 from app.services.corrections import learn
+from app.services.dashboard import month_bounds, parse_month
 from app.services.filing import file_rows
 from app.services.identity import ResolvedIdentity
 from app.services.ledger import ExactDuplicate, collides_with, save_manual
@@ -71,6 +73,7 @@ async def review_queue(
         household_id=identity.household.id,
         needs_review=True,
         statement_import_id=None,
+        month=None,
         cursor=cursor,
         limit=limit,
     )
@@ -79,6 +82,7 @@ async def review_queue(
 @router.get("/transactions", response_model=ReviewPageOut)
 async def list_transactions(
     statement_import_id: uuid.UUID | None = Query(default=None),
+    month: str | None = Query(default=None, description="YYYY-MM"),
     needs_review: bool | None = Query(default=None),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=PAGE_SIZE, ge=1, le=PAGE_SIZE),
@@ -108,9 +112,23 @@ async def list_transactions(
         household_id=identity.household.id,
         needs_review=needs_review,
         statement_import_id=statement_import_id,
+        month=_month_or_400(month),
         cursor=cursor,
         limit=limit,
     )
+
+
+def _month_or_400(raw: str | None) -> date | None:
+    """The month asked for, or None. Malformed is a 422, never silently all."""
+    if raw is None:
+        return None
+    try:
+        return parse_month(raw)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "invalid_month", "message": "Expected YYYY-MM."},
+        ) from error
 
 
 async def _page(
@@ -119,6 +137,7 @@ async def _page(
     household_id: uuid.UUID,
     needs_review: bool | None,
     statement_import_id: uuid.UUID | None,
+    month: date | None,
     cursor: str | None,
     limit: int,
 ) -> ReviewPageOut:
@@ -140,6 +159,15 @@ async def _page(
     # membership oracle for import ids.
     if statement_import_id is not None:
         where.append(Transaction.statement_import_id == statement_import_id)
+
+    # By the date on the statement, not when the row was written — browsing by
+    # month means the months a person recognises from their own statements.
+    # Inclusive both ends, because `occurred_on` is a date: a half-open range
+    # silently drops everything that happened on the 31st.
+    if month is not None:
+        first, last = month_bounds(month)
+        where.append(Transaction.occurred_on >= first)
+        where.append(Transaction.occurred_on <= last)
 
     if cursor is not None:
         try:

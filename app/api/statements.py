@@ -15,7 +15,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +30,7 @@ from app.schemas.statements import (
     ParsedRowOut,
     SaveOutcomeOut,
     StatementImportOut,
+    StatementImportsOut,
     StatementParseIn,
     StatementParseOut,
 )
@@ -511,6 +512,69 @@ async def confirm_rows(
     )
 
 
+@router.get("/statements", response_model=StatementImportsOut)
+async def list_imports(
+    limit: int = Query(default=50, ge=1, le=200),
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> StatementImportsOut:
+    """Every statement this household has imported, newest first.
+
+    So a person browsing their transactions can ask for one statement at a
+    time. Until now an import's id was only ever known to the screen that had
+    just created it, which made "show me what came from the May statement" a
+    question with no way to ask it.
+
+    Counts come from one grouped query rather than a count per row: a count per
+    row is a query per statement, and this list exists to be opened often.
+    """
+    counts = (
+        select(
+            Transaction.statement_import_id.label("import_id"),
+            func.count(Transaction.id).label("saved"),
+            func.count(Transaction.id)
+            .filter(Transaction.needs_review.is_(True))
+            .label("needs_review"),
+        )
+        .where(Transaction.household_id == identity.household.id)
+        .group_by(Transaction.statement_import_id)
+        .subquery()
+    )
+
+    result = await session.execute(
+        select(
+            StatementImport,
+            func.coalesce(counts.c.saved, 0),
+            func.coalesce(counts.c.needs_review, 0),
+        )
+        .outerjoin(counts, counts.c.import_id == StatementImport.id)
+        .where(StatementImport.household_id == identity.household.id)
+        # The id breaks the tie. Postgres `now()` is transaction time, so two
+        # imports written in one transaction share a created_at exactly — rare
+        # in production, where each import is its own request, and enough to
+        # make the order of a list non-deterministic without this.
+        .order_by(StatementImport.created_at.desc(), StatementImport.id.desc())
+        .limit(limit)
+    )
+
+    return StatementImportsOut(
+        imports=[
+            StatementImportOut(
+                id=record.id,
+                status=record.status,
+                source_kind=record.source_kind,
+                page_count=record.page_count,
+                extracted_count=record.extracted_count,
+                saved=int(saved),
+                needs_review=int(needs_review),
+                confirmed_at=record.confirmed_at,
+                created_at=record.created_at,
+            )
+            for record, saved, needs_review in result
+        ]
+    )
+
+
 @router.get("/statements/{import_id}", response_model=StatementImportOut)
 async def read_import(
     import_id: uuid.UUID,
@@ -535,4 +599,5 @@ async def read_import(
         saved=int(saved),
         needs_review=int(needs_review),
         confirmed_at=record.confirmed_at,
+        created_at=record.created_at,
     )

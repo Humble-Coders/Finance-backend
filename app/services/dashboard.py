@@ -22,7 +22,7 @@ import calendar
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -167,6 +167,18 @@ class MonthPoint:
 
 
 @dataclass(frozen=True)
+class DayPoint:
+    """The month's running balance at the end of one day.
+
+    In minus out, from the first of the month through [day] — so the last
+    point is the month's net exactly, counted by the same rule.
+    """
+
+    day: date
+    net_minor_units: int
+
+
+@dataclass(frozen=True)
 class Dashboard:
     month: date
     currency: str
@@ -176,6 +188,7 @@ class Dashboard:
     debts: Stock = field(default_factory=Stock)
     commitments: list[Commitment] = field(default_factory=list)
     trend: list[MonthPoint] = field(default_factory=list)
+    daily: list[DayPoint] = field(default_factory=list)
     previous_net_minor_units: int | None = None
     pending_review: int = 0
 
@@ -353,6 +366,7 @@ async def build(
     household_id: uuid.UUID,
     currency: str,
     month: date,
+    today: date | None = None,
 ) -> Dashboard:
     """Everything the dashboard shows for one month.
 
@@ -463,6 +477,11 @@ async def build(
 
     previous = months_back(month, 2)[0]
     previous_net = nets.get(previous)
+    # UTC, as the router decides which month is running: a day boundary in
+    # another zone would put tomorrow's point on today's chart.
+    daily = await _daily(
+        session, household_id, currency, month, today or datetime.now(UTC).date()
+    )
 
     return Dashboard(
         month=first,
@@ -489,9 +508,64 @@ async def build(
         ),
         commitments=commitments,
         trend=trend,
+        daily=daily,
         previous_net_minor_units=previous_net,
         pending_review=int(pending or 0),
     )
+
+
+async def _daily(
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    currency: str,
+    month: date,
+    today: date,
+) -> list[DayPoint]:
+    """The month's running balance, one point per day, for the home chart.
+
+    Counted by `_countable`, the rule the net figure uses, so the line ends
+    exactly where "net this month" says — two figures on one card that
+    disagreed would each make the other look wrong. One grouped query; the
+    running sum is taken here.
+
+    Every day from the first, not only days with rows: a balance is defined
+    on a quiet day (it is the day before's), and a line with gaps would
+    claim nobody knew. Up to today for the month that is running — a point
+    for tomorrow would be a figure nobody observed — and to the month's end
+    otherwise. Empty for a month with no rows at all, so the client draws no
+    chart rather than a flat line that looks like a measured zero.
+    """
+    first, last = month_bounds(month)
+    if first > today:
+        return []
+    result = await session.execute(
+        select(
+            Transaction.occurred_on,
+            func.sum(
+                case(
+                    (
+                        Transaction.direction == TransactionDirection.credit,
+                        Transaction.amount_minor_units,
+                    ),
+                    else_=-Transaction.amount_minor_units,
+                )
+            ),
+        )
+        .where(*_countable(household_id, currency), *_in_month(month))
+        .group_by(Transaction.occurred_on)
+    )
+    by_day = {row[0]: int(row[1]) for row in result}
+    if not by_day:
+        return []
+
+    end = min(last, today)
+    points: list[DayPoint] = []
+    running = 0
+    for offset in range((end - first).days + 1):
+        day = first + timedelta(days=offset)
+        running += by_day.get(day, 0)
+        points.append(DayPoint(day=day, net_minor_units=running))
+    return points
 
 
 async def _moved_by_category(

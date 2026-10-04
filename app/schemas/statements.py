@@ -188,3 +188,17 @@ class StatementImportOut(BaseModel):
     saved: int
     needs_review: int
     confirmed_at: datetime | None
+    # When it was imported. A list of statements is unreadable without it —
+    # "pdf_text, 24 rows" three times over names nothing a person can pick from.
+    created_at: datetime
+
+
+class StatementImportsOut(BaseModel):
+    """Every import this household has made, newest first.
+
+    No cursor. The free tier allows one import a month, so a household's whole
+    history is a short list for years; `limit` is the bound, and a paging
+    protocol here would be ceremony around a list that does not page.
+    """
+
+    imports: list[StatementImportOut]

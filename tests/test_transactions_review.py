@@ -9,7 +9,7 @@ inside a single page.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -1252,3 +1252,188 @@ class TestListingEverythingNotJustTheQueue:
 
         assert len(rows) == 1
         assert rows[0]["account_id"] == str(my_account)
+
+
+class TestBrowsingByMonth:
+    """`GET /transactions?month=` — the other way a person browses what they
+    have, beside one statement at a time."""
+
+    async def test_only_the_month_asked_for_comes_back(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165573901")
+        db_session.add_all(
+            [
+                flagged(household, account, day=31, needs_review=False),
+                flagged(household, account, day=1, needs_review=False),
+            ]
+        )
+        # One in July, which must not appear in August.
+        july = flagged(household, account, day=15, needs_review=False)
+        july.occurred_on = date(2026, 7, 15)
+        db_session.add(july)
+        await db_session.commit()
+
+        rows = (
+            await api_client.get("/transactions", params={"month": "2026-08"})
+        ).json()["rows"]
+
+        assert len(rows) == 2
+        assert {row["occurred_on"] for row in rows} == {"2026-08-31", "2026-08-01"}
+
+    async def test_both_ends_of_the_month_are_inside_it(self, api_client, db_session):
+        """`occurred_on` is a date, so a half-open range drops the 31st."""
+        household, account = await a_household(api_client, "+14165573902")
+        db_session.add_all(
+            [
+                flagged(household, account, day=1, needs_review=False),
+                flagged(household, account, day=31, needs_review=False),
+            ]
+        )
+        await db_session.commit()
+
+        rows = (
+            await api_client.get("/transactions", params={"month": "2026-08"})
+        ).json()["rows"]
+
+        assert len(rows) == 2
+
+    async def test_a_month_with_nothing_in_it_is_an_empty_page(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573903")
+        db_session.add(flagged(household, account, day=2, needs_review=False))
+        await db_session.commit()
+
+        response = await api_client.get("/transactions", params={"month": "2026-01"})
+
+        assert response.status_code == 200
+        assert response.json()["rows"] == []
+
+    async def test_a_malformed_month_is_refused_rather_than_ignored(self, api_client):
+        """Ignoring it would quietly return every row the household has, which
+        is the opposite of what was asked for."""
+        await a_household(api_client, "+14165573904")
+
+        for bad in ("2026-13", "august", "2026", ""):
+            response = await api_client.get("/transactions", params={"month": bad})
+            assert response.status_code == 422, bad
+            assert response.json()["detail"]["code"] == "invalid_month"
+
+    async def test_a_month_and_a_statement_narrow_together(
+        self, api_client, db_session
+    ):
+        from app.models.money import StatementImport
+
+        household, account = await a_household(api_client, "+14165573905")
+        wanted = StatementImport(household_id=household, source_kind="pdf_text")
+        db_session.add(wanted)
+        await db_session.flush()
+
+        inside = flagged(household, account, day=2, needs_review=False)
+        inside.statement_import_id = wanted.id
+        outside = flagged(household, account, day=3, needs_review=False)
+        outside.occurred_on = date(2026, 7, 3)
+        outside.statement_import_id = wanted.id
+        db_session.add_all([inside, outside])
+        await db_session.commit()
+
+        rows = (
+            await api_client.get(
+                "/transactions",
+                params={"month": "2026-08", "statement_import_id": str(wanted.id)},
+            )
+        ).json()["rows"]
+
+        assert [row["id"] for row in rows] == [str(inside.id)]
+
+    async def test_the_queue_is_not_month_scoped(self, api_client, db_session):
+        """`/transactions/review` answers "what still needs me", which is not a
+        question about a month."""
+        household, account = await a_household(api_client, "+14165573906")
+        old = flagged(household, account, day=4)
+        old.occurred_on = date(2025, 1, 4)
+        db_session.add(old)
+        await db_session.commit()
+
+        rows = (await api_client.get("/transactions/review")).json()["rows"]
+
+        assert len(rows) == 1
+
+
+class TestListingTheStatements:
+    """`GET /statements` — so "show me what came from the May statement" is a
+    question that can be asked at all."""
+
+    async def test_imports_come_back_newest_first_with_their_counts(
+        self, api_client, db_session
+    ):
+        from app.models.money import StatementImport
+
+        household, account = await a_household(api_client, "+14165573910")
+        # Distinct timestamps, because that is what production has: each import
+        # is its own request. Written in one transaction they would share a
+        # created_at exactly — Postgres `now()` is transaction time — and two
+        # rows with the same instant have no chronological order to recover,
+        # since the ids are random rather than time-ordered.
+        older = StatementImport(
+            household_id=household,
+            source_kind="pdf_text",
+            created_at=datetime(2026, 8, 1, 9, 0, tzinfo=UTC),
+        )
+        newer = StatementImport(
+            household_id=household,
+            source_kind="ocr",
+            created_at=datetime(2026, 9, 1, 9, 0, tzinfo=UTC),
+        )
+        db_session.add_all([older, newer])
+        await db_session.flush()
+
+        for day, needs in ((1, True), (2, False), (3, False)):
+            row = flagged(household, account, day=day, needs_review=needs)
+            row.statement_import_id = newer.id
+            db_session.add(row)
+        await db_session.commit()
+
+        body = (await api_client.get("/statements")).json()
+
+        assert [item["id"] for item in body["imports"]] == [
+            str(newer.id),
+            str(older.id),
+        ]
+        assert body["imports"][0]["saved"] == 3
+        assert body["imports"][0]["needs_review"] == 1
+        assert body["imports"][1]["saved"] == 0, "an import with no rows still lists"
+
+    async def test_each_import_says_when_it_happened(self, api_client, db_session):
+        """A list of statements is unreadable without it — "pdf_text, 24 rows"
+        three times over names nothing a person can pick from."""
+        from app.models.money import StatementImport
+
+        household, _ = await a_household(api_client, "+14165573911")
+        db_session.add(StatementImport(household_id=household, source_kind="pdf_text"))
+        await db_session.commit()
+
+        body = (await api_client.get("/statements")).json()
+
+        assert body["imports"][0]["created_at"]
+
+    async def test_another_household_s_imports_are_not_listed(
+        self, api_client, db_session
+    ):
+        from app.models.money import StatementImport
+
+        stranger, _ = await a_household(api_client, "+14165573912")
+        db_session.add(StatementImport(household_id=stranger, source_kind="pdf_text"))
+        await db_session.commit()
+
+        await a_household(api_client, "+14165573913")
+        body = (await api_client.get("/statements")).json()
+
+        assert body["imports"] == []
+
+    async def test_a_household_with_no_imports_gets_an_empty_list(self, api_client):
+        await a_household(api_client, "+14165573914")
+
+        response = await api_client.get("/statements")
+
+        assert response.status_code == 200
+        assert response.json()["imports"] == []

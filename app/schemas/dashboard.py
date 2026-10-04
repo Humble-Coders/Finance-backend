@@ -62,6 +62,13 @@ class MonthPointOut(BaseModel):
     net: str | None = None
 
 
+class DayPointOut(BaseModel):
+    day: date
+    # The running balance at the end of the day: in minus out since the first
+    # of the month. The last one equals `net`.
+    net: str
+
+
 class DashboardOut(BaseModel):
     month: date
     currency: str
@@ -80,6 +87,9 @@ class DashboardOut(BaseModel):
 
     commitments: list[CommitmentOut]
     trend: list[MonthPointOut]
+    # The month day by day, for the home chart; empty for a month with no
+    # rows. Defaulted so an older client that never reads it is unaffected.
+    daily: list[DayPointOut] = []
 
     # Rows in this month still waiting on a person. The figures above exclude
     # unresolved suspected duplicates, so this is also the honest caveat on

@@ -645,3 +645,97 @@ class TestTheBalanceCards:
         assert body["investments"]["moved"] == "500.00"
         assert body["debts"]["moved"] == "400.00"
         assert body["investments"]["balance"] == "40000.00", "the balance does not move"
+
+
+class TestTheDailyBalance:
+    """The home chart: the month's running in-minus-out, one point a day."""
+
+    async def test_it_is_a_running_sum_that_ends_at_the_net(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165574901")
+        db_session.add_all(
+            [
+                tx(household, account, minor=500_000, day=1, credit=True),
+                tx(household, account, minor=120_000, day=3),
+                tx(household, account, minor=30_000, day=3),
+                tx(household, account, minor=50_000, day=20),
+            ]
+        )
+        await db_session.commit()
+
+        body = (await api_client.get(DASHBOARD, params=MONTH)).json()
+        daily = {point["day"]: point["net"] for point in body["daily"]}
+
+        assert daily["2026-08-01"] == "5000.00"
+        assert daily["2026-08-02"] == "5000.00", "a quiet day keeps yesterday's"
+        assert daily["2026-08-03"] == "3500.00", "a day's rows are summed"
+        assert daily["2026-08-19"] == "3500.00"
+        assert daily["2026-08-20"] == "3000.00"
+        assert body["daily"][-1]["net"] == body["net"]
+
+    async def test_a_past_month_runs_to_its_last_day(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165574902")
+        db_session.add(tx(household, account, minor=1_000, day=9))
+        await db_session.commit()
+
+        body = (await api_client.get(DASHBOARD, params=MONTH)).json()
+
+        days = [point["day"] for point in body["daily"]]
+        assert days[0] == "2026-08-01", "from the first, not the first row"
+        assert days[-1] == "2026-08-31"
+        assert len(days) == 31
+
+    async def test_it_counts_what_the_net_counts(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165574903")
+        db_session.add_all(
+            [
+                tx(household, account, minor=10_000, day=2),
+                tx(
+                    household,
+                    account,
+                    minor=99_900,
+                    day=4,
+                    needs_review=True,
+                    reason=ReviewReason.suspected_duplicate,
+                ),
+                tx(household, account, minor=77_700, day=6, currency="USD"),
+            ]
+        )
+        await db_session.commit()
+
+        body = (await api_client.get(DASHBOARD, params=MONTH)).json()
+
+        assert {point["net"] for point in body["daily"][1:]} == {"-100.00"}
+
+    async def test_a_month_with_nothing_in_it_has_no_line(self, api_client):
+        await a_household(api_client, "+14165574904")
+        body = (await api_client.get(DASHBOARD, params=MONTH)).json()
+        assert body["daily"] == []
+
+    async def test_the_running_month_stops_at_today(self, api_client, db_session):
+        from app.services import dashboard as service
+
+        household, account = await a_household(api_client, "+14165574905")
+        db_session.add(tx(household, account, minor=2_500, day=3))
+        await db_session.commit()
+
+        built = await service.build(
+            db_session, household, "CAD", date(2026, 8, 1), today=date(2026, 8, 10)
+        )
+
+        assert built.daily[-1].day == date(2026, 8, 10)
+        assert len(built.daily) == 10
+
+    async def test_a_month_not_yet_started_has_no_line(self, api_client, db_session):
+        from app.services import dashboard as service
+
+        household, account = await a_household(api_client, "+14165574906")
+        db_session.add(tx(household, account, minor=2_500, day=3))
+        await db_session.commit()
+
+        built = await service.build(
+            db_session, household, "CAD", date(2026, 8, 1), today=date(2026, 7, 31)
+        )
+
+        assert built.daily == []

@@ -20,6 +20,7 @@ from app.db import get_session
 from app.schemas.dashboard import (
     CommitmentOut,
     DashboardOut,
+    DayPointOut,
     FlowOut,
     MatchOut,
     MonthPointOut,
@@ -125,6 +126,10 @@ async def read_dashboard(
         trend=[
             MonthPointOut(month=point.month, net=maybe(point.net_minor_units))
             for point in built.trend
+        ],
+        daily=[
+            DayPointOut(day=point.day, net=money(point.net_minor_units))
+            for point in built.daily
         ],
         pending_review=built.pending_review,
     )

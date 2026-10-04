@@ -54,8 +54,18 @@ class Settings(BaseSettings):
     # consent.
     llm_no_training_tier: bool = False
     llm_provider: str = "gemini"
-    llm_model: str = "gemini-2.0-flash"
+    # gemini-2.0-flash, the default until October 2026, was shut down by Google
+    # on 1 June 2026. Nothing broke only because every environment overrides
+    # this; a deployment that forgot to would have failed every import.
+    llm_model: str = "gemini-2.5-flash"
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+    # Tokens a thinking model may spend reasoning per call, reserved on top of
+    # the answer's own allowance so a long think cannot crowd the answer out.
+    # Billed as output. 0 turns thinking off where the provider allows it.
+    # Bounded rather than off by default: whether extraction is as accurate
+    # without it is a question for the `llm_call` logs, not a guess.
+    llm_thinking_budget: int = 2_048
 
     # Free tier: one import a month (PRD F2). A setting rather than a constant
     # so development is not rationed by the production plan; 7.1 moves this into

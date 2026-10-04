@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.categorization import Category, CategoryCorrection
 from app.services.llm import LlmClient, LlmError
 
-__all__ = ["Suggestion", "categorize", "OTHER", "MAX_EXAMPLES"]
+__all__ = ["Suggestion", "categorize", "OTHER", "MAX_EXAMPLES", "BATCH_SIZE"]
 
 log = structlog.get_logger()
 
@@ -40,6 +40,17 @@ OTHER = "other"
 # Enough for the model to see a household's habits, few enough that one noisy
 # correction cannot drown the taxonomy.
 MAX_EXAMPLES = 20
+
+# Pairs per model call. One call for a whole import used to be the design, with
+# a fixed 2,000-token answer — about 350 slugs. A statement may hold 2,000 rows,
+# and an answer cut off past that point is not JSON, so EVERY row of the import
+# fell back to `other` and into review. A batch that fails now costs only its
+# own hundred rows, and its answer fits with room to spare.
+BATCH_SIZE = 100
+
+# Room per slug in the answer: the slug, its quotes and comma, generously.
+# The longest seeded slug is a few tokens; this leaves several times that.
+_TOKENS_PER_SLUG = 12
 
 _SYSTEM_PROMPT = """\
 You put personal transactions into categories.
@@ -137,15 +148,29 @@ async def categorize(
         examples=await _examples(session, household_id),
     )
 
+    suggestions: list[Suggestion] = []
+    for start in range(0, len(pairs), BATCH_SIZE):
+        batch = pairs[start : start + BATCH_SIZE]
+        suggestions += await _batch(client, prompt, batch, known)
+    return suggestions
+
+
+async def _batch(
+    client: LlmClient,
+    prompt: str,
+    pairs: list[tuple[str, str]],
+    known: dict[str, uuid.UUID],
+) -> list[Suggestion]:
+    """One call's worth. A failure here costs only these rows."""
     try:
         answer = await client.complete(
             system=prompt,
             user=json.dumps([[name, amount] for name, amount in pairs]),
-            max_output_tokens=2_000,
+            max_output_tokens=max(256, len(pairs) * _TOKENS_PER_SLUG),
         )
     except LlmError:
-        # A model that will not answer must not lose the import. Everything
-        # goes to review, which is exactly where an uncategorized row belongs.
+        # A model that will not answer must not lose the import. These rows go
+        # to review, which is exactly where an uncategorized row belongs.
         log.warning("categorization_unavailable", pairs=len(pairs))
         return [Suggestion(OTHER, recognised=False) for _ in pairs]
 

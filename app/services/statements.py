@@ -431,6 +431,19 @@ def _merge(per_window: list[list[ParsedRow]]) -> list[ParsedRow]:
     return [row for key in order for row in [first[key]] * counts[key]]
 
 
+def _usage_fields(client: LlmClient) -> dict[str, object]:
+    usage = getattr(client, "usage", None)
+    if usage is None:
+        return {}
+    return {
+        "llm_calls": usage.calls,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "cost": usage.cost,
+    }
+
+
 async def parse_statement(
     client: LlmClient,
     text: str,
@@ -505,5 +518,9 @@ async def parse_statement(
         rows=len(merged),
         rejected=rejected,
         seconds=round(time.monotonic() - started, 1),
+        # What the whole statement cost, summed over its windows — the figure
+        # per import that the per-call `llm_call` lines add up to. Absent for
+        # a client that does not count, which is every test fake.
+        **_usage_fields(client),
     )
     return ParseOutcome(rows=merged, unparsed_line_count=rejected, model=client.model)

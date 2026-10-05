@@ -149,8 +149,9 @@ Return ONLY a JSON array. Each element:
    "direction": "debit" | "credit", "confidence": 0-100}
 
 Rules:
-- Copy every amount EXACTLY as it appears in the text. Never round, never
-  reformat, never calculate one.
+- Copy every amount's digits EXACTLY as they appear in the text. Never round,
+  never calculate one. Write it as a plain number with no currency symbol and
+  no sign: "-$86.40" is "86.40" — direction says which way it went.
 - "debit" is money leaving the account, "credit" is money arriving. A credit-card
   statement's purchases are debits.
 - Ignore running balances, subtotals, totals, interest summaries and page
@@ -165,7 +166,7 @@ Rules:
 - If there are no transactions, return [].
 """
 
-_PROMPT_VERSION = "2026-09-21.1"
+_PROMPT_VERSION = "2026-10-05.1"
 
 
 @dataclass(frozen=True)
@@ -320,6 +321,26 @@ def _appears_verbatim(amount: str, haystack: str) -> bool:
     return any(form in haystack for form in _amount_forms(amount))
 
 
+# What may surround an amount's digits when it is copied as printed: a sign, a
+# currency symbol, brackets for a credit. `-$86.40`, `+$2,410.00`, `(86.40)`,
+# `CA$12.00`. Stripped before the number is read, never before the check that
+# the model's text is really on the statement.
+_AMOUNT_DECORATION = re.compile(
+    r"^[\s(+\-−–]*(?:[A-Z]{0,3}[$₹€£¥])?[\s(+\-−–]*|[\s)+\-−–]*$"
+)
+
+
+def _bare(amount: str) -> str:
+    """`-$86.40` -> `86.40`: the digits, without the sign or symbol around them.
+
+    The prompt asks for a plain number, and the model does not always oblige:
+    told to copy an amount exactly, it sometimes copies all of it. Rejecting
+    that dropped every row of a screenshot — the sign and the `$` were the only
+    thing wrong, and the direction field already says which way the money went.
+    """
+    return _AMOUNT_DECORATION.sub("", amount.strip())
+
+
 def _coerce(raw: object, window: str, currency: str) -> ParsedRow | None:
     """One model-produced row, or None if it cannot be trusted.
 
@@ -330,7 +351,7 @@ def _coerce(raw: object, window: str, currency: str) -> ParsedRow | None:
         return None
     try:
         occurred_on = date.fromisoformat(str(raw["date"]))
-        amount = normalize(_ungrouped(str(raw["amount"])), currency)
+        amount = normalize(_ungrouped(_bare(str(raw["amount"]))), currency)
         direction = TransactionDirection(str(raw["direction"]))
         description = str(raw["description"]).strip()
     except (KeyError, ValueError, MoneyError):

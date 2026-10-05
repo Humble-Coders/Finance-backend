@@ -1437,3 +1437,75 @@ class TestListingTheStatements:
 
         assert response.status_code == 200
         assert response.json()["imports"] == []
+
+
+class TestFilteringTheList:
+    """`?direction=` and `?category=`, for the Income, Expenses and Debts screens."""
+
+    async def test_money_in_and_money_out_are_listed_apart(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573981")
+        out = flagged(household, account, day=1, needs_review=False)
+        came_in = flagged(
+            household, account, day=2, needs_review=False, description="PAYROLL"
+        )
+        came_in.direction = TransactionDirection.credit
+        db_session.add_all([out, came_in])
+        await db_session.commit()
+
+        credits = (
+            await api_client.get("/transactions", params={"direction": "credit"})
+        ).json()
+        debits = (
+            await api_client.get("/transactions", params={"direction": "debit"})
+        ).json()
+
+        assert [r["id"] for r in credits["rows"]] == [str(came_in.id)]
+        assert [r["id"] for r in debits["rows"]] == [str(out.id)]
+
+    async def test_a_category_is_asked_for_by_slug(self, api_client, db_session):
+        from sqlalchemy import select
+
+        from app.models.categorization import Category
+
+        household, account = await a_household(api_client, "+14165573982")
+        repayment = await db_session.scalar(
+            select(Category.id).where(
+                Category.slug == "debt_payment", Category.household_id.is_(None)
+            )
+        )
+        loan = flagged(
+            household, account, day=1, needs_review=False, category_id=repayment
+        )
+        coffee = flagged(
+            household, account, day=2, needs_review=False, description="COFFEE"
+        )
+        db_session.add_all([loan, coffee])
+        await db_session.commit()
+
+        rows = (
+            await api_client.get("/transactions", params={"category": "debt_payment"})
+        ).json()["rows"]
+
+        assert [r["id"] for r in rows] == [str(loan.id)]
+
+    async def test_an_unknown_category_lists_nothing_rather_than_everything(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165573983")
+        db_session.add(flagged(household, account, day=1, needs_review=False))
+        await db_session.commit()
+
+        rows = (
+            await api_client.get("/transactions", params={"category": "no_such_slug"})
+        ).json()["rows"]
+
+        assert rows == []
+
+    async def test_a_direction_that_is_not_one_is_refused(self, api_client):
+        await a_household(api_client, "+14165573984")
+        response = await api_client.get(
+            "/transactions", params={"direction": "sideways"}
+        )
+        assert response.status_code == 422

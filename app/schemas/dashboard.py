@@ -23,6 +23,9 @@ class FlowOut(BaseModel):
     # Null until the wizard has been filled in. A client showing "of X
     # expected" has to hide that half rather than print "of 0".
     expected: str | None = None
+    # Last month's actual; null when last month has no rows, so the client
+    # omits "vs last month" rather than showing a rise from nothing.
+    previous: str | None = None
 
 
 class StockOut(BaseModel):
@@ -33,6 +36,10 @@ class StockOut(BaseModel):
     balance: str
     # Observed — debits filed under savings or debt_payment this month.
     moved: str
+    # Last month's `moved`; null when last month has no rows.
+    previous_moved: str | None = None
+    # Credits under the same category this month — money taken back out.
+    withdrawn: str = "0"
 
 
 class MatchOut(BaseModel):
@@ -53,6 +60,8 @@ class CommitmentOut(BaseModel):
     name: str
     expected: str
     match: MatchOut | None = None
+    # Day of the month it falls due, when the user said; null otherwise.
+    due_day: int | None = None
 
 
 class MonthPointOut(BaseModel):
@@ -60,6 +69,12 @@ class MonthPointOut(BaseModel):
     # Null for a month with no rows. A zero here would be a fact nobody
     # observed, and a chart must not draw one.
     net: str | None = None
+    # The month's parts, null together with `net`.
+    income: str | None = None
+    expenses: str | None = None
+    invested: str | None = None
+    withdrawn: str | None = None
+    debt_paid: str | None = None
 
 
 class DayPointOut(BaseModel):

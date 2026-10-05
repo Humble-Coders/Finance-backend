@@ -128,6 +128,9 @@ class Flow:
 
     actual_minor_units: int = 0
     expected_minor_units: int | None = None
+    # Last month's actual; None when last month has no rows at all, so a
+    # client omits "vs last month" rather than claiming a rise from nothing.
+    previous_minor_units: int | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,12 @@ class Stock:
 
     balance_minor_units: int = 0
     moved_minor_units: int = 0
+    # Last month's movement; None when last month has no rows at all.
+    previous_moved_minor_units: int | None = None
+    # Credits under the same category this month: money taken back out of
+    # savings. Observed, like `moved`, and never netted against it — both are
+    # shown, because "put in 500, took out 500" is not "did nothing".
+    withdrawn_minor_units: int = 0
 
 
 @dataclass(frozen=True)
@@ -167,6 +176,7 @@ class Commitment:
     name: str
     expected_minor_units: int
     match: Match | None = None
+    due_day: int | None = None
 
 
 @dataclass(frozen=True)
@@ -180,10 +190,32 @@ class MonthPoint:
 
     month: date
     net_minor_units: int | None = None
+    # The month's parts, all None together when it has no rows: a gap, as for
+    # `net`. Each is counted by the rule its dashboard figure uses.
+    income_minor_units: int | None = None
+    expenses_minor_units: int | None = None
+    invested_minor_units: int | None = None
+    withdrawn_minor_units: int | None = None
+    debt_paid_minor_units: int | None = None
 
     @property
     def has_data(self) -> bool:
         return self.net_minor_units is not None
+
+
+@dataclass(frozen=True)
+class MonthFigures:
+    """One month's totals, from one grouped query; see `_figures_by_month`."""
+
+    income: int = 0
+    expenses: int = 0
+    invested: int = 0
+    withdrawn: int = 0
+    debt_paid: int = 0
+
+    @property
+    def net(self) -> int:
+        return self.income - self.expenses
 
 
 @dataclass(frozen=True)
@@ -340,37 +372,47 @@ def match_commitment(
     )
 
 
-async def _net_by_month(
+async def _figures_by_month(
     session: AsyncSession,
     household_id: uuid.UUID,
     currency: str,
     months: list[date],
-) -> dict[date, int]:
-    """Net per month, for the months that have rows at all.
+) -> dict[date, MonthFigures]:
+    """Each month's income, expenses and category movements, for the months
+    that have rows at all.
 
-    One grouped query rather than one per month: ten round trips to draw a
-    sparkline is ten chances for the dashboard to be the slow screen. Months
-    absent from the result have no data, which the caller renders as a gap and
-    not as zero.
+    One grouped query rather than one per month and figure: six months of five
+    figures is thirty round trips otherwise. Months absent from the result have
+    no data, which callers render as a gap and never as zero.
+
+    Counted by `_countable`, the rule every figure on the dashboard uses, so a
+    trend bar and the card it sits under can never disagree. Invested and
+    debt-paid match `_moved_by_category`: debits filed under that slug, the
+    household's own category of the slug included.
     """
     if not months:
         return {}
     start, _ = month_bounds(months[0])
     _, end = month_bounds(months[-1])
     bucket = func.date_trunc("month", Transaction.occurred_on)
+    credit = Transaction.direction == TransactionDirection.credit
+    debit = Transaction.direction == TransactionDirection.debit
+    amount = Transaction.amount_minor_units
+
+    def total(*when) -> object:
+        return func.coalesce(func.sum(case((and_(*when), amount), else_=0)), 0)
+
     result = await session.execute(
         select(
             bucket,
-            func.sum(
-                case(
-                    (
-                        Transaction.direction == TransactionDirection.credit,
-                        Transaction.amount_minor_units,
-                    ),
-                    else_=-Transaction.amount_minor_units,
-                )
-            ),
+            total(credit),
+            total(debit),
+            total(debit, Category.slug == SAVINGS_SLUG),
+            total(credit, Category.slug == SAVINGS_SLUG),
+            total(debit, Category.slug == DEBT_PAYMENT_SLUG),
         )
+        # Outer: an unfiled row still counts toward income and expenses.
+        .outerjoin(Category, Category.id == Transaction.category_id)
         .where(
             *_countable(household_id, currency),
             Transaction.occurred_on >= start,
@@ -378,7 +420,16 @@ async def _net_by_month(
         )
         .group_by(bucket)
     )
-    return {row[0].date(): int(row[1]) for row in result}
+    return {
+        row[0].date(): MonthFigures(
+            income=int(row[1]),
+            expenses=int(row[2]),
+            invested=int(row[3]),
+            withdrawn=int(row[4]),
+            debt_paid=int(row[5]),
+        )
+        for row in result
+    }
 
 
 async def build(
@@ -476,6 +527,7 @@ async def build(
             Commitment(
                 name=obligation.name,
                 expected_minor_units=obligation.monthly_amount_minor_units,
+                due_day=obligation.due_day,
                 match=(
                     Match(
                         transaction_id=found.id,
@@ -490,13 +542,25 @@ async def build(
         )
 
     window = months_back(month, TREND_MONTHS)
-    nets = await _net_by_month(session, household_id, currency, window)
+    figures = await _figures_by_month(session, household_id, currency, window)
     trend = [
-        MonthPoint(month=point, net_minor_units=nets.get(point)) for point in window
+        MonthPoint(
+            month=point,
+            net_minor_units=found.net,
+            income_minor_units=found.income,
+            expenses_minor_units=found.expenses,
+            invested_minor_units=found.invested,
+            withdrawn_minor_units=found.withdrawn,
+            debt_paid_minor_units=found.debt_paid,
+        )
+        if (found := figures.get(point)) is not None
+        else MonthPoint(month=point)
+        for point in window
     ]
 
-    previous = months_back(month, 2)[0]
-    previous_net = nets.get(previous)
+    previous = figures.get(months_back(month, 2)[0])
+    this_month = figures.get(first, MonthFigures())
+    previous_net = previous.net if previous is not None else None
     # UTC, as the router decides which month is running: a day boundary in
     # another zone would put tomorrow's point on today's chart.
     daily = await _daily(
@@ -511,20 +575,29 @@ async def build(
             expected_minor_units=(
                 profile.monthly_income_minor_units if profile is not None else None
             ),
+            previous_minor_units=previous.income if previous is not None else None,
         ),
         expenses=Flow(
             actual_minor_units=int(debits),
             expected_minor_units=(
                 profile.monthly_expense_minor_units if profile is not None else None
             ),
+            previous_minor_units=previous.expenses if previous is not None else None,
         ),
         investments=Stock(
             balance_minor_units=int(holdings or 0),
             moved_minor_units=moved.get(SAVINGS_SLUG, 0),
+            previous_moved_minor_units=(
+                previous.invested if previous is not None else None
+            ),
+            withdrawn_minor_units=this_month.withdrawn,
         ),
         debts=Stock(
             balance_minor_units=int(outstanding or 0),
             moved_minor_units=moved.get(DEBT_PAYMENT_SLUG, 0),
+            previous_moved_minor_units=(
+                previous.debt_paid if previous is not None else None
+            ),
         ),
         commitments=commitments,
         trend=trend,

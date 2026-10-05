@@ -440,3 +440,75 @@ def test_money_errors_are_not_swallowed_silently_elsewhere():
         from app.core.money import normalize
 
         normalize("not money", CURRENCY)
+
+
+SCREENSHOT = "\n".join(
+    [
+        "Friday, October 2, 2026",
+        "Maple Leaf Grocers   -$86.40",
+        "Payroll Northwind Ltd   +$2,410.00",
+        "Corner Coffee   ($5.25)",
+    ]
+)
+
+
+class TestAnAmountCopiedAsPrinted:
+    """Told to copy an amount exactly, a model sometimes copies all of it."""
+
+    @pytest.mark.asyncio
+    async def test_a_sign_and_a_currency_symbol_are_not_a_reason_to_drop_the_row(self):
+        # The 2026-10-05 production failure: every row of a screenshot was
+        # rejected because the model wrote "-$86.40" rather than "86.40".
+        model = FakeModel(
+            rows(
+                row("-$86.40", "Maple Leaf Grocers", "2026-10-02"),
+                row("+$2,410.00", "Payroll Northwind Ltd", "2026-10-02", "credit"),
+                row("($5.25)", "Corner Coffee", "2026-10-02"),
+            )
+        )
+
+        outcome = await parse_statement(model, SCREENSHOT, CURRENCY)
+
+        assert [r.amount for r in outcome.rows] == ["86.40", "2410.00", "5.25"]
+        assert outcome.unparsed_line_count == 0
+
+    @pytest.mark.asyncio
+    async def test_the_direction_comes_from_the_direction_and_not_the_sign(self):
+        model = FakeModel(rows(row("+$2,410.00", "Payroll", "2026-10-02", "credit")))
+
+        outcome = await parse_statement(model, SCREENSHOT, CURRENCY)
+
+        assert outcome.rows[0].direction is TransactionDirection.credit
+
+    @pytest.mark.asyncio
+    async def test_dressing_an_invented_amount_does_not_get_it_past_the_check(self):
+        model = FakeModel(rows(row("-$99.99", "Maple Leaf Grocers", "2026-10-02")))
+
+        outcome = await parse_statement(model, SCREENSHOT, CURRENCY)
+
+        assert outcome.rows == []
+        assert outcome.unparsed_line_count == 1
+
+    @pytest.mark.parametrize(
+        ("printed", "bare"),
+        [
+            ("-$86.40", "86.40"),
+            ("+$2,410.00", "2,410.00"),
+            ("(86.40)", "86.40"),
+            ("CA$12.00", "12.00"),
+            ("86.40-", "86.40"),
+            ("−$11.29", "11.29"),
+            ("1,234.56", "1,234.56"),
+            ("86.40", "86.40"),
+        ],
+    )
+    def test_only_the_decoration_is_removed(self, printed, bare):
+        assert statements._bare(printed) == bare
+
+
+def test_thinking_is_off_unless_asked_for():
+    # On by default, every import after 2026-10-04 came back empty or rejected
+    # and cost five times the tokens; see the setting's comment.
+    from app.config import Settings
+
+    assert Settings.model_fields["llm_thinking_budget"].default == 0

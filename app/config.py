@@ -63,9 +63,14 @@ class Settings(BaseSettings):
     # Tokens a thinking model may spend reasoning per call, reserved on top of
     # the answer's own allowance so a long think cannot crowd the answer out.
     # Billed as output. 0 turns thinking off where the provider allows it.
-    # Bounded rather than off by default: whether extraction is as accurate
-    # without it is a question for the `llm_call` logs, not a guess.
-    llm_thinking_budget: int = 2_048
+    #
+    # Off by default, on the evidence of the `llm_call` logs (2026-10-05).
+    # With 2,048 every import after the change came back empty: a payment
+    # receipt answered `[]` after ~600 tokens of thinking, and a screenshot's
+    # seven rows were all rejected because the model copied `-$86.40` whole.
+    # Without it the same texts parse fully, in a fifth of the tokens. Turn it
+    # on for a model or a document that needs it, and read the logs after.
+    llm_thinking_budget: int = 0
 
     # Free tier: one import a month (PRD F2). A setting rather than a constant
     # so development is not rationed by the production plan; 7.1 moves this into

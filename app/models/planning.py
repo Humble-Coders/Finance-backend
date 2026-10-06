@@ -27,7 +27,7 @@ from app.models.base import (
     money_amount,
     money_currency,
 )
-from app.models.enums import GoalHorizon
+from app.models.enums import GoalHorizon, GoalKind
 
 __all__ = ["Budget", "BudgetLine", "Goal", "Debt"]
 
@@ -113,11 +113,23 @@ class Goal(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     """A savings target, short- or long-term."""
 
     __tablename__ = "goal"
-    __table_args__ = (currency_check(),)
+    __table_args__ = (
+        currency_check(),
+        CheckConstraint("target_minor_units > 0", name="target_positive"),
+        CheckConstraint("saved_minor_units >= 0", name="saved_not_negative"),
+        CheckConstraint(
+            "monthly_contribution_minor_units >= 0",
+            name="monthly_contribution_not_negative",
+        ),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     horizon: Mapped[GoalHorizon] = mapped_column(
         SAEnum(GoalHorizon, name="goal_horizon"), nullable=False
+    )
+    # For the app's picture only; see `GoalKind`.
+    kind: Mapped[GoalKind | None] = mapped_column(
+        SAEnum(GoalKind, name="goal_kind"), nullable=True
     )
 
     target_minor_units: Mapped[int] = money_amount("target_minor_units", nullable=False)
@@ -125,6 +137,12 @@ class Goal(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
         "saved_minor_units", nullable=False, default=0
     )
     currency: Mapped[str] = money_currency()
+
+    # What the person plans to put in each month; the projection counts
+    # forward from it. Null when they have not said.
+    monthly_contribution_minor_units: Mapped[int | None] = money_amount(
+        "monthly_contribution_minor_units", nullable=True
+    )
 
     target_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     # Lower sorts first; user-orderable, since the AI adjusts advice by priority.

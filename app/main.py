@@ -15,6 +15,7 @@ from app.api import (
     dashboard,
     errors,
     financial_setup,
+    goals,
     health,
     health_score,
     legal,
@@ -48,5 +49,6 @@ app.include_router(categories.router)
 app.include_router(me.router)
 app.include_router(legal.router)
 app.include_router(financial_setup.router)
+app.include_router(goals.router)
 app.include_router(statements.router)
 app.include_router(transactions.router)

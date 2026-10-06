@@ -165,10 +165,21 @@ class TestMoneyColumns:
                 missing.append(table.name)
         assert missing == [], f"currency columns without a length check: {missing}"
 
+    # Amounts that can never be negative, by what they are rather than by
+    # convention: what a person has put toward a goal, and what they plan to
+    # put in each month (backend #65). Refunds, debts and overruns — the reason
+    # money is signed — have no meaning there. Add to this only with a reason.
+    UNSIGNED_BY_NATURE = {
+        ("goal", "saved_minor_units"),
+        ("goal", "monthly_contribution_minor_units"),
+    }
+
     def test_amounts_are_signed(self):
         """Refunds, debts and budget overruns are legitimately negative."""
         for table in METADATA.tables.values():
             for column in table.columns:
+                if (table.name, column.name) in self.UNSIGNED_BY_NATURE:
+                    continue
                 if column.name.endswith("_minor_units"):
                     for constraint in table.constraints:
                         text = str(getattr(constraint, "sqltext", ""))

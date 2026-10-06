@@ -108,6 +108,25 @@ class GoalHorizon(enum.Enum):
     long_term = "long_term"
 
 
+class GoalKind(enum.Enum):
+    """What a goal is for — chosen so an app can show a fitting picture.
+
+    For the picture only. No kind suggests an amount or a date: proposing a
+    target ("six months of expenses") is narration, which is the chatbot's
+    job (M6), not a default this table should carry. PRD F5's list, plus
+    `other`.
+    """
+
+    emergency_fund = "emergency_fund"
+    vacation = "vacation"
+    car = "car"
+    electronics = "electronics"
+    home = "home"
+    retirement = "retirement"
+    wealth = "wealth"
+    other = "other"
+
+
 class PlanTier(enum.Enum):
     free = "free"
     personal = "personal"

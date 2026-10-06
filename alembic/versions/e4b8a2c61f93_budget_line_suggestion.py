@@ -11,8 +11,8 @@ moving underneath it, so each line keeps both numbers and a flag saying which
 one is in charge.
 
 A month that has ended keeps the budget it had, but only once that budget was
-built from some history (`has_history`); one read before its statements were
-imported keeps regenerating. And it keeps the income it was built against
+built from categorised spending (`has_history`); one read before its
+statements were imported, or while they await review, keeps regenerating. And it keeps the income it was built against
 (`expected_income_minor_units`), so a later change in the wizard does not
 rewrite a past month's savings.
 

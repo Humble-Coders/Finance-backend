@@ -51,9 +51,10 @@ class Budget(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     # can tell a generated budget from one somebody has shaped.
     is_user_modified: Mapped[bool] = mapped_column(nullable=False, default=False)
 
-    # True once a generation had at least one month of history to work from.
-    # Only then does a month that has ended stop regenerating: a past month
-    # read before its statements were imported must not stay empty for good.
+    # True once a generation had categorised spending to work from. Only then
+    # does a month that has ended stop regenerating: a past month read before
+    # its statements were imported, or while they awaited review, must not
+    # stay empty for good.
     has_history: Mapped[bool] = mapped_column(
         nullable=False, default=False, server_default="false"
     )

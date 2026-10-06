@@ -14,7 +14,7 @@ import uuid
 from datetime import date
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text, update
 
 from app.models.categorization import Category
 from app.models.enums import ReviewReason, TransactionDirection
@@ -385,6 +385,34 @@ class TestStillLearning:
         assert lines["groceries"]["allocated"] == "400.00"
         assert body["savings"]["allocated"] == "4525.00"
 
+    async def test_dropping_back_below_the_threshold_shows_only_the_user_s_lines(
+        self, api_client, db_session
+    ):
+        """Generated lines stay saved for when the household is ready again,
+        but a suggestion from history since deleted is not shown."""
+        household, _, ids = await a_ready_household(
+            api_client, db_session, "+14165575108"
+        )
+        await api_client.put(
+            f"{SEPTEMBER}/lines/{ids['dining']}", json={"amount": "60.00"}
+        )
+        await db_session.execute(
+            delete(Transaction).where(
+                Transaction.household_id == household,
+                Transaction.description.like("ROW %"),
+            )
+        )
+        await db_session.commit()
+
+        body = (await api_client.get(SEPTEMBER)).json()
+
+        assert body["status"] == "learning"
+        assert [(line["slug"], line["allocated"]) for line in body["lines"]] == [
+            ("dining", "60.00")
+        ]
+        assert body["savings"] is None
+        assert body["debt"] is None
+
 
 class TestTheUserDecides:
     async def test_a_line_set_by_hand_survives_regeneration(
@@ -526,6 +554,29 @@ class TestAMonthThatHasEnded:
         after = by_slug((await api_client.get("/budgets/2026-07")).json())
 
         assert after["groceries"]["allocated"] == "400.00"
+
+    async def test_one_read_while_its_history_awaits_review_fills_in_once_filed(
+        self, api_client, db_session
+    ):
+        """June is imported but nothing in it is categorised yet when July is
+        read. Rows alone are not history: July fills in once June is filed."""
+        household, account = await a_household(api_client, "+14165575404")
+        groceries = await a_system_category_id(db_session, "groceries")
+        db_session.add_all(filler(household, account, 20, month=6))
+        await db_session.commit()
+        before = (await api_client.get("/budgets/2026-07")).json()
+        assert before["status"] == "ready"
+        assert before["lines"] == []
+
+        await db_session.execute(
+            update(Transaction)
+            .where(Transaction.household_id == household)
+            .values(category_id=groceries)
+        )
+        await db_session.commit()
+        after = by_slug((await api_client.get("/budgets/2026-07")).json())
+
+        assert after["groceries"]["allocated"] == "20.00"
 
     async def test_it_keeps_the_income_it_was_built_against(
         self, api_client, db_session

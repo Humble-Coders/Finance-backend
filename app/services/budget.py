@@ -30,8 +30,9 @@ disagree with the dashboard figure beside it.
 **Regeneration.** There is no worker, so a budget is (re)generated when it is
 read. A month still running is recomputed on every read: lines the user set
 keep their amount and only their suggestion moves. A month that has ended
-keeps the budget it had once that budget was built from some history; one
-read before its statements were imported fills in when they are.
+keeps the budget it had once that budget was built from categorised spending;
+one read before its statements were imported, or while they await review,
+fills in when they are.
 
 **Still learning.** Nothing is generated until the household passes the
 threshold in `app/services/learning.py`, but lines set by hand are kept and
@@ -216,10 +217,10 @@ async def budget_for(
     """
     if not ready:
         budget = await _existing(session, household_id, month)
-        return await _view(session, budget, household_id, currency, month)
+        return await _view(session, budget, household_id, currency, month, ready)
     budget = await _prepared(session, household_id, currency, month, today, ready)
     await session.flush()
-    return await _view(session, budget, household_id, currency, month)
+    return await _view(session, budget, household_id, currency, month, ready)
 
 
 async def set_line(
@@ -258,7 +259,7 @@ async def set_line(
         line.allocated_minor_units = amount
         line.is_user_set = True
     await _settle(session, budget, household_id, currency, system, ready)
-    return await _view(session, budget, household_id, currency, month)
+    return await _view(session, budget, household_id, currency, month, ready)
 
 
 async def reset_line(
@@ -288,7 +289,7 @@ async def reset_line(
         else:
             budget.lines.remove(line)
     await _settle(session, budget, household_id, currency, system, ready)
-    return await _view(session, budget, household_id, currency, month)
+    return await _view(session, budget, household_id, currency, month, ready)
 
 
 async def _settle(
@@ -379,7 +380,7 @@ async def _regenerate(
     month: date,
 ) -> None:
     system = await _system_ids(session)
-    window, history = await _history(session, household_id, currency, month)
+    _, history = await _history(session, household_id, currency, month)
     income = await _expected_income(session, household_id, currency)
     minimums = await session.scalar(
         select(func.coalesce(func.sum(Debt.minimum_payment_minor_units), 0)).where(
@@ -387,7 +388,9 @@ async def _regenerate(
         )
     )
     suggestion = suggest(history, income, int(minimums), currency)
-    budget.has_history = bool(window)
+    # Categorised spending, not merely rows: a month read while last month's
+    # statement is still awaiting review would otherwise lock with nothing.
+    budget.has_history = bool(history)
     budget.expected_income_minor_units = income
 
     targets = dict(suggestion.spending)
@@ -571,7 +574,16 @@ async def _view(
     household_id: uuid.UUID,
     currency: str,
     month: date,
+    ready: bool,
 ) -> BudgetView:
+    """What a client is shown.
+
+    While learning ([ready] false), only the lines the user set by hand. A
+    budget generated earlier can still hold suggested lines — a household
+    drops back below the threshold when it deletes transactions — and those
+    are kept for when it is ready again, but not shown: a suggestion from
+    history we have since lost is not one we stand behind.
+    """
     system = await _system_ids(session)
     first, last = month_bounds(month)
     result = await session.execute(
@@ -599,7 +611,11 @@ async def _view(
         else:
             spent[_line_key(category_id, slug, system)] += int(total)
 
-    own = budget.lines if budget is not None else []
+    own = [
+        line
+        for line in (budget.lines if budget is not None else [])
+        if ready or line.is_user_set
+    ]
     ids = [line.category_id for line in own]
     categories = {
         category.id: category

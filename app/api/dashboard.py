@@ -83,18 +83,24 @@ async def read_dashboard(
         income=FlowOut(
             actual=money(built.income.actual_minor_units),
             expected=maybe(built.income.expected_minor_units),
+            previous=maybe(built.income.previous_minor_units),
         ),
         expenses=FlowOut(
             actual=money(built.expenses.actual_minor_units),
             expected=maybe(built.expenses.expected_minor_units),
+            previous=maybe(built.expenses.previous_minor_units),
         ),
         investments=StockOut(
             balance=money(built.investments.balance_minor_units),
             moved=money(built.investments.moved_minor_units),
+            previous_moved=maybe(built.investments.previous_moved_minor_units),
+            withdrawn=money(built.investments.withdrawn_minor_units),
         ),
         debts=StockOut(
             balance=money(built.debts.balance_minor_units),
             moved=money(built.debts.moved_minor_units),
+            previous_moved=maybe(built.debts.previous_moved_minor_units),
+            withdrawn=money(built.debts.withdrawn_minor_units),
         ),
         commitments=[
             CommitmentOut(
@@ -110,11 +116,20 @@ async def read_dashboard(
                     if item.match is not None
                     else None
                 ),
+                due_day=item.due_day,
             )
             for item in built.commitments
         ],
         trend=[
-            MonthPointOut(month=point.month, net=maybe(point.net_minor_units))
+            MonthPointOut(
+                month=point.month,
+                net=maybe(point.net_minor_units),
+                income=maybe(point.income_minor_units),
+                expenses=maybe(point.expenses_minor_units),
+                invested=maybe(point.invested_minor_units),
+                withdrawn=maybe(point.withdrawn_minor_units),
+                debt_paid=maybe(point.debt_paid_minor_units),
+            )
             for point in built.trend
         ],
         daily=[

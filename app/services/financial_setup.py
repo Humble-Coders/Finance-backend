@@ -186,6 +186,7 @@ async def _payload(
                     else None
                 ),
                 interest_rate_percent=_rate_percent(d.interest_rate_bps),
+                due_day=d.due_day,
             )
             for d in debts
         ],
@@ -201,6 +202,7 @@ async def _payload(
                 monthly_amount=from_minor_units(
                     o.monthly_amount_minor_units, o.currency
                 ),
+                due_day=o.due_day,
             )
             for o in obligations
         ],
@@ -248,6 +250,7 @@ async def save_setup(
             currency=currency,
             entered_via_setup=True,
             position=i,
+            due_day=d.due_day,
         )
         for i, d in enumerate(body.debts)
     ]
@@ -270,6 +273,7 @@ async def save_setup(
             ),
             currency=currency,
             position=i,
+            due_day=o.due_day,
         )
         for i, o in enumerate(body.obligations)
     ]

@@ -18,7 +18,7 @@ holds exactly what the wizard asks and is what the payoff optimizer reads.
 
 from __future__ import annotations
 
-from sqlalchemy import Integer, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, Integer, SmallInteger, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -65,7 +65,10 @@ class Obligation(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     """A recurring monthly commitment — rent, a phone plan, insurance."""
 
     __tablename__ = "obligation"
-    __table_args__ = (currency_check(),)
+    __table_args__ = (
+        currency_check(),
+        CheckConstraint("due_day BETWEEN 1 AND 31", name="due_day_in_month"),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     monthly_amount_minor_units: Mapped[int] = money_amount(
@@ -77,6 +80,11 @@ class Obligation(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     # created_at (Postgres now() is transaction time), so without this the list
     # would come back alphabetically and reshuffle under the user mid-wizard.
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # The day of the month it falls due, when the user said. Null is "not
+    # said", never a guess — "Due 5 Oct" printed from a default is invented.
+    # A 31 in a 30-day month means the month's last day.
+    due_day: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
 
 class Investment(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):

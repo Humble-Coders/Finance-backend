@@ -21,7 +21,7 @@ from app.config import Settings, get_settings
 from app.core.money import MoneyError, from_minor_units, to_minor_units
 from app.db import get_session
 from app.models.categorization import Category
-from app.models.enums import ReviewReason
+from app.models.enums import ReviewReason, TransactionDirection
 from app.models.money import Account, StatementImport, Transaction
 from app.schemas.transactions import (
     ConfirmIn,
@@ -84,6 +84,12 @@ async def list_transactions(
     statement_import_id: uuid.UUID | None = Query(default=None),
     month: str | None = Query(default=None, description="YYYY-MM"),
     needs_review: bool | None = Query(default=None),
+    direction: TransactionDirection | None = Query(
+        default=None, description="credit (money in) or debit (money out)"
+    ),
+    category: str | None = Query(
+        default=None, max_length=64, description="A category slug, e.g. debt_payment"
+    ),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=PAGE_SIZE, ge=1, le=PAGE_SIZE),
     identity: ResolvedIdentity = Depends(current_identity),
@@ -113,6 +119,8 @@ async def list_transactions(
         needs_review=needs_review,
         statement_import_id=statement_import_id,
         month=_month_or_400(month),
+        direction=direction,
+        category_slug=category,
         cursor=cursor,
         limit=limit,
     )
@@ -140,6 +148,8 @@ async def _page(
     month: date | None,
     cursor: str | None,
     limit: int,
+    direction: TransactionDirection | None = None,
+    category_slug: str | None = None,
 ) -> ReviewPageOut:
     """One page of this household's rows, newest first.
 
@@ -168,6 +178,27 @@ async def _page(
         first, last = month_bounds(month)
         where.append(Transaction.occurred_on >= first)
         where.append(Transaction.occurred_on <= last)
+
+    # Money in or money out, for a screen about one of them: "Income" lists
+    # credits, "Expenses" debits.
+    if direction is not None:
+        where.append(Transaction.direction == direction)
+
+    # By slug rather than id, so "debt_payment" means the same thing for every
+    # household: the seeded category, or this household's own of that slug.
+    # An unknown slug matches nothing — an empty page, never every row.
+    if category_slug is not None:
+        where.append(
+            Transaction.category_id.in_(
+                select(Category.id).where(
+                    Category.slug == category_slug,
+                    or_(
+                        Category.household_id.is_(None),
+                        Category.household_id == household_id,
+                    ),
+                )
+            )
+        )
 
     if cursor is not None:
         try:

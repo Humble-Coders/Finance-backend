@@ -93,10 +93,13 @@ class TestRoundTrip:
                 "balance": "2500.00",
                 "minimum_payment": "75.00",
                 "interest_rate_percent": "19.99",
+                "due_day": None,
             }
         ]
         assert saved["investments"] == [{"name": "TFSA", "amount": "15000.25"}]
-        assert saved["obligations"] == [{"name": "Rent", "monthly_amount": "1800.00"}]
+        assert saved["obligations"] == [
+            {"name": "Rent", "monthly_amount": "1800.00", "due_day": None}
+        ]
         assert (await api_client.get(SETUP)).json() == saved
 
     async def test_stores_integer_minor_units(self, api_client, db_session):
@@ -435,3 +438,35 @@ class TestHouseholdIsolation:
         theirs = (await api_client.get(SETUP)).json()
         assert theirs["income"] is None
         assert theirs["obligations"] == []
+
+
+class TestDueDays:
+    """The day a commitment or a debt payment falls due, when the user says."""
+
+    async def test_a_due_day_is_kept_and_omitting_it_means_not_said(self, api_client):
+        await onboard(api_client, "+14165560031")
+        body = {
+            "obligations": [
+                {"name": "Rent", "monthly_amount": "1800", "due_day": 1},
+                {"name": "Phone", "monthly_amount": "65"},
+            ],
+            "debts": [a_debt() | {"due_day": 15}],
+        }
+
+        saved = (await api_client.put(SETUP, json=body)).json()
+
+        assert [o["due_day"] for o in saved["obligations"]] == [1, None]
+        assert saved["debts"][0]["due_day"] == 15
+
+    async def test_a_day_no_month_has_is_refused(self, api_client):
+        await onboard(api_client, "+14165560032")
+        for day in (0, 32, -1):
+            response = await api_client.put(
+                SETUP,
+                json={
+                    "obligations": [
+                        {"name": "Rent", "monthly_amount": "1", "due_day": day}
+                    ]
+                },
+            )
+            assert response.status_code == 422, day

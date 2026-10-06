@@ -739,3 +739,154 @@ class TestTheDailyBalance:
         )
 
         assert built.daily == []
+
+
+async def a_system_category_id(db_session, slug: str) -> uuid.UUID:
+    return await db_session.scalar(
+        select(Category.id).where(
+            Category.slug == slug, Category.household_id.is_(None)
+        )
+    )
+
+
+class TestTheBreakdowns:
+    """What the Income, Expenses, Investments and Debts screens read."""
+
+    async def test_last_months_figures_ride_along(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165574801")
+        savings = await a_system_category_id(db_session, "savings")
+        repayment = await a_system_category_id(db_session, "debt_payment")
+        db_session.add_all(
+            [
+                tx(household, account, minor=300_000, credit=True, month=7),
+                tx(household, account, minor=120_000, month=7, day=6),
+                tx(
+                    household,
+                    account,
+                    minor=20_000,
+                    month=7,
+                    day=7,
+                    category_id=savings,
+                ),
+                tx(
+                    household,
+                    account,
+                    minor=15_000,
+                    month=7,
+                    day=8,
+                    category_id=repayment,
+                ),
+                tx(household, account, minor=500_000, credit=True, month=8),
+            ]
+        )
+        await db_session.commit()
+
+        body = (await api_client.get(DASHBOARD, params=MONTH)).json()
+
+        assert body["income"]["previous"] == "3000.00"
+        assert body["expenses"]["previous"] == "1550.00", "every debit is an expense"
+        assert body["investments"]["previous_moved"] == "200.00"
+        assert body["debts"]["previous_moved"] == "150.00"
+
+    async def test_with_nothing_last_month_there_is_no_comparison(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165574802")
+        db_session.add(tx(household, account, minor=500_000, credit=True, month=8))
+        await db_session.commit()
+
+        body = (await api_client.get(DASHBOARD, params=MONTH)).json()
+
+        assert body["income"]["previous"] is None
+        assert body["expenses"]["previous"] is None
+        assert body["investments"]["previous_moved"] is None
+
+    async def test_each_trend_month_carries_its_parts(self, api_client, db_session):
+        household, account = await a_household(api_client, "+14165574803")
+        savings = await a_system_category_id(db_session, "savings")
+        repayment = await a_system_category_id(db_session, "debt_payment")
+        db_session.add_all(
+            [
+                tx(household, account, minor=400_000, credit=True, month=6),
+                tx(household, account, minor=100_000, month=6, day=6),
+                tx(
+                    household,
+                    account,
+                    minor=30_000,
+                    month=6,
+                    day=7,
+                    category_id=savings,
+                ),
+                tx(
+                    household,
+                    account,
+                    minor=5_000,
+                    month=6,
+                    day=8,
+                    credit=True,
+                    category_id=savings,
+                ),
+                tx(
+                    household,
+                    account,
+                    minor=25_000,
+                    month=6,
+                    day=9,
+                    category_id=repayment,
+                ),
+            ]
+        )
+        await db_session.commit()
+
+        trend = (await api_client.get(DASHBOARD, params=MONTH)).json()["trend"]
+        june = next(point for point in trend if point["month"] == "2026-06-01")
+        july = next(point for point in trend if point["month"] == "2026-07-01")
+
+        assert june["income"] == "4050.00", "a withdrawal from savings is money in"
+        assert june["expenses"] == "1550.00"
+        assert june["invested"] == "300.00"
+        assert june["withdrawn"] == "50.00"
+        assert june["debt_paid"] == "250.00"
+        assert june["net"] == "2500.00", "net is still income minus expenses"
+        assert july["income"] is None and july["invested"] is None, "a gap, not zeroes"
+
+    async def test_money_taken_out_of_savings_is_shown_beside_what_went_in(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165574804")
+        savings = await a_system_category_id(db_session, "savings")
+        db_session.add_all(
+            [
+                tx(household, account, minor=50_000, category_id=savings),
+                tx(
+                    household,
+                    account,
+                    minor=20_000,
+                    credit=True,
+                    day=9,
+                    category_id=savings,
+                ),
+            ]
+        )
+        await db_session.commit()
+
+        body = (await api_client.get(DASHBOARD, params=MONTH)).json()
+
+        assert body["investments"]["moved"] == "500.00"
+        assert (
+            body["investments"]["withdrawn"] == "200.00"
+        ), "never netted against moved"
+
+    async def test_a_commitment_carries_the_day_it_falls_due(self, api_client):
+        await a_household(api_client, "+14165574805")
+        await setup_wizard(
+            api_client,
+            obligations=[
+                {"name": "Rent", "monthly_amount": "1800.00", "due_day": 5},
+                {"name": "Phone", "monthly_amount": "65.00"},
+            ],
+        )
+
+        body = (await api_client.get(DASHBOARD, params=MONTH)).json()
+
+        assert [c["due_day"] for c in body["commitments"]] == [5, None]

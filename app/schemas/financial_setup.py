@@ -31,6 +31,8 @@ class DebtIn(BaseModel):
     name: str = Field(min_length=1, max_length=NAME_MAX)
     balance: str
     minimum_payment: str | None = None
+    # Day of the month the payment falls due; omitted means not said.
+    due_day: int | None = Field(default=None, ge=1, le=31)
     # A percentage as typed, e.g. "5.25"; stored as basis points.
     interest_rate_percent: str | None = None
 
@@ -43,6 +45,8 @@ class InvestmentIn(BaseModel):
 class ObligationIn(BaseModel):
     name: str = Field(min_length=1, max_length=NAME_MAX)
     monthly_amount: str
+    # Day of the month it falls due; omitted means not said.
+    due_day: int | None = Field(default=None, ge=1, le=31)
 
 
 class FinancialSetupIn(BaseModel):
@@ -73,6 +77,7 @@ class DebtOut(BaseModel):
     balance: str
     minimum_payment: str | None
     interest_rate_percent: str | None
+    due_day: int | None = None
 
 
 class InvestmentOut(BaseModel):
@@ -83,6 +88,7 @@ class InvestmentOut(BaseModel):
 class ObligationOut(BaseModel):
     name: str
     monthly_amount: str
+    due_day: int | None = None
 
 
 class FinancialSetupOut(BaseModel):

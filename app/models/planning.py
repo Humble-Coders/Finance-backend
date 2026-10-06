@@ -5,7 +5,15 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Date, ForeignKey, Index, Integer, String
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    Index,
+    Integer,
+    SmallInteger,
+    String,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -105,7 +113,10 @@ class Debt(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     """A debt the payoff optimizer will reason about in Phase 2."""
 
     __tablename__ = "debt"
-    __table_args__ = (currency_check(),)
+    __table_args__ = (
+        currency_check(),
+        CheckConstraint("due_day BETWEEN 1 AND 31", name="due_day_in_month"),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     account_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -133,3 +144,7 @@ class Debt(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     # The order the user typed them in the wizard. NULL for debts from
     # statements (M3), which have no wizard position.
     position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # The day of the month the payment falls due, when the user said. Null is
+    # "not said", never a default — see Obligation.due_day.
+    due_day: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)

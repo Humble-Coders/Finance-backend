@@ -19,6 +19,7 @@ from app.db import get_session
 from app.models.enums import GoalHorizon
 from app.models.planning import Goal
 from app.schemas.goals import (
+    NAME_MAX,
     AddMoneyIn,
     GoalIn,
     GoalOrderIn,
@@ -86,9 +87,14 @@ def _amount(raw: str, currency: str, field: str, *, positive: bool = False) -> i
 
 
 def _name(raw: str) -> str:
+    """1 to NAME_MAX characters once trimmed — the length is the trimmed one's."""
     name = raw.strip()
     if not name:
         raise _unprocessable("invalid_name", "name", "Give the goal a name.")
+    if len(name) > NAME_MAX:
+        raise _unprocessable(
+            "invalid_name", "name", f"Keep it to {NAME_MAX} characters."
+        )
     return name
 
 
@@ -98,6 +104,23 @@ def _future(target_date: date | None) -> date | None:
             "date_in_past", "target_date", "Choose a date from today on."
         )
     return target_date
+
+
+async def _limit_reached(
+    session: AsyncSession, household_id: uuid.UUID, reason: str
+) -> HTTPException:
+    """Undo the request's work, log the conflict, and say why (CLAUDE.md:
+    every 409 calls `log_conflict` first). [reason] names the path refused."""
+    await session.rollback()
+    log_conflict(GOAL_LIMIT_REACHED, reason, household_id=str(household_id))
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": GOAL_LIMIT_REACHED,
+            "limit": service.GOAL_LIMIT,
+            "message": "That's the most goals that can be in progress at once.",
+        },
+    )
 
 
 def _out(goal: Goal, today: date) -> GoalOut:
@@ -220,18 +243,7 @@ async def create_goal(
             today=today,
         )
     except service.GoalLimitReached as error:
-        # Read before the rollback, which expires the household.
-        household_id = str(household.id)
-        await session.rollback()
-        log_conflict(GOAL_LIMIT_REACHED, "open_goal_limit", household_id=household_id)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": GOAL_LIMIT_REACHED,
-                "limit": service.GOAL_LIMIT,
-                "message": "That's the most goals that can be in progress at once.",
-            },
-        ) from error
+        raise await _limit_reached(session, household.id, "open_goal_limit") from error
     await session.commit()
     return _out(goal, today)
 
@@ -282,7 +294,12 @@ async def edit_goal(
             if body.monthly_contribution is None
             else _amount(body.monthly_contribution, currency, "monthly_contribution")
         )
-    goal = await service.edit(session, goal, changes, today)
+    try:
+        goal = await service.edit(session, goal, changes, today)
+    except service.GoalLimitReached as error:
+        raise await _limit_reached(
+            session, household.id, "open_goal_limit_on_edit"
+        ) from error
     await session.commit()
     return _out(goal, today)
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.models.enums import GoalHorizon, GoalKind
 
@@ -19,7 +19,9 @@ NAME_MAX = 255
 
 
 class GoalIn(BaseModel):
-    name: str = Field(max_length=NAME_MAX)
+    # Its length is checked after trimming, by the route: NAME_MAX of name
+    # with a space either side is still a name of NAME_MAX.
+    name: str
     kind: GoalKind | None = None
     horizon: GoalHorizon
     # Decimal strings, parsed by `app/core/money.py`.
@@ -33,7 +35,7 @@ class GoalPatch(BaseModel):
     """Any of the fields; one left out is unchanged, one sent as null is cleared
     (`kind`, `target_date`, `monthly_contribution` only)."""
 
-    name: str | None = Field(default=None, max_length=NAME_MAX)
+    name: str | None = None
     kind: GoalKind | None = None
     horizon: GoalHorizon | None = None
     target: str | None = None

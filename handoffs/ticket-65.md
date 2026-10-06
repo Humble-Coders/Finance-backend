@@ -37,7 +37,7 @@ All of that comes from one pure function, `project`: integer minor units through
 | `app/api/legal.py` | `GET /legal/disclaimer`, the same shape as `/legal/terms`; 404 `no_disclaimer` when the region has none. Not gated by any feature. |
 | `app/main.py` | Registers the router. |
 | `tests/test_goals_project.py` (new) | 25 tests with no database. |
-| `tests/test_goals_api.py` (new) | 33 tests marked `integration`, with "today" pinned to 2026-09-15. One of them (`TestTwoAddsAtOnce`) uses two real connections and commits, then cleans up after itself. |
+| `tests/test_goals_api.py` (new) | 37 tests marked `integration`, with "today" pinned to 2026-09-15. Two of them (`TestTwoAddsAtOnce`, `TestTwoCreatesAtOnce`) use two real connections and commit, then clean up after themselves. |
 | `tests/test_models.py` | A narrow, documented exemption from the "money is signed" guard for `goal.saved_minor_units` and `goal.monthly_contribution_minor_units`; see Deviations. |
 
 ## How to test
@@ -58,7 +58,7 @@ All of that comes from one pure function, `project`: integer minor units through
      MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres \
      pytest -q -m integration
    ```
-   Expect 519 passed (486 on `main`).
+   Expect 523 passed (486 on `main`).
 4. Run the rest with the same two variables: `pytest -q -m 'not integration'`. Expect 374 passed (349 on `main`).
 5. Run `ruff check .` and `ruff format --check .`.
 
@@ -73,12 +73,12 @@ All of that comes from one pure function, `project`: integer minor units through
 | `PUT /goals/order` reorders; a missing, foreign or repeated id is `422 order_mismatch` and changes nothing | ✅ Met |
 | A household still learning can create and use goals | ✅ Met |
 | The budget comparison equals 4.1's savings line; `null` with the right reason when the budget feature is off, while learning, and with no savings line | ✅ Met. It's compared against `GET /budgets/2026-09`'s `savings.allocated`, and each reason is tested. |
-| The 21st goal in progress is `409 goal_limit_reached`, through `log_conflict` | ✅ Met. An achieved goal doesn't count toward the limit (tested). The existing guard test confirms `log_conflict` precedes the 409. |
+| The 21st goal in progress is `409 goal_limit_reached`, through `log_conflict` | ✅ Met on create **and on edit**: an edit that takes an achieved goal back into progress is held to the limit. The count runs under a lock on the household's row, so two creates at once can't both pass (`TestTwoCreatesAtOnce`). An achieved goal doesn't count. The existing guard test confirms `log_conflict` precedes the 409. |
 | `GET /goals` carries `projection_version: "v1"` and `assumes_growth: false`, and `disclaimer_version` exactly when a long-term goal exists | ✅ Met |
 | `GET /legal/disclaimer` returns the region's regional disclaimer | ✅ Met: `ca-v1` for a CA household, `404 no_disclaimer` with no region. |
 | Goals feature off → `403` on every goals route; another household's goal → `404` | ✅ Met |
 | Both migrations apply, reverse and reapply in CI | ⏳ Passed locally with `check_migrations.sh`; CI pending |
-| ruff and pytest pass; the database job's count grew | ⏳ Locally: database tests 486 → 519, others 349 → 374, lint clean. Confirm in CI. |
+| ruff and pytest pass; the database job's count grew | ⏳ Locally: database tests 486 → 523, others 349 → 374, lint clean. Confirm in CI. |
 
 Each rule was also checked by breaking it; a test fails each time. The rules broken were:
 - the reorder check (a repeated id);
@@ -101,7 +101,8 @@ Each rule was also checked by breaking it; a test fails each time. The rules bro
 - **Overflow:** an add that would push the total past what the column holds is `422 invalid_amount`, guarded inside the same `UPDATE`.
 - **A past target date can stay put.** `date_in_past` applies only when a date is being set or changed. An overdue goal can be renamed while resending its unchanged date.
 - **`PATCH` can clear fields:** sending `null` clears `kind`, `target_date` or `monthly_contribution`. Sending `null` for `name`, `horizon`, `target` or `saved` is `422 invalid_value`.
-- **New error code `invalid_name`** for a name that is empty after trimming. The ticket set the rule but not the code.
+- **New error code `invalid_name`** for a name that is empty after trimming, or longer than 255 characters once trimmed (review fix: the length was checked before trimming). The ticket set the rule but not the code.
+- **The limit holds on every path (review fix).** `_ensure_room` locks the household's row, then counts goals in progress. Both `create` and an `edit` that takes an achieved goal back into progress go through it. The edit's 409 is logged with the reason `open_goal_limit_on_edit`.
 - **`PUT /goals/order` answers with the full list,** the same shape as `GET /goals`.
 
 ## Open questions / follow-ups
@@ -111,4 +112,5 @@ Each rule was also checked by breaking it; a test fails each time. The rules bro
   - investment growth (it would be projection v2);
   - how debts affect long-term goals;
   - the regional disclaimer's text, which is still the seeded draft. Goals is the first screen to show it, so real wording is needed before launch.
+- **For 5.2 (mobile): "today" is UTC,** as the ticket and `parse_month` specify. For people in Canada, "this month" moves to the next month a few hours early, on the last evening of each month.
 - **For 5.2 (mobile):** projection fields arrive ready to display. `budget_reason` says why the comparison is missing, and `disclaimer_version` says when to show `/legal/disclaimer`.

@@ -11,7 +11,7 @@ import uuid
 from datetime import date
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from app.auth import AuthenticatedUser, current_user
 from app.models.planning import Goal
@@ -330,6 +330,114 @@ class TestTheLimit:
         assert refused.json()["detail"]["code"] == "goal_limit_reached"
         assert achieved.status_code == 201, "an achieved goal is not in progress"
 
+    async def test_editing_a_goal_back_into_progress_is_held_to_the_limit(
+        self, api_client
+    ):
+        """20 in progress and one achieved: raising the achieved one's target
+        would make 21, and is refused like a 21st goal would be."""
+        await a_household(api_client, "+14165578402")
+        for n in range(20):
+            await make(api_client, name=f"Goal {n}")
+        done = await make(api_client, name="Done", saved="1000.00")
+
+        reopened = await api_client.patch(
+            f"/goals/{done['id']}", json={"target": "2000.00"}
+        )
+        renamed = await api_client.patch(
+            f"/goals/{done['id']}", json={"name": "Still done"}
+        )
+
+        assert reopened.status_code == 409
+        assert reopened.json()["detail"]["code"] == "goal_limit_reached"
+        assert renamed.status_code == 200, "an edit that keeps it achieved is fine"
+        listed = (await api_client.get("/goals")).json()["goals"]
+        assert sum(g["status"] != "achieved" for g in listed) == 20
+
+    async def test_a_goal_in_progress_can_be_edited_at_the_limit(self, api_client):
+        await a_household(api_client, "+14165578403")
+        first = await make(api_client, name="Goal 0")
+        for n in range(1, 20):
+            await make(api_client, name=f"Goal {n}")
+
+        moved = await api_client.patch(
+            f"/goals/{first['id']}", json={"target": "5000.00"}
+        )
+
+        assert moved.status_code == 200, "it was already counted"
+
+
+class TestTwoCreatesAtOnce:
+    """The limit counted under a lock on the household, with two real
+    connections: at 19 in progress, two creates at once must not make 21.
+    Commits to the local test database and removes what it wrote."""
+
+    async def test_the_second_waits_and_is_refused(self):
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from app.db import get_engine
+        from app.models.enums import GoalHorizon
+        from app.models.identity import Household
+        from app.services.goals import GoalLimitReached, create
+
+        engine = get_engine()
+        household = Household()
+        async with AsyncSession(engine, expire_on_commit=False) as setup:
+            setup.add(household)
+            await setup.flush()
+            setup.add_all(
+                [
+                    Goal(
+                        household_id=household.id,
+                        name=f"Goal {n}",
+                        horizon=GoalHorizon.short_term,
+                        target_minor_units=100_000,
+                        saved_minor_units=0,
+                        currency="CAD",
+                        priority=n,
+                    )
+                    for n in range(19)
+                ]
+            )
+            await setup.commit()
+
+        def twentieth(session):
+            return create(
+                session,
+                household.id,
+                "CAD",
+                name="Twentieth",
+                kind=None,
+                horizon=GoalHorizon.short_term,
+                target=100_000,
+                saved=0,
+                target_date=None,
+                monthly_contribution=None,
+                today=TODAY,
+            )
+
+        try:
+            async with AsyncSession(engine) as first, AsyncSession(engine) as second:
+                await twentieth(first)
+                racing = asyncio.create_task(twentieth(second))
+                await asyncio.sleep(0.3)
+                assert not racing.done(), "the second waits on the household's lock"
+                await first.commit()
+                with pytest.raises(GoalLimitReached):
+                    await racing
+                await second.rollback()
+
+            async with AsyncSession(engine) as check:
+                count = await check.scalar(
+                    select(func.count(Goal.id)).where(Goal.household_id == household.id)
+                )
+            assert count == 20
+        finally:
+            async with AsyncSession(engine) as cleanup:
+                await cleanup.execute(
+                    text("DELETE FROM household WHERE id = :id"), {"id": household.id}
+                )
+                await cleanup.commit()
+
 
 class TestValidation:
     @pytest.mark.parametrize(
@@ -351,6 +459,17 @@ class TestValidation:
 
         assert response.status_code == 422
         assert response.json()["detail"]["code"] == code
+
+    async def test_a_name_is_measured_after_trimming(self, api_client):
+        await a_household(api_client, "+14165578504")
+
+        padded = await api_client.post("/goals", json=goal(name=f"  {'n' * 255}  "))
+        too_long = await api_client.post("/goals", json=goal(name="n" * 256))
+
+        assert padded.status_code == 201
+        assert padded.json()["name"] == "n" * 255
+        assert too_long.status_code == 422
+        assert too_long.json()["detail"]["code"] == "invalid_name"
 
     async def test_an_overdue_goal_s_date_need_not_move_to_rename_it(
         self, api_client, monkeypatch

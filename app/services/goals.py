@@ -219,14 +219,7 @@ async def create(
     when created does not count against it.
     """
     if saved < target:
-        open_goals = await session.scalar(
-            select(func.count(Goal.id)).where(
-                Goal.household_id == household_id,
-                Goal.saved_minor_units < Goal.target_minor_units,
-            )
-        )
-        if open_goals >= GOAL_LIMIT:
-            raise GoalLimitReached
+        await _ensure_room(session, household_id)
     last = await session.scalar(
         select(func.max(Goal.priority)).where(Goal.household_id == household_id)
     )
@@ -251,12 +244,44 @@ async def create(
 async def edit(
     session: AsyncSession, goal: Goal, changes: dict[str, object], today: date
 ) -> Goal:
-    """Apply the fields the person sent, then re-settle `achieved_at`."""
+    """Apply the fields the person sent, then re-settle `achieved_at`.
+
+    An edit that takes an achieved goal back into progress — a higher target,
+    a lower saved amount — is held to the same limit as creating one, or the
+    limit would be twenty only until someone edited round it.
+    """
+    was_open = goal.saved_minor_units < goal.target_minor_units
+    target = changes.get("target_minor_units", goal.target_minor_units)
+    saved = changes.get("saved_minor_units", goal.saved_minor_units)
+    if not was_open and saved < target:
+        # Counted before the change is applied: this goal is still achieved
+        # in the database, so it is not among those counted.
+        await _ensure_room(session, goal.household_id)
     for field, value in changes.items():
         setattr(goal, field, value)
     _settle_achievement(goal, today)
     await session.flush()
     return goal
+
+
+async def _ensure_room(session: AsyncSession, household_id: uuid.UUID) -> None:
+    """Refuse a goal in progress past the limit — counted under a lock.
+
+    The household's row is locked first, so two requests at once queue up:
+    the second counts after the first has committed, and cannot both see
+    nineteen and make twenty-one. Held until the request's transaction ends.
+    """
+    await session.execute(
+        select(Household.id).where(Household.id == household_id).with_for_update()
+    )
+    in_progress = await session.scalar(
+        select(func.count(Goal.id)).where(
+            Goal.household_id == household_id,
+            Goal.saved_minor_units < Goal.target_minor_units,
+        )
+    )
+    if in_progress >= GOAL_LIMIT:
+        raise GoalLimitReached
 
 
 async def add_money(

@@ -92,6 +92,11 @@ def get_engine() -> AsyncEngine:
             "prepared_statement_name_func": lambda: f"__asyncpg_{uuid4()}__",
         },
         echo=False,
+        # A database error's text otherwise carries the statement's values —
+        # amounts, a score's breakdown, whatever the query was given — and
+        # every logged traceback would write them out. No PII in logs
+        # (CLAUDE.md); the SQL itself is kept, which is what debugging needs.
+        hide_parameters=True,
     )
 
 

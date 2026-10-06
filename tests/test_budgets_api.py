@@ -19,6 +19,7 @@ from sqlalchemy import func, select, text
 from app.models.categorization import Category
 from app.models.enums import ReviewReason, TransactionDirection
 from app.models.money import Transaction
+from app.models.planning import Budget
 from app.services.dashboard import countable, month_bounds
 from tests.conftest import requires_db
 from tests.test_dashboard import a_household, a_system_category_id, setup_wizard, tx
@@ -286,6 +287,104 @@ class TestStillLearning:
 
         assert body["learning"]["transactions"] == 19
 
+    async def test_a_learning_household_s_read_writes_nothing(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165575105")
+        db_session.add_all(filler(household, account, 19, month=8))
+        await db_session.commit()
+
+        await api_client.get(SEPTEMBER)
+
+        budgets = await db_session.scalar(
+            select(func.count(Budget.id)).where(Budget.household_id == household)
+        )
+        assert budgets == 0
+
+    async def test_lines_set_by_hand_show_while_learning(self, api_client, db_session):
+        """Manual budgeting is always available: what the user typed is shown,
+        and nothing is generated around it — not even savings."""
+        household, account = await a_household(api_client, "+14165575106")
+        await setup_wizard(api_client, income="5000.00")
+        groceries = await a_system_category_id(db_session, "groceries")
+        db_session.add_all(
+            [
+                *filler(household, account, 17, month=8),
+                *(
+                    tx(
+                        household,
+                        account,
+                        minor=40_000,
+                        month=m,
+                        category_id=groceries,
+                        description="LOBLAWS",
+                    )
+                    for m in (7, 8)
+                ),
+            ]
+        )
+        await db_session.commit()
+
+        put = await api_client.put(
+            f"{SEPTEMBER}/lines/{groceries}", json={"amount": "300.00"}
+        )
+        read = await api_client.get(SEPTEMBER)
+
+        for response in (put, read):
+            assert response.status_code == 200, response.text
+            body = response.json()
+            assert body["status"] == "learning"
+            assert body["learning"]["transactions"] == 19
+            assert [(line["slug"], line["allocated"]) for line in body["lines"]] == [
+                ("groceries", "300.00")
+            ]
+            assert body["lines"][0]["is_user_set"] is True
+            assert body["savings"] is None
+            assert body["debt"] is None
+
+    async def test_a_line_set_while_learning_is_kept_once_ready(
+        self, api_client, db_session
+    ):
+        """Set on a month that has already ended, while learning. Once the
+        threshold is passed that month is generated around it — editing it
+        early must not have frozen it empty."""
+        household, account = await a_household(api_client, "+14165575107")
+        await setup_wizard(api_client, income="5000.00")
+        groceries = await a_system_category_id(db_session, "groceries")
+        dining = await a_system_category_id(db_session, "dining")
+        db_session.add_all(
+            [
+                *filler(household, account, 17, month=6),
+                *(
+                    tx(
+                        household,
+                        account,
+                        minor=40_000,
+                        month=m,
+                        category_id=groceries,
+                        description="LOBLAWS",
+                    )
+                    for m in (6, 7)
+                ),
+            ]
+        )
+        await db_session.commit()
+        early = await api_client.put(
+            f"{AUGUST}/lines/{dining}", json={"amount": "75.00"}
+        )
+        assert early.json()["status"] == "learning"
+
+        db_session.add(tx(household, account, minor=100, month=8, description="20TH"))
+        await db_session.commit()
+        body = (await api_client.get(AUGUST)).json()
+
+        assert body["status"] == "ready"
+        lines = by_slug(body)
+        assert lines["dining"]["allocated"] == "75.00"
+        assert lines["dining"]["is_user_set"] is True
+        assert lines["groceries"]["allocated"] == "400.00"
+        assert body["savings"]["allocated"] == "4525.00"
+
 
 class TestTheUserDecides:
     async def test_a_line_set_by_hand_survives_regeneration(
@@ -379,13 +478,13 @@ class TestTheUserDecides:
 
         assert by_slug(body)["dining"]["allocated"] == "123.45"
 
-    @pytest.mark.parametrize("amount", ["abc", "-5.00", "1.001", ""])
+    @pytest.mark.parametrize(
+        "amount", ["abc", "-5.00", "1.001", "", "100000000000000000000"]
+    )
     async def test_an_amount_that_is_not_one_is_refused(
         self, api_client, db_session, amount
     ):
-        _, _, ids = await a_ready_household(
-            api_client, db_session, f"+1416557530{len(amount)}"
-        )
+        _, _, ids = await a_ready_household(api_client, db_session, "+14165575300")
 
         response = await api_client.put(
             f"{SEPTEMBER}/lines/{ids['groceries']}", json={"amount": amount}
@@ -396,6 +495,53 @@ class TestTheUserDecides:
 
 
 class TestAMonthThatHasEnded:
+    async def test_one_read_before_its_history_fills_in_once_imported(
+        self, api_client, db_session
+    ):
+        """July is read when only August is imported; then April to June
+        arrive. July must not stay empty for good."""
+        household, account = await a_household(api_client, "+14165575402")
+        groceries = await a_system_category_id(db_session, "groceries")
+        db_session.add_all(filler(household, account, 20, month=8))
+        await db_session.commit()
+        before = (await api_client.get("/budgets/2026-07")).json()
+        assert before["status"] == "ready"
+        assert before["lines"] == []
+
+        db_session.add_all(
+            [
+                tx(
+                    household,
+                    account,
+                    minor=40_000,
+                    month=m,
+                    day=10,
+                    category_id=groceries,
+                    description="LOBLAWS",
+                )
+                for m in (4, 5, 6)
+            ]
+        )
+        await db_session.commit()
+        after = by_slug((await api_client.get("/budgets/2026-07")).json())
+
+        assert after["groceries"]["allocated"] == "400.00"
+
+    async def test_it_keeps_the_income_it_was_built_against(
+        self, api_client, db_session
+    ):
+        await a_ready_household(api_client, db_session, "+14165575403")
+        august = (await api_client.get(AUGUST)).json()
+        assert august["expected_income"] == "5000.00"
+
+        await setup_wizard(api_client, income="6000.00")
+        again = (await api_client.get(AUGUST)).json()
+        september = (await api_client.get(SEPTEMBER)).json()
+
+        assert again["expected_income"] == "5000.00"
+        assert again["savings"] == august["savings"]
+        assert september["expected_income"] == "6000.00", "a running month moves"
+
     async def test_it_keeps_its_budget_when_its_inputs_change(
         self, api_client, db_session
     ):
@@ -483,16 +629,19 @@ class TestBoundaries:
     async def test_one_household_never_sees_another_s_budget(
         self, api_client, db_session
     ):
+        """Both past the threshold, same month: each reads only its own."""
         _, _, ids = await a_ready_household(api_client, db_session, "+14165575604")
-        await api_client.put(
+        mine = await api_client.put(
             f"{SEPTEMBER}/lines/{ids['groceries']}", json={"amount": "999.00"}
         )
-        await a_household(api_client, "+14165575605")
+        assert by_slug(mine.json())["groceries"]["allocated"] == "999.00"
 
-        body = (await api_client.get(SEPTEMBER)).json()
+        await a_ready_household(api_client, db_session, "+14165575605")
+        theirs = (await api_client.get(SEPTEMBER)).json()
 
-        assert body["status"] == "learning"
-        assert body["learning"]["transactions"] == 0
+        assert theirs["status"] == "ready"
+        assert by_slug(theirs)["groceries"]["allocated"] == "450.00"
+        assert by_slug(theirs)["groceries"]["is_user_set"] is False
 
     @pytest.mark.parametrize(
         ("month", "code"),

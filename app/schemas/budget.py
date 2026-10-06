@@ -46,19 +46,20 @@ class BudgetOut(BaseModel):
     currency: str
     # Present only while learning.
     learning: LearningOut | None = None
-    # The rest are present only when ready.
-    expected_income: str | None = None
-    lines: list[BudgetLineOut] = []
+    expected_income: str
+    # While learning, only the lines the user set by hand: nothing is
+    # generated until there is enough history to generate from.
+    lines: list[BudgetLineOut]
     # The two allocations with rules of their own; null when there is none.
     savings: BudgetLineOut | None = None
     debt: BudgetLineOut | None = None
-    total_allocated: str | None = None
-    total_spent: str | None = None
+    total_allocated: str
+    total_spent: str
     # How far the lines exceed expected income; null when they do not.
     shortfall: str | None = None
     # Spending with no category: reported, never budgeted.
-    uncategorised_spent: str | None = None
-    uncategorised_count: int | None = None
+    uncategorised_spent: str
+    uncategorised_count: int
 
 
 class BudgetLineIn(BaseModel):

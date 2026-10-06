@@ -51,6 +51,18 @@ class Budget(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     # can tell a generated budget from one somebody has shaped.
     is_user_modified: Mapped[bool] = mapped_column(nullable=False, default=False)
 
+    # True once a generation had at least one month of history to work from.
+    # Only then does a month that has ended stop regenerating: a past month
+    # read before its statements were imported must not stay empty for good.
+    has_history: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
+    # The expected income the lines were generated against, so a month that
+    # has ended keeps its savings and shortfall when the wizard changes later.
+    expected_income_minor_units: Mapped[int] = money_amount(
+        "expected_income_minor_units", nullable=False, default=0, server_default="0"
+    )
+
     lines: Mapped[list[BudgetLine]] = relationship(
         back_populates="budget", cascade="all, delete-orphan"
     )

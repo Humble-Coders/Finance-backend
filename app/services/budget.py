@@ -30,7 +30,12 @@ disagree with the dashboard figure beside it.
 **Regeneration.** There is no worker, so a budget is (re)generated when it is
 read. A month still running is recomputed on every read: lines the user set
 keep their amount and only their suggestion moves. A month that has ended
-keeps the budget it had; one that never had a budget gets one on first read.
+keeps the budget it had once that budget was built from some history; one
+read before its statements were imported fills in when they are.
+
+**Still learning.** Nothing is generated until the household passes the
+threshold in `app/services/learning.py`, but lines set by hand are kept and
+shown: manual budgeting is always available.
 """
 
 from __future__ import annotations
@@ -200,9 +205,19 @@ async def budget_for(
     currency: str,
     month: date,
     today: date,
+    *,
+    ready: bool,
 ) -> BudgetView:
-    """[month]'s budget, generated or regenerated as the rules above say."""
-    budget = await _prepared(session, household_id, currency, month, today)
+    """[month]'s budget, generated or regenerated as the rules above say.
+
+    While the household is still learning ([ready] false) nothing is
+    generated, and nothing is written: the view holds only the lines the user
+    set by hand, if any.
+    """
+    if not ready:
+        budget = await _existing(session, household_id, month)
+        return await _view(session, budget, household_id, currency, month)
+    budget = await _prepared(session, household_id, currency, month, today, ready)
     await session.flush()
     return await _view(session, budget, household_id, currency, month)
 
@@ -215,15 +230,18 @@ async def set_line(
     today: date,
     category: Category,
     amount: int,
+    *,
+    ready: bool,
 ) -> BudgetView:
     """Set [category]'s line by hand, creating it if there was none.
 
     Manual budgeting is always available, so a category the generator left
-    out — or one with no history at all — can still be given a line.
+    out — or one with no history at all, or a household still learning — can
+    still be given a line.
     """
     if category.slug in NOT_BUDGETABLE:
         raise NotBudgetable(category.slug)
-    budget = await _prepared(session, household_id, currency, month, today)
+    budget = await _prepared(session, household_id, currency, month, today, ready)
     system = await _system_ids(session)
     key = _line_key(category.id, category.slug, system)
     line = _find(budget, key)
@@ -239,9 +257,7 @@ async def set_line(
     else:
         line.allocated_minor_units = amount
         line.is_user_set = True
-    income = await _expected_income(session, household_id, currency)
-    _rebalance_savings(budget, income, system[SAVINGS_SLUG], currency)
-    await session.flush()
+    await _settle(session, budget, household_id, currency, system, ready)
     return await _view(session, budget, household_id, currency, month)
 
 
@@ -252,13 +268,15 @@ async def reset_line(
     month: date,
     today: date,
     category: Category,
+    *,
+    ready: bool,
 ) -> BudgetView | None:
     """Put [category]'s line back to its suggestion. None when it has no line.
 
     A hand-added line with nothing to go back to is removed rather than left
     at zero: there is no suggestion for it to return to.
     """
-    budget = await _prepared(session, household_id, currency, month, today)
+    budget = await _prepared(session, household_id, currency, month, today, ready)
     system = await _system_ids(session)
     line = _find(budget, _line_key(category.id, category.slug, system))
     if line is None:
@@ -269,10 +287,41 @@ async def reset_line(
             line.allocated_minor_units = line.suggested_minor_units
         else:
             budget.lines.remove(line)
-    income = await _expected_income(session, household_id, currency)
-    _rebalance_savings(budget, income, system[SAVINGS_SLUG], currency)
-    await session.flush()
+    await _settle(session, budget, household_id, currency, system, ready)
     return await _view(session, budget, household_id, currency, month)
+
+
+async def _settle(
+    session: AsyncSession,
+    budget: Budget,
+    household_id: uuid.UUID,
+    currency: str,
+    system: Mapping[str, uuid.UUID],
+    ready: bool,
+) -> None:
+    """After a hand edit: rebalance savings, unless still learning.
+
+    While learning the budget holds only what the user typed; a savings line
+    worked out from it would be a generated line in all but name.
+    """
+    if ready:
+        income = await _income_for(session, budget, household_id, currency)
+        _rebalance_savings(budget, income, system[SAVINGS_SLUG], currency)
+    budget.is_user_modified = any(line.is_user_set for line in budget.lines)
+    await session.flush()
+
+
+async def _existing(
+    session: AsyncSession, household_id: uuid.UUID, month: date
+) -> Budget | None:
+    return await session.scalar(
+        select(Budget)
+        .where(
+            Budget.household_id == household_id,
+            Budget.period_start == month_bounds(month)[0],
+        )
+        .options(selectinload(Budget.lines))
+    )
 
 
 async def _prepared(
@@ -281,6 +330,7 @@ async def _prepared(
     currency: str,
     month: date,
     today: date,
+    ready: bool,
 ) -> Budget:
     """The month's budget row, locked, with its lines brought up to date.
 
@@ -288,9 +338,15 @@ async def _prepared(
     requests on launch — cannot both generate lines and collide on
     `uq_budget_line_budget_category`. The second waits and then regenerates
     from what the first wrote.
+
+    Regenerated while the month is running, and for a month that has ended
+    until a generation has had some history to work from — so a past month
+    read before its statements were imported fills in once they are. Never
+    while the household is still learning: a budget generated then would be
+    built from too little, and for a past month frozen that way.
     """
     first, last = month_bounds(month)
-    created = await session.scalar(
+    await session.execute(
         pg_insert(Budget.__table__)
         .values(
             id=uuid.uuid4(),
@@ -301,7 +357,6 @@ async def _prepared(
             is_user_modified=False,
         )
         .on_conflict_do_nothing(index_elements=["household_id", "period_start"])
-        .returning(Budget.__table__.c.id)
     )
     budget = await session.scalar(
         select(Budget)
@@ -311,7 +366,7 @@ async def _prepared(
         .execution_options(populate_existing=True)
     )
     assert budget is not None  # inserted above, or there already
-    if created is not None or last >= today:
+    if ready and (last >= today or not budget.has_history):
         await _regenerate(session, budget, household_id, currency, month)
     return budget
 
@@ -324,7 +379,7 @@ async def _regenerate(
     month: date,
 ) -> None:
     system = await _system_ids(session)
-    history = await _history(session, household_id, currency, month)
+    window, history = await _history(session, household_id, currency, month)
     income = await _expected_income(session, household_id, currency)
     minimums = await session.scalar(
         select(func.coalesce(func.sum(Debt.minimum_payment_minor_units), 0)).where(
@@ -332,6 +387,8 @@ async def _regenerate(
         )
     )
     suggestion = suggest(history, income, int(minimums), currency)
+    budget.has_history = bool(window)
+    budget.expected_income_minor_units = income
 
     targets = dict(suggestion.spending)
     if suggestion.debt > 0:
@@ -402,8 +459,9 @@ def _rebalance_savings(
 
 async def _history(
     session: AsyncSession, household_id: uuid.UUID, currency: str, month: date
-) -> dict[CategoryRef, list[int]]:
-    """Each category's monthly debit totals over the window before [month].
+) -> tuple[list[date], dict[CategoryRef, list[int]]]:
+    """The window before [month], and each category's monthly debit totals
+    over it.
 
     The window is the three months before [month], less any before the
     household's first countable row: months we hold no statement for are not
@@ -420,7 +478,7 @@ async def _history(
         if earliest is not None and m >= earliest.replace(day=1)
     ]
     if not window:
-        return {}
+        return window, {}
     position = {m: i for i, m in enumerate(window)}
     bucket = func.date_trunc("month", Transaction.occurred_on)
     result = await session.execute(
@@ -442,7 +500,7 @@ async def _history(
     history: dict[CategoryRef, list[int]] = defaultdict(lambda: [0] * len(window))
     for category_id, slug, at, total in result:
         history[CategoryRef(category_id, slug)][position[at.date()]] = int(total)
-    return dict(history)
+    return window, dict(history)
 
 
 async def _expected_income(
@@ -463,6 +521,21 @@ async def _expected_income(
     ):
         return 0
     return profile.monthly_income_minor_units
+
+
+async def _income_for(
+    session: AsyncSession, budget: Budget | None, household_id: uuid.UUID, currency: str
+) -> int:
+    """The income a budget is measured against.
+
+    The one it was generated against, once it has been generated from
+    history — so a month that has ended keeps its savings and shortfall when
+    the wizard changes later. Today's figure before that (still learning, or
+    no history yet), which is also what a running month stores on every read.
+    """
+    if budget is not None and budget.has_history:
+        return budget.expected_income_minor_units
+    return await _expected_income(session, household_id, currency)
 
 
 async def _system_ids(session: AsyncSession) -> dict[str, uuid.UUID]:
@@ -494,7 +567,7 @@ def _find(budget: Budget, category_id: uuid.UUID) -> BudgetLine | None:
 
 async def _view(
     session: AsyncSession,
-    budget: Budget,
+    budget: Budget | None,
     household_id: uuid.UUID,
     currency: str,
     month: date,
@@ -526,7 +599,8 @@ async def _view(
         else:
             spent[_line_key(category_id, slug, system)] += int(total)
 
-    ids = [line.category_id for line in budget.lines]
+    own = budget.lines if budget is not None else []
+    ids = [line.category_id for line in own]
     categories = {
         category.id: category
         for category in (
@@ -546,14 +620,14 @@ async def _view(
             spent=spent.get(line.category_id, 0),
         )
 
-    views = [view(line) for line in budget.lines]
+    views = [view(line) for line in own]
     savings = next((v for v in views if v.category_id == system[SAVINGS_SLUG]), None)
     debt = next((v for v in views if v.category_id == system[DEBT_PAYMENT_SLUG]), None)
     lines = sorted(
         (v for v in views if v.category_id not in {system[s] for s in DEDICATED}),
         key=lambda v: (-v.allocated, v.name),
     )
-    income = await _expected_income(session, household_id, currency)
+    income = await _income_for(session, budget, household_id, currency)
     total_allocated = sum(v.allocated for v in views)
     over = total_allocated - income
     return BudgetView(

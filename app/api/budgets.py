@@ -28,9 +28,13 @@ from app.services import budget as service
 from app.services.capabilities import currency_for, require_feature
 from app.services.dashboard import parse_month
 from app.services.identity import ResolvedIdentity
-from app.services.learning import learning_state
+from app.services.learning import LearningState, learning_state
 
 FEATURE = "auto_budget"
+
+# The largest line a BIGINT column holds. Anything above it is not a budget
+# anybody means, and without this it reaches the database as a 500.
+MAX_LINE_MINOR_UNITS = 2**63 - 1
 
 router = APIRouter(
     prefix="/budgets",
@@ -100,7 +104,12 @@ def _not_budgetable(slug: str) -> HTTPException:
     )
 
 
-def _out(view: service.BudgetView) -> BudgetOut:
+def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
+    """One shape whether or not the household is still learning.
+
+    While learning, `status` says so, `learning` carries the progress, and
+    the lines are only the ones the user set by hand — nothing generated.
+    """
     currency = view.currency
 
     def money(minor: int) -> str:
@@ -120,9 +129,17 @@ def _out(view: service.BudgetView) -> BudgetOut:
         )
 
     return BudgetOut(
-        status="ready",
+        status="ready" if learning.ready else "learning",
         month=view.month,
         currency=currency,
+        learning=None
+        if learning.ready
+        else LearningOut(
+            ready=False,
+            complete_months=learning.complete_months,
+            transactions=learning.transactions,
+            needs=LearningNeedsOut(**learning.needs),
+        ),
         expected_income=money(view.expected_income),
         lines=[line(item) for item in view.lines],
         savings=line(view.savings),
@@ -135,7 +152,14 @@ def _out(view: service.BudgetView) -> BudgetOut:
     )
 
 
-@router.get("/{month}", response_model=BudgetOut, response_model_exclude_none=False)
+def _invalid_amount(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={"code": "invalid_amount", "field": "amount", "message": message},
+    )
+
+
+@router.get("/{month}", response_model=BudgetOut)
 async def read_budget(
     month: str,
     identity: ResolvedIdentity = Depends(current_identity),
@@ -144,27 +168,18 @@ async def read_budget(
     """The month's budget, or how far the household is from having one.
 
     "Still learning" is a 200: it is a state of the account, not an error.
+    The lines the user has set by hand show either way.
     """
     when = _month(month)
     today = _today()
     household = identity.household
     currency = await currency_for(session, household)
     learning = await learning_state(session, household.id, currency, today)
-    if not learning.ready:
-        return BudgetOut(
-            status="learning",
-            month=when,
-            currency=currency,
-            learning=LearningOut(
-                ready=False,
-                complete_months=learning.complete_months,
-                transactions=learning.transactions,
-                needs=LearningNeedsOut(**learning.needs),
-            ),
-        )
-    view = await service.budget_for(session, household.id, currency, when, today)
+    view = await service.budget_for(
+        session, household.id, currency, when, today, ready=learning.ready
+    )
     await session.commit()
-    return _out(view)
+    return _out(view, learning)
 
 
 @router.put("/{month}/lines/{category_id}", response_model=BudgetOut)
@@ -177,6 +192,7 @@ async def set_line(
 ) -> BudgetOut:
     """Set one line by hand. Regeneration will not move it again."""
     when = _month(month)
+    today = _today()
     household = identity.household
     currency = await currency_for(session, household)
     category = await _visible_category(session, household.id, category_id)
@@ -185,24 +201,24 @@ async def set_line(
     try:
         amount = to_minor_units(body.amount, currency)
     except MoneyError as error:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "invalid_amount", "field": "amount", "message": str(error)},
-        ) from error
+        raise _invalid_amount(str(error)) from error
     if amount < 0:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "code": "invalid_amount",
-                "field": "amount",
-                "message": "A budget line cannot be negative.",
-            },
-        )
+        raise _invalid_amount("A budget line cannot be negative.")
+    if amount > MAX_LINE_MINOR_UNITS:
+        raise _invalid_amount("That amount is too large.")
+    learning = await learning_state(session, household.id, currency, today)
     view = await service.set_line(
-        session, household.id, currency, when, _today(), category, amount
+        session,
+        household.id,
+        currency,
+        when,
+        today,
+        category,
+        amount,
+        ready=learning.ready,
     )
     await session.commit()
-    return _out(view)
+    return _out(view, learning)
 
 
 @router.delete("/{month}/lines/{category_id}/override", response_model=BudgetOut)
@@ -214,13 +230,15 @@ async def reset_line(
 ) -> BudgetOut:
     """Put one line back to its suggestion; a hand-added line with none goes."""
     when = _month(month)
+    today = _today()
     household = identity.household
     currency = await currency_for(session, household)
     category = await _visible_category(session, household.id, category_id)
     if category.slug in service.NOT_BUDGETABLE:
         raise _not_budgetable(category.slug)
+    learning = await learning_state(session, household.id, currency, today)
     view = await service.reset_line(
-        session, household.id, currency, when, _today(), category
+        session, household.id, currency, when, today, category, ready=learning.ready
     )
     if view is None:
         await session.rollback()
@@ -228,4 +246,4 @@ async def reset_line(
             status_code=status.HTTP_404_NOT_FOUND, detail={"code": "not_found"}
         )
     await session.commit()
-    return _out(view)
+    return _out(view, learning)

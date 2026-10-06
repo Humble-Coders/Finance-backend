@@ -9,17 +9,21 @@ Two halves, as in `app/services/budget.py`:
 * **`current_score`** gathers the inputs, scores them, and keeps today's
   snapshot.
 
-**Formula v1** (manager decision 2026-10-04, settling PRD OD4):
+**Formula v2** (backend #66) — v1's three parts (manager decision
+2026-10-04, settling PRD OD4) plus goal completion, with v1's weights scaled
+to 85 % and goals at 15 %:
 
-* `savings_consistency` (40): over the last three complete months, each
+* `savings_consistency` (34): over the last three complete months, each
   month's savings rate `net / income`, clamped to 0–20 % and scaled so 20 %
   scores 100; the average of the months that had income.
-* `spending_vs_budget` (35): last complete month's spending lines (not
+* `spending_vs_budget` (29.75): last complete month's spending lines (not
   savings or debt). Within allocation scores 100; over it,
   `max(0, 100 - 100 * overspend / allocated)`. Weighted by allocation.
-* `debt_payments` (25): last complete month, `min(100, 100 * paid /
+* `debt_payments` (21.25): last complete month, `min(100, 100 * paid /
   required)`, `required` being the debts' minimum payments. No debts scores
   100: owing nothing is not a debt problem.
+* `goal_completion` (15): how goals with a date are keeping pace; see
+  `goal_completion`.
 
 A component that cannot be scored is left out and the weights renormalised
 over the rest; with none left there is no score. The score is the weighted
@@ -37,7 +41,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date
 from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import delete, func, select
@@ -45,7 +49,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.derived import HealthScoreSnapshot
-from app.models.planning import Debt
+from app.models.planning import Debt, Goal
 from app.services.budget import budget_for
 from app.services.dashboard import figures_by_month, months_back
 from app.services.learning import LearningState, learning_state
@@ -57,17 +61,27 @@ from app.services.learning import LearningState, learning_state
 # trend never compares two formulas without saying so — and a snapshot whose
 # breakdown no longer reproduces its score is how a silent change is caught.
 
-FORMULA_VERSION = "v1"
+FORMULA_VERSION = "v2"
 
 SAVINGS_CONSISTENCY = "savings_consistency"
 SPENDING_VS_BUDGET = "spending_vs_budget"
 DEBT_PAYMENTS = "debt_payments"
+GOAL_COMPLETION = "goal_completion"
 
-WEIGHTS: dict[str, int] = {
-    SAVINGS_CONSISTENCY: 40,
-    SPENDING_VS_BUDGET: 35,
-    DEBT_PAYMENTS: 25,
+# v2 (backend #66) adds goal completion at 15 and scales v1's three weights
+# (40 / 35 / 25) to the remaining 85 % — so a household with no goal to count
+# gets exactly the score v1 gave it, and the day v2 ships moves nobody who
+# has no goals. Manager decision, 2026-10-06; the PO may retune.
+WEIGHTS: dict[str, Decimal] = {
+    SAVINGS_CONSISTENCY: Decimal("34"),
+    SPENDING_VS_BUDGET: Decimal("29.75"),
+    DEBT_PAYMENTS: Decimal("21.25"),
+    GOAL_COMPLETION: Decimal("15"),
 }
+
+# How long an achieved goal keeps counting, at full marks, before it drops out:
+# finishing one lifts the score, but not forever.
+ACHIEVED_COUNTS_MONTHS = 12
 
 # A savings rate at or above this scores full marks.
 SAVINGS_RATE_CAP = Decimal("0.20")
@@ -116,11 +130,26 @@ class DebtPicture:
 
 
 @dataclass(frozen=True)
+class GoalPace:
+    """One goal as goal completion reads it (5.1's table). Months by their 1st."""
+
+    target: int
+    saved: int
+    created_month: date
+    # None for a goal without a date: no pace to judge, so it is not counted.
+    target_month: date | None
+    achieved_month: date | None
+
+
+@dataclass(frozen=True)
 class ScoreInputs:
     # Complete months in the window that have any countable rows.
     months: tuple[MonthFlow, ...]
     budget_lines: tuple[BudgetLineUse, ...]
     debt: DebtPicture
+    # v2. Empty, and None, on a v1 snapshot's breakdown, which had neither.
+    goals: tuple[GoalPace, ...] = ()
+    last_complete_month: date | None = None
 
 
 @dataclass(frozen=True)
@@ -205,32 +234,87 @@ def debt_payments(debt: DebtPicture) -> Decimal | None:
     return min(_HUNDRED, _HUNDRED * Decimal(debt.paid) / Decimal(debt.required))
 
 
+def _month_index(month: date) -> int:
+    return month.year * 12 + month.month - 1
+
+
+def goal_completion(
+    goals: tuple[GoalPace, ...], last_complete_month: date | None
+) -> Decimal | None:
+    """How goals are keeping pace, averaged over those that count; None if none do.
+
+    * **Which count:** goals with a target date, created before the last
+      complete month — so a full month has passed to judge pace against.
+    * **Achieved:** 100 while the achievement month is within
+      `ACHIEVED_COUNTS_MONTHS` of the last complete month, then left out. The
+      same rule on which count applies, so a goal made and filled the same day
+      is not a year of full marks.
+    * **Otherwise:** pace on a straight line from the creation month to the
+      target month, both counted. By the end of the last complete month a goal
+      should have `target × elapsed / total`; it scores `saved` against that,
+      capped at 100. Past its date, it is judged against the whole target.
+      `saved` is today's — goals keep no history.
+    * **The component** is the plain average, so one large target cannot
+      drown out the rest.
+    """
+    if last_complete_month is None:
+        return None
+    last = _month_index(last_complete_month)
+    scores: list[Decimal] = []
+    for goal in goals:
+        if goal.target_month is None:
+            continue
+        created = _month_index(goal.created_month)
+        if created >= last:
+            continue
+        achieved = goal.achieved_month is not None or goal.saved >= goal.target
+        if achieved:
+            achieved_on = _month_index(goal.achieved_month or last_complete_month)
+            if last - achieved_on < ACHIEVED_COUNTS_MONTHS:
+                scores.append(_HUNDRED)
+            continue
+        total = _month_index(goal.target_month) - created + 1
+        elapsed = last - created + 1
+        expected = (
+            Decimal(goal.target)
+            if total <= 0 or elapsed >= total
+            else Decimal(goal.target) * elapsed / total
+        )
+        scores.append(min(_HUNDRED, _HUNDRED * Decimal(goal.saved) / expected))
+    if not scores:
+        return None
+    # Summed in a fixed order, so the same goals in any order give the same total.
+    return sum(sorted(scores), _ZERO) / len(scores)
+
+
 def score(inputs: ScoreInputs) -> ScoreResult:
     """The score for [inputs]: deterministic, and order-independent."""
     raw = {
         SAVINGS_CONSISTENCY: savings_consistency(inputs.months),
         SPENDING_VS_BUDGET: spending_vs_budget(inputs.budget_lines),
         DEBT_PAYMENTS: debt_payments(inputs.debt),
+        GOAL_COMPLETION: goal_completion(inputs.goals, inputs.last_complete_month),
     }
-    present = sum(WEIGHTS[key] for key, value in raw.items() if value is not None)
+    present = sum(
+        (WEIGHTS[key] for key, value in raw.items() if value is not None), _ZERO
+    )
     components = tuple(
         ComponentResult(
             key=key,
             score=value,
-            weight=(
-                _ZERO
-                if value is None
-                else Decimal(WEIGHTS[key]) * _HUNDRED / Decimal(present)
-            ),
+            weight=(_ZERO if value is None else WEIGHTS[key] * _HUNDRED / present),
             available=value is not None,
         )
         for key, value in raw.items()
     )
     if present == 0:
         return ScoreResult(None, FORMULA_VERSION, components)
-    total = sum(
-        (c.score * WEIGHTS[c.key] for c in components if c.score is not None), _ZERO
-    ) / Decimal(present)
+    total = (
+        sum(
+            (c.score * WEIGHTS[c.key] for c in components if c.score is not None), _ZERO
+        )
+        / present
+    )
     return ScoreResult(_round(total), FORMULA_VERSION, components)
 
 
@@ -263,6 +347,17 @@ def to_json(inputs: ScoreInputs, result: ScoreResult) -> dict:
                 "required": inputs.debt.required,
                 "paid": inputs.debt.paid,
             },
+            "goals": [
+                {
+                    "target": g.target,
+                    "saved": g.saved,
+                    "created_month": g.created_month.isoformat(),
+                    "target_month": _iso(g.target_month),
+                    "achieved_month": _iso(g.achieved_month),
+                }
+                for g in sorted(inputs.goals, key=_goal_order)
+            ],
+            "last_complete_month": _iso(inputs.last_complete_month),
         },
         "components": [
             {
@@ -276,7 +371,31 @@ def to_json(inputs: ScoreInputs, result: ScoreResult) -> dict:
     }
 
 
+def _iso(day: date | None) -> str | None:
+    return None if day is None else day.isoformat()
+
+
+def _day(raw: str | None) -> date | None:
+    return None if raw is None else date.fromisoformat(raw)
+
+
+def _goal_order(goal: GoalPace) -> tuple:
+    return (
+        goal.created_month,
+        goal.target_month or date.min,
+        goal.achieved_month or date.min,
+        goal.target,
+        goal.saved,
+    )
+
+
 def inputs_from_json(data: dict) -> ScoreInputs:
+    """The inputs a snapshot was scored from.
+
+    A v1 snapshot has no goals and no last complete month; those read as
+    empty, which is exactly what v1 counted — so every stored snapshot still
+    reproduces its stored score.
+    """
     stored = data["inputs"]
     return ScoreInputs(
         months=tuple(
@@ -288,6 +407,17 @@ def inputs_from_json(data: dict) -> ScoreInputs:
             for line in stored["budget_lines"]
         ),
         debt=DebtPicture(**stored["debt"]),
+        goals=tuple(
+            GoalPace(
+                target=g["target"],
+                saved=g["saved"],
+                created_month=date.fromisoformat(g["created_month"]),
+                target_month=_day(g["target_month"]),
+                achieved_month=_day(g["achieved_month"]),
+            )
+            for g in stored.get("goals", [])
+        ),
+        last_complete_month=_day(stored.get("last_complete_month")),
     )
 
 
@@ -395,6 +525,8 @@ async def current_score(
             required=int(required),
             paid=last_figures.debt_paid,
         ),
+        goals=await _goal_paces(session, household_id),
+        last_complete_month=last,
     )
     result = score(inputs)
     if result.score is not None:
@@ -409,6 +541,28 @@ async def current_score(
             )
         )
     return HealthScore(learning, inputs, result, await _history(session, household_id))
+
+
+async def _goal_paces(
+    session: AsyncSession, household_id: uuid.UUID
+) -> tuple[GoalPace, ...]:
+    """The household's goals (5.1) as goal completion reads them.
+
+    Months are taken in UTC, the convention every "this month" here follows.
+    """
+    goals = await session.scalars(select(Goal).where(Goal.household_id == household_id))
+    return tuple(
+        GoalPace(
+            target=goal.target_minor_units,
+            saved=goal.saved_minor_units,
+            created_month=goal.created_at.astimezone(UTC).date().replace(day=1),
+            target_month=goal.target_date.replace(day=1) if goal.target_date else None,
+            achieved_month=goal.achieved_at.replace(day=1)
+            if goal.achieved_at
+            else None,
+        )
+        for goal in goals.all()
+    )
 
 
 async def _history(

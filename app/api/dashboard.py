@@ -159,7 +159,12 @@ async def _score_out(
             score=None if held is None else held.score,
             formula_version=None if held is None else held.formula_version,
             scored_on=None if held is None else held.scored_on,
-            previous_score=await _previous_score(session, household_id, month),
+            previous_score=await _previous_score(
+                session,
+                household_id,
+                month,
+                None if held is None else held.formula_version,
+            ),
         )
 
     current = await scores.current_score(session, household_id, currency, today)
@@ -184,21 +189,37 @@ async def _score_out(
         formula_version=result.formula_version if scored else None,
         scored_on=shown_from if scored else None,
         previous_score=await _previous_score(
-            session, household_id, shown_from.replace(day=1)
+            session,
+            household_id,
+            shown_from.replace(day=1),
+            result.formula_version if scored else None,
         ),
         notice=notice,
     )
 
 
 async def _previous_score(
-    session: AsyncSession, household_id: uuid.UUID, month: date
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    month: date,
+    formula_version: str | None,
 ) -> int | None:
-    """The last snapshot in the month before [month]; None if there is none."""
+    """The last snapshot in the month before [month], for "+4 since last month".
+
+    None when there is none, when no score is shown, and when that snapshot was
+    scored by a different formula (backend #66): the day v2 ships, a change
+    from a v1 score would be partly the formula moving, not the person. The
+    app shows no change label for None.
+    """
+    if formula_version is None:
+        return None
     before = service.months_back(month, 2)[0]
     snapshot = await _last_snapshot(
         session, household_id, before, service.month_bounds(before)[1]
     )
-    return None if snapshot is None else snapshot.score
+    if snapshot is None or snapshot.formula_version != formula_version:
+        return None
+    return snapshot.score
 
 
 async def _budget_section(

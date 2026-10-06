@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 
 from app.api import (
     accounts,
+    budgets,
     capabilities,
     categories,
     dashboard,
@@ -38,6 +39,7 @@ app.add_exception_handler(RequestValidationError, errors.validation_error)
 
 app.include_router(health.router)
 app.include_router(accounts.router)
+app.include_router(budgets.router)
 app.include_router(capabilities.router)
 app.include_router(dashboard.router)
 app.include_router(categories.router)

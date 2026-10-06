@@ -47,8 +47,8 @@ class Budget(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     period_end: Mapped[date] = mapped_column(Date, nullable=False)
     currency: Mapped[str] = money_currency()
 
-    # True when the user has edited the generated allocation, so regeneration
-    # does not silently overwrite their intent.
+    # True when any line is user-set (`BudgetLine.is_user_set`), so a reader
+    # can tell a generated budget from one somebody has shaped.
     is_user_modified: Mapped[bool] = mapped_column(nullable=False, default=False)
 
     lines: Mapped[list[BudgetLine]] = relationship(
@@ -81,7 +81,17 @@ class BudgetLine(UUIDMixin, TimestampMixin, Base):
     allocated_minor_units: Mapped[int] = money_amount(
         "allocated_minor_units", nullable=False
     )
+    # What the generator would allocate, kept beside `allocated` so a line the
+    # user set can still show the suggestion moving underneath it.
+    suggested_minor_units: Mapped[int] = money_amount(
+        "suggested_minor_units", nullable=False, default=0, server_default="0"
+    )
     currency: Mapped[str] = money_currency()
+
+    # Set by hand: regeneration updates `suggested` and leaves `allocated`.
+    is_user_set: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
 
     budget: Mapped[Budget] = relationship(back_populates="lines")
 

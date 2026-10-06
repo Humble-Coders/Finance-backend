@@ -15,7 +15,7 @@ Rules:
     want rounding (e.g. LLM-extracted values) must opt in explicitly.
 """
 
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal, InvalidOperation
 
 __all__ = [
     "MoneyError",
@@ -23,6 +23,7 @@ __all__ = [
     "to_minor_units",
     "from_minor_units",
     "normalize",
+    "round_up_to_whole_unit",
 ]
 
 # ISO 4217 minor-unit exponents. Extend as markets are added (PRD §4.6).
@@ -109,3 +110,27 @@ def normalize(amount: str, currency: str, *, allow_rounding: bool = False) -> st
     return from_minor_units(
         to_minor_units(amount, currency, allow_rounding=allow_rounding), currency
     )
+
+
+def round_up_to_whole_unit(minor_units: int | Decimal, currency: str) -> int:
+    """Minor units -> the next whole currency unit at or above it, in minor units.
+
+    >>> round_up_to_whole_unit(12000, "CAD")
+    12000
+    >>> round_up_to_whole_unit(12001, "CAD")
+    12100
+    >>> round_up_to_whole_unit(Decimal("12000.5"), "CAD")
+    12100
+
+    For a suggested budget line: $412.37 of spending suggests $413, never $412,
+    which would be a budget the household is already over. Accepts a Decimal
+    because a median of two months can fall on half a minor unit. Ceiling, not
+    half-up, so a negative input moves toward zero.
+    """
+    if isinstance(minor_units, bool) or not isinstance(minor_units, int | Decimal):
+        raise MoneyError(
+            f"minor units must be an int or Decimal, got {type(minor_units).__name__}"
+        )
+    unit = Decimal(1).scaleb(exponent_for(currency))
+    whole = (Decimal(minor_units) / unit).to_integral_value(rounding=ROUND_CEILING)
+    return int(whole * unit)

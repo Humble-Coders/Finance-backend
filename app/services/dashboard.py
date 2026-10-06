@@ -255,8 +255,9 @@ class Dashboard:
         return self.income.actual_minor_units - self.expenses.actual_minor_units
 
 
-def _countable(household_id: uuid.UUID, currency: str) -> list:
-    """The rows a total may include.
+def countable(household_id: uuid.UUID, currency: str) -> list:
+    """The rows a total may include — on the dashboard, in a budget's spend,
+    and in the "still learning" count. One rule, so no two of them disagree.
 
     Two exclusions, both about not stating something we do not know:
 
@@ -311,7 +312,7 @@ def _sums_by_direction(household_id: uuid.UUID, currency: str, month: date) -> S
             0,
         ),
         func.count(Transaction.id),
-    ).where(*_countable(household_id, currency), *_in_month(month))
+    ).where(*countable(household_id, currency), *_in_month(month))
 
 
 def _tokens(text: str) -> set[str]:
@@ -385,7 +386,7 @@ async def _figures_by_month(
     figures is thirty round trips otherwise. Months absent from the result have
     no data, which callers render as a gap and never as zero.
 
-    Counted by `_countable`, the rule every figure on the dashboard uses, so a
+    Counted by `countable`, the rule every figure on the dashboard uses, so a
     trend bar and the card it sits under can never disagree. Invested and
     debt-paid match `_moved_by_category`: debits filed under that slug, the
     household's own category of the slug included.
@@ -414,7 +415,7 @@ async def _figures_by_month(
         # Outer: an unfiled row still counts toward income and expenses.
         .outerjoin(Category, Category.id == Transaction.category_id)
         .where(
-            *_countable(household_id, currency),
+            *countable(household_id, currency),
             Transaction.occurred_on >= start,
             Transaction.occurred_on <= end,
         )
@@ -486,7 +487,7 @@ async def build(
         (
             await session.execute(
                 select(Transaction).where(
-                    *_countable(household_id, currency),
+                    *countable(household_id, currency),
                     *_in_month(month),
                     Transaction.direction == TransactionDirection.debit,
                 )
@@ -616,7 +617,7 @@ async def _daily(
 ) -> list[DayPoint]:
     """The month's running balance, one point per day, for the home chart.
 
-    Counted by `_countable`, the rule the net figure uses, so the line ends
+    Counted by `countable`, the rule the net figure uses, so the line ends
     exactly where "net this month" says — two figures on one card that
     disagreed would each make the other look wrong. One grouped query; the
     running sum is taken here.
@@ -644,7 +645,7 @@ async def _daily(
                 )
             ),
         )
-        .where(*_countable(household_id, currency), *_in_month(month))
+        .where(*countable(household_id, currency), *_in_month(month))
         .group_by(Transaction.occurred_on)
     )
     by_day = {row[0]: int(row[1]) for row in result}
@@ -685,7 +686,7 @@ async def _moved_by_category(
         )
         .join(Category, Category.id == Transaction.category_id)
         .where(
-            *_countable(household_id, currency),
+            *countable(household_id, currency),
             *_in_month(month),
             Transaction.direction == TransactionDirection.debit,
             Category.slug.in_(slugs),

@@ -1,5 +1,7 @@
 """Tests for the money boundary. Highest-value tests in the codebase."""
 
+from decimal import Decimal
+
 import pytest
 
 from app.core.money import (
@@ -7,6 +9,7 @@ from app.core.money import (
     exponent_for,
     from_minor_units,
     normalize,
+    round_up_to_whole_unit,
     to_minor_units,
 )
 
@@ -84,3 +87,29 @@ def test_exponent_lookup():
     assert exponent_for("XYZ") == 2  # unknown currencies default to 2
     with pytest.raises(MoneyError):
         exponent_for("CA")
+
+
+class TestRoundUpToWholeUnit:
+    """Budget suggestions round up, and only through here (ticket #56)."""
+
+    @pytest.mark.parametrize(
+        ("minor", "currency", "expected"),
+        [
+            (12_000, "CAD", 12_000),
+            (12_001, "CAD", 12_100),
+            (12_099, "CAD", 12_100),
+            (0, "CAD", 0),
+            (-150, "CAD", -100),
+            (1_201, "JPY", 1_201),
+        ],
+    )
+    def test_the_next_whole_unit_at_or_above(self, minor, currency, expected):
+        assert round_up_to_whole_unit(minor, currency) == expected
+
+    def test_half_a_minor_unit_is_still_above_the_unit(self):
+        assert round_up_to_whole_unit(Decimal("12000.5"), "CAD") == 12_100
+
+    @pytest.mark.parametrize("bad", [1.5, True, "100"])
+    def test_anything_but_an_integer_or_decimal_is_refused(self, bad):
+        with pytest.raises(MoneyError):
+            round_up_to_whole_unit(bad, "CAD")

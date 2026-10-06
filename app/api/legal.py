@@ -29,6 +29,7 @@ from app.services.ai_consent import (
     withdraw,
 )
 from app.services.conflicts import log_conflict
+from app.services.goals import regional_disclaimer
 from app.services.identity import ResolvedIdentity
 from app.services.onboarding import current_terms
 
@@ -36,6 +37,7 @@ router = APIRouter(tags=["legal"])
 log = structlog.get_logger()
 
 NO_TERMS = "no_terms"
+NO_DISCLAIMER = "no_disclaimer"
 NO_AI_POLICY = "no_ai_policy"
 AI_POLICY_VERSION_MISMATCH = "ai_policy_version_mismatch"
 
@@ -58,6 +60,34 @@ async def read_terms(
         )
     return TermsOut(
         version=terms.version, body=terms.body, effective_from=terms.effective_from
+    )
+
+
+@router.get("/legal/disclaimer", response_model=TermsOut)
+async def read_disclaimer(
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> TermsOut:
+    """The household's regional disclaimer, the same shape as the terms.
+
+    From the server, not the app bundle (PRD §4.6): wording a regulator may
+    need changed has to be changeable without an app release. Goals' long-term
+    projections are the first screen to show it (PRD F5); the dashboard will
+    too, so it is not gated by any one feature.
+    """
+    disclaimer = await regional_disclaimer(session, identity.household)
+    if disclaimer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": NO_DISCLAIMER,
+                "message": "No disclaimer is configured for this region.",
+            },
+        )
+    return TermsOut(
+        version=disclaimer.version,
+        body=disclaimer.body,
+        effective_from=disclaimer.effective_from,
     )
 
 

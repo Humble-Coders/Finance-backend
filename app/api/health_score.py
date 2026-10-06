@@ -116,7 +116,7 @@ async def read_health_score(
         else NoticeOut(
             code="last_month_missing",
             month=current.missing_month,
-            message=_missing_line(current.missing_month, current.held_from),
+            message=missing_line(current.missing_month, current.held_from),
         )
     )
     result = current.result
@@ -142,7 +142,7 @@ async def read_health_score(
     )
 
 
-def _missing_line(month: date, held_from: date | None) -> str:
+def missing_line(month: date, held_from: date | None) -> str:
     """The line shown when last month has no data yet."""
     name = f"{_MONTHS[month.month - 1]} {month.year}"
     if held_from is None:

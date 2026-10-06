@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.categorization import Category
 from app.models.enums import ReviewReason, TransactionDirection
-from app.models.money import Transaction
+from app.models.money import StatementImport, Transaction
 from app.models.planning import Debt
 from app.models.setup import FinancialProfile, Investment, Obligation
 
@@ -698,3 +698,76 @@ async def _moved_by_category(
         .group_by(Category.slug)
     )
     return {slug: int(total) for slug, total in result}
+
+
+@dataclass(frozen=True)
+class CategorySpend:
+    # None for the one entry that gathers every uncategorised row.
+    category_id: uuid.UUID | None
+    slug: str | None
+    name: str | None
+    spent_minor_units: int
+
+
+async def spend_by_category(
+    session: AsyncSession, household_id: uuid.UUID, currency: str, month: date
+) -> list[CategorySpend]:
+    """Where the month's money went: countable debits by category, largest first.
+
+    One grouped query, counted by `countable` exactly as `expenses.actual` is,
+    so the entries — the uncategorised one included — sum to it to the cent.
+    A household's own category is its own entry, beside the system one.
+    """
+    total = func.sum(Transaction.amount_minor_units)
+    result = await session.execute(
+        select(Transaction.category_id, Category.slug, Category.name, total)
+        .outerjoin(Category, Category.id == Transaction.category_id)
+        .where(
+            *countable(household_id, currency),
+            *_in_month(month),
+            Transaction.direction == TransactionDirection.debit,
+        )
+        .group_by(Transaction.category_id, Category.slug, Category.name)
+        .order_by(total.desc(), Category.name.nulls_last())
+    )
+    return [
+        CategorySpend(category_id, slug, name, int(spent))
+        for category_id, slug, name, spent in result
+    ]
+
+
+@dataclass(frozen=True)
+class AsOf:
+    # The newest countable transaction date, or None with nothing yet.
+    latest_transaction_on: date | None
+    # When the newest import that saved at least one row was made.
+    last_import_at: datetime | None
+
+
+async def as_of(session: AsyncSession, household_id: uuid.UUID, currency: str) -> AsOf:
+    """How current the figures are, household-wide (PRD F12).
+
+    Until bank linking, every figure is only as fresh as the last statement
+    imported; a dashboard that does not say so is quietly claiming to be live.
+    An import that saved nothing (every row a duplicate, or abandoned) is not
+    fresh data, so only imports with rows count. One query.
+    """
+    latest_transaction = (
+        select(func.max(Transaction.occurred_on))
+        .where(*countable(household_id, currency))
+        .scalar_subquery()
+    )
+    last_import = (
+        select(func.max(StatementImport.created_at))
+        .where(
+            StatementImport.household_id == household_id,
+            select(Transaction.id)
+            .where(Transaction.statement_import_id == StatementImport.id)
+            .exists(),
+        )
+        .scalar_subquery()
+    )
+    latest_on, imported_at = (
+        await session.execute(select(latest_transaction, last_import))
+    ).one()
+    return AsOf(latest_on, imported_at)

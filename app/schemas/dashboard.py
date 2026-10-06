@@ -11,9 +11,13 @@ double count the whole design avoids — see `app/services/dashboard.py`.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel
+
+from app.schemas.budget import LearningOut
+from app.schemas.health_score import NoticeOut
 
 
 class FlowOut(BaseModel):
@@ -84,6 +88,73 @@ class DayPointOut(BaseModel):
     net: str
 
 
+class CategorySpendOut(BaseModel):
+    """One category's countable debits this month. The uncategorised entry
+    has every id and name null."""
+
+    category_id: uuid.UUID | None = None
+    slug: str | None = None
+    name: str | None = None
+    spent: str
+
+
+class DashboardBudgetLineOut(BaseModel):
+    category_id: uuid.UUID
+    slug: str
+    name: str
+    allocated: str
+    spent: str
+    # How far spending is past the allocation; "0.00" when within it.
+    over: str
+
+
+class DashboardBudgetOut(BaseModel):
+    """The month's budget, as `GET /budgets/{month}` serves it (4.1).
+
+    While learning, only the lines the user set by hand; nothing generated.
+    """
+
+    status: Literal["learning", "ready"]
+    # Present only while learning.
+    learning: LearningOut | None = None
+    # Spending lines, in the order `/budgets` gives them.
+    lines: list[DashboardBudgetLineOut] = []
+    # The two allocations with rules of their own, so the totals below add up
+    # to lines that are shown.
+    savings: DashboardBudgetLineOut | None = None
+    debt: DashboardBudgetLineOut | None = None
+    total_allocated: str
+    total_spent: str
+    shortfall: str | None = None
+
+
+class DashboardScoreOut(BaseModel):
+    """The Money Health Score (4.2). It belongs to a day, not a month: the
+    current month carries today's, a past month the last snapshot on or
+    before its end."""
+
+    status: Literal["learning", "ready"]
+    # Present only while learning.
+    learning: LearningOut | None = None
+    score: int | None = None
+    formula_version: str | None = None
+    # The day the score shown was computed.
+    scored_on: date | None = None
+    # The last snapshot in the month before; null if none. The app shows the
+    # change from it.
+    previous_score: int | None = None
+    # Set when the score is held because last month is not imported yet,
+    # exactly as `GET /health-score` says it.
+    notice: NoticeOut | None = None
+
+
+class AsOfOut(BaseModel):
+    """How current the figures are, household-wide (PRD F12)."""
+
+    latest_transaction_on: date | None = None
+    last_import_at: datetime | None = None
+
+
 class DashboardOut(BaseModel):
     month: date
     currency: str
@@ -110,3 +181,16 @@ class DashboardOut(BaseModel):
     # unresolved suspected duplicates, so this is also the honest caveat on
     # them.
     pending_review: int
+
+    # Added in 4.3. Every one is optional, so an app that predates them
+    # decodes the response unchanged.
+    spend_by_category: list[CategorySpendOut] = []
+    # Null when the household does not have `auto_budget`, or for a month
+    # after the current one.
+    budget: DashboardBudgetOut | None = None
+    # Null when the household does not have `health_score`, or for a month
+    # after the current one.
+    health_score: DashboardScoreOut | None = None
+    as_of: AsOfOut | None = None
+    # One "still learning" state for the budget and the score together.
+    learning: LearningOut | None = None

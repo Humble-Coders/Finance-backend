@@ -195,6 +195,24 @@ class TestTheScore:
         assert score["scored_on"] == served["held_from"] == "2026-09-15"
         assert score["notice"] == served["notice"]
 
+    async def test_a_held_score_is_compared_with_the_month_before_it(
+        self, api_client, db_session, today
+    ):
+        """Scored 100 on 15 Sep and 87 on 15 Oct (September's savings are a
+        refund and no salary). On 2 Nov, October is not in, so 15 Oct's 87 is
+        held — and the change is from September's 100, not from itself."""
+        await a_scored_household(api_client, db_session, "+14165577204")
+        assert (await api_client.get("/health-score")).json()["score"] == 100
+        today(date(2026, 10, 15))
+        assert (await api_client.get("/health-score")).json()["score"] == 87
+        today(date(2026, 11, 2))
+
+        score = (await api_client.get(DASHBOARD)).json()["health_score"]
+
+        assert score["score"] == 87
+        assert score["scored_on"] == "2026-10-15"
+        assert score["previous_score"] == 100
+
 
 class TestStillLearning:
     async def test_one_learning_state_for_budget_and_score(
@@ -366,3 +384,53 @@ class TestNoQueryPerRow:
         )
 
         assert few == many
+
+
+class TestASectionThatFails:
+    """The budget and the score are additions: a fault in either must not take
+    Home down, nor leave half of what it wrote behind."""
+
+    async def test_a_failing_budget_is_left_out(
+        self, api_client, db_session, today, monkeypatch
+    ):
+        await a_scored_household(api_client, db_session, "+14165577701")
+        whole = (await api_client.get(DASHBOARD, params=SEPTEMBER)).json()
+
+        async def broken(*_args, **_kwargs):
+            raise RuntimeError("budget unavailable")
+
+        monkeypatch.setattr("app.services.budget.budget_for", broken)
+        response = await api_client.get(DASHBOARD, params=SEPTEMBER)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["budget"] is None
+        assert body["net"] == whole["net"]
+        assert body["spend_by_category"] == whole["spend_by_category"]
+        assert body["health_score"]["score"] == whole["health_score"]["score"]
+
+    async def test_a_failing_score_is_left_out_and_writes_nothing(
+        self, api_client, db_session, today, monkeypatch
+    ):
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165577702"
+        )
+        from app.services import health_score
+
+        real = health_score.current_score
+
+        async def fails_after_writing(*args, **kwargs):
+            await real(*args, **kwargs)
+            raise RuntimeError("score unavailable")
+
+        monkeypatch.setattr(
+            "app.services.health_score.current_score", fails_after_writing
+        )
+        response = await api_client.get(DASHBOARD, params=SEPTEMBER)
+
+        assert response.status_code == 200
+        assert response.json()["health_score"] is None
+        assert response.json()["budget"] is not None
+        assert (
+            await snapshot_count(db_session, household) == 0
+        ), "the snapshot it wrote before failing is rolled back with it"

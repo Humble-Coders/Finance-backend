@@ -22,10 +22,10 @@ The budget appears only for households with `auto_budget`, and the score only wi
 | File | Why |
 |---|---|
 | `app/services/dashboard.py` | `spend_by_category()`: one grouped query over `countable` debits, joined to `Category`. `as_of()`: one statement with two scalar subqueries, for the newest countable `occurred_on` and the newest `StatementImport.created_at` with at least one transaction. Both have result dataclasses. |
-| `app/api/dashboard.py` | Puts the new fields together in the router. `budget.py` and `health_score.py` already import the dashboard service, so composing there would be circular. Adds `_today()`, which `_month_or_now` now uses, and passes `today` to `build`. Feature checks use `capabilities.resolve`. Adds `_budget_out`, `_score_out` and `_last_snapshot`. Commits at the end, because reading the current month keeps today's score snapshot and settles the month's budget. |
+| `app/api/dashboard.py` | Puts the new fields together in the router. `budget.py` and `health_score.py` already import the dashboard service, so composing there would be circular. Adds `_today()`, which `_month_or_now` now uses, and passes `today` to `build`. Feature checks use `capabilities.resolve`. Adds `_budget_out`, `_score_out`, `_previous_score` and `_last_snapshot`, plus `_isolated`, which runs the budget and the score each in a savepoint. Commits at the end, because reading the current month keeps today's score snapshot and settles the month's budget. |
 | `app/api/health_score.py` | `_missing_line` becomes `missing_line`, so the dashboard's notice reads exactly like `GET /health-score`'s. No behaviour change. |
 | `app/schemas/dashboard.py` | `CategorySpendOut`, `DashboardBudgetLineOut`, `DashboardBudgetOut`, `DashboardScoreOut` and `AsOfOut`. On `DashboardOut`, `spend_by_category`, `budget`, `health_score`, `as_of` and `learning`, all defaulted. Reuses `LearningOut` and `NoticeOut`. |
-| `tests/test_dashboard_additions.py` (new) | 12 tests marked `integration`, with every clock pinned to 2026-09-15 (and moved for the score cases). |
+| `tests/test_dashboard_additions.py` (new) | 15 tests marked `integration`, with every clock pinned to 2026-09-15 (and moved for the score cases). |
 
 ## How to test
 
@@ -41,7 +41,7 @@ The budget appears only for households with `auto_budget`, and the score only wi
      MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres \
      pytest -q -m integration
    ```
-   Expect 482 passed (470 on `main`).
+   Expect 485 passed (470 on `main`).
 4. Run the rest with the same two variables: `pytest -q -m 'not integration'`. Expect 349, unchanged.
 5. Run `ruff check .` and `ruff format --check .`.
 
@@ -56,7 +56,7 @@ The budget appears only for households with `auto_budget`, and the score only wi
 | `auto_budget` or `health_score` disabled → that field is `null`, everything else unchanged | ✅ Met. Compares the whole response with and without each feature. |
 | An older client still decodes the response: existing `/dashboard` tests pass unmodified | ✅ Met. `tests/test_dashboard.py` is untouched and passes, 41 tests. |
 | No N+1: the statement count doesn't grow with categories or budget lines | ✅ Met. A statement counter compares a household with 2 budgeted categories against one with 8, on the first, budget-generating read and on the steady-state read. |
-| `ruff` and `pytest` green; the `database` job's count grew | ⏳ Locally: database tests 470 → 482, lint clean. Confirm in CI. |
+| `ruff` and `pytest` green; the `database` job's count grew | ⏳ Locally: database tests 470 → 485, lint clean. Confirm in CI. |
 
 Each rule was also checked by breaking it; a test fails each time. The rules broken were: counting rows `countable` excludes, computing a past month, taking `previous_score` from the wrong month, ungating the budget, scoring a future month, counting imports without rows, a query per budget line, and dropping the notice.
 
@@ -67,11 +67,14 @@ Each rule was also checked by breaking it; a test fails each time. The rules bro
 - **`savings` and `debt` are included** beside the spending lines, so `total_allocated` and `total_spent` add up to lines that are shown.
 - **The score carries `notice`** whenever 4.2 is holding a score, and `scored_on` is the held date then. This keeps it identical to `GET /health-score`.
 - **A month after the current one** has `budget` and `health_score` both `null`, and no budget is created by browsing ahead.
+- **`previous_score` is relative to the score shown (review fix).** It's the last snapshot in the month before the held date's month when a score is held, otherwise the month before today's. Without that, a score held from earlier in last month was compared with itself, and the app showed no change.
+- **A failing budget or score doesn't take Home down (review fix).** Each section runs in a savepoint. On any error, that field is `null`, anything the section half-wrote is rolled back, the rest of the dashboard is served, and `dashboard_section_failed` is logged with the section name and household id only. A test makes each fail, the score after it has written its snapshot, and checks nothing of it survives.
 - **"An import that saved rows"** means one with at least one transaction, dated by its `created_at`.
 - **Reading Home writes.** On the current month it keeps today's score snapshot and settles the month's budget. On any month it settles that month's budget (4.1's rule). This is the same as opening those screens, and why the route now commits.
 
 ## Open questions / follow-ups
 
+- **A Home read costs about twice what it did.** Measured locally on a steady-state current-month read: 51 statements and about 95 ms with the new sections, against 24 statements and about 45 ms with both features off. The extra 27 statements include 4 writes: two budget inserts that do nothing once the rows exist, today's score snapshot, and two savepoints. The API (Render, Virginia) and Supabase (us-east-1) are in the same region, so each round trip is short. Worth watching in production logs once 4.4 ships.
 - **The local suite is slower.** The existing `/dashboard` tests now also build budgets and scores on each read: the database suite took about 2 minutes locally, against about 76 seconds before. No test changed.
 - **4.4 (mobile)** reads `budget`, `health_score`, `as_of` and `learning`. Each is optional, so its models should treat them as nullable. It should show `as_of` as "as of …" and the held score's `notice`, worded from its own strings by `code`.
 - **Plan gating (7.1)** keeps the same caveat as 4.2: the score is gated by `health_score` but uses budgets regardless of `auto_budget`.

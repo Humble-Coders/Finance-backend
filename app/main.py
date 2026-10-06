@@ -16,6 +16,7 @@ from app.api import (
     errors,
     financial_setup,
     health,
+    health_score,
     legal,
     me,
     statements,
@@ -38,6 +39,7 @@ app = FastAPI(
 app.add_exception_handler(RequestValidationError, errors.validation_error)
 
 app.include_router(health.router)
+app.include_router(health_score.router)
 app.include_router(accounts.router)
 app.include_router(budgets.router)
 app.include_router(capabilities.router)

@@ -205,7 +205,7 @@ class MonthPoint:
 
 @dataclass(frozen=True)
 class MonthFigures:
-    """One month's totals, from one grouped query; see `_figures_by_month`."""
+    """One month's totals, from one grouped query; see `figures_by_month`."""
 
     income: int = 0
     expenses: int = 0
@@ -373,7 +373,7 @@ def match_commitment(
     )
 
 
-async def _figures_by_month(
+async def figures_by_month(
     session: AsyncSession,
     household_id: uuid.UUID,
     currency: str,
@@ -543,7 +543,7 @@ async def build(
         )
 
     window = months_back(month, TREND_MONTHS)
-    figures = await _figures_by_month(session, household_id, currency, window)
+    figures = await figures_by_month(session, household_id, currency, window)
     trend = [
         MonthPoint(
             month=point,

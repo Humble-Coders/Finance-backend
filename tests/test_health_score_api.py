@@ -9,14 +9,15 @@ groceries budget, and pays $300 against a $250 minimum.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import func, select, text
 
 from app.models.derived import HealthScoreSnapshot
-from app.models.planning import Budget
-from app.services.health_score import inputs_from_json, score
+from app.models.enums import GoalHorizon
+from app.models.planning import Budget, Goal
+from app.services.health_score import inputs_from_json, result_from_json, score
 from tests.conftest import requires_db
 from tests.test_budgets_api import a_ready_household, filler
 from tests.test_dashboard import a_household, a_system_category_id, setup_wizard, tx
@@ -98,12 +99,15 @@ class TestTheScore:
         body = response.json()
         assert body["status"] == "ready"
         assert body["score"] == 100
-        assert body["formula_version"] == "v1"
+        assert body["formula_version"] == "v2"
         parts = by_key(body)
         assert {k: (c["score"], c["weight"]) for k, c in parts.items()} == {
             "savings_consistency": (100, "40.00"),
             "spending_vs_budget": (100, "35.00"),
             "debt_payments": (100, "25.00"),
+            # v2's fourth part: no goal yet, so it is left out and the other
+            # three keep v1's weighting exactly.
+            "goal_completion": (None, "0.00"),
         }
         assert parts["spending_vs_budget"]["inputs"] == {
             "lines": [{"slug": "groceries", "allocated": "450.00", "spent": "450.00"}]
@@ -122,7 +126,7 @@ class TestTheScore:
         ]
         assert months[2]["income"] == "5050.00", "the August refund is a credit"
         assert body["history"] == [
-            {"scored_on": "2026-09-15", "score": 100, "formula_version": "v1"}
+            {"scored_on": "2026-09-15", "score": 100, "formula_version": "v2"}
         ]
 
     async def test_it_reads_the_budget_4_1_serves(self, api_client, db_session, today):
@@ -230,8 +234,8 @@ class TestHistory:
 
         (row,) = await snapshots(db_session, household)
 
-        assert row.formula_version == "v1"
-        assert row.components["formula_version"] == "v1"
+        assert row.formula_version == "v2"
+        assert row.components["formula_version"] == "v2"
         assert score(inputs_from_json(row.components)).score == row.score == 83
 
     async def test_history_is_the_last_twelve(self, api_client, db_session, today):
@@ -424,3 +428,173 @@ class TestNothingScorableAnyMore:
         assert body["score"] is None
         assert body["history"] == []
         assert await snapshots(db_session, household) == []
+
+
+class TestFormulaV2:
+    """Goal completion joins the score as formula v2 (backend #66)."""
+
+    async def a_goal(self, db_session, household, *, saved: int, created: datetime):
+        db_session.add(
+            Goal(
+                household_id=household,
+                name="House",
+                horizon=GoalHorizon.long_term,
+                target_minor_units=120_000,
+                saved_minor_units=saved,
+                currency="CAD",
+                target_date=date(2026, 12, 31),
+                created_at=created,
+            )
+        )
+        await db_session.commit()
+
+    async def test_goals_reach_the_score(self, api_client, db_session, today):
+        """Created June, due December: 7 months, 3 gone by the end of August,
+        so it should hold 3/7 of $1,200. Half of that is 50 for goals, and the
+        score is (34 + 29.75 + 21.25) + 15 × 0.5 = 92.5 → 93."""
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165576701"
+        )
+        await self.a_goal(
+            db_session,
+            household,
+            saved=25_715,  # a cent over half of 51,428.57
+            created=datetime(2026, 6, 1, tzinfo=UTC),
+        )
+
+        body = (await api_client.get(SCORE)).json()
+
+        parts = by_key(body)
+        assert parts["goal_completion"]["score"] == 50
+        assert parts["goal_completion"]["weight"] == "15.00"
+        assert parts["savings_consistency"]["weight"] == "34.00"
+        assert body["score"] == 93
+        assert body["formula_version"] == "v2"
+
+    async def test_a_goal_made_last_month_does_not_count_yet(
+        self, api_client, db_session, today
+    ):
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165576702"
+        )
+        await self.a_goal(
+            db_session, household, saved=0, created=datetime(2026, 8, 20, tzinfo=UTC)
+        )
+
+        body = (await api_client.get(SCORE)).json()
+
+        assert by_key(body)["goal_completion"]["available"] is False
+        assert body["score"] == 100, "the other three, renormalised as v1 weighted them"
+
+    async def test_yesterday_s_v1_snapshot_is_left_as_it_was(
+        self, api_client, db_session, today
+    ):
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165576703"
+        )
+        v1 = {
+            "formula_version": "v1",
+            "inputs": {
+                "months": [
+                    {"month": "2026-08-01", "income": 100_000, "expenses": 90_000}
+                ],
+                "budget_lines": [
+                    {"slug": "groceries", "allocated": 40_000, "spent": 50_000}
+                ],
+                "debt": {"debts": 0, "debts_with_minimum": 0, "required": 0, "paid": 0},
+            },
+            "components": [
+                {
+                    "key": "savings_consistency",
+                    "score": "50",
+                    "weight": "40",
+                    "available": True,
+                },
+                {
+                    "key": "spending_vs_budget",
+                    "score": "75",
+                    "weight": "35",
+                    "available": True,
+                },
+                {
+                    "key": "debt_payments",
+                    "score": "100",
+                    "weight": "25",
+                    "available": True,
+                },
+            ],
+        }
+        db_session.add(
+            HealthScoreSnapshot(
+                household_id=household,
+                scored_on=date(2026, 9, 14),
+                score=71,
+                formula_version="v1",
+                components=v1,
+            )
+        )
+        await db_session.commit()
+
+        await api_client.get(SCORE)
+
+        yesterday, today_row = await snapshots(db_session, household)
+        assert (yesterday.scored_on, yesterday.score, yesterday.formula_version) == (
+            date(2026, 9, 14),
+            71,
+            "v1",
+        )
+        assert yesterday.components == v1
+        assert (
+            result_from_json(
+                yesterday.components, yesterday.score, yesterday.formula_version
+            ).score
+            == 71
+        )
+        assert score(inputs_from_json(yesterday.components)).score == 71
+        assert today_row.formula_version == "v2"
+
+
+class TestNoChangeAcrossFormulas:
+    """Home's "+4 since last month" compares like with like (backend #66)."""
+
+    @pytest.fixture(autouse=True)
+    def dashboard_today(self, monkeypatch):
+        """The dashboard's own clock, which the `today` fixture leaves alone."""
+        monkeypatch.setattr("app.api.dashboard._today", lambda: DAY_ONE)
+
+    async def last_month(self, db_session, household, version: str, value: int = 60):
+        db_session.add(
+            HealthScoreSnapshot(
+                household_id=household,
+                scored_on=date(2026, 8, 20),
+                score=value,
+                formula_version=version,
+                components=None,
+            )
+        )
+        await db_session.commit()
+
+    async def test_a_v1_score_last_month_gives_no_change(
+        self, api_client, db_session, today
+    ):
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165576801"
+        )
+        await self.last_month(db_session, household, "v1")
+
+        score_out = (await api_client.get("/dashboard")).json()["health_score"]
+
+        assert score_out["formula_version"] == "v2"
+        assert score_out["previous_score"] is None
+
+    async def test_a_v2_score_last_month_gives_the_change(
+        self, api_client, db_session, today
+    ):
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165576802"
+        )
+        await self.last_month(db_session, household, "v2")
+
+        score_out = (await api_client.get("/dashboard")).json()["health_score"]
+
+        assert score_out["previous_score"] == 60

@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import func, select, text
 
 from app.models.derived import HealthScoreSnapshot
+from app.models.planning import Budget
 from app.services.health_score import inputs_from_json, score
 from tests.conftest import requires_db
 from tests.test_budgets_api import a_ready_household, filler
@@ -29,6 +30,9 @@ pytestmark = [
 SCORE = "/health-score"
 DAY_ONE = date(2026, 9, 15)
 DAY_TWO = date(2026, 9, 16)
+# October is never imported in these scenarios, so on 2 November the last
+# complete month has no data.
+NOVEMBER = date(2026, 11, 2)
 
 
 @pytest.fixture
@@ -282,3 +286,141 @@ class TestBoundaries:
 
         assert [h["scored_on"] for h in body["history"]] == ["2026-09-16"]
         assert len(await snapshots(db_session, theirs)) == 1
+
+
+class TestAMonthNotYetImported:
+    """Last month has no data yet: hold the latest score and say why."""
+
+    async def test_the_latest_score_is_held_with_a_line_saying_why(
+        self, api_client, db_session, today
+    ):
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165576401"
+        )
+        assert (await api_client.get(SCORE)).json()["score"] == 100
+
+        today(NOVEMBER)
+        body = (await api_client.get(SCORE)).json()
+
+        assert body["status"] == "ready"
+        assert body["score"] == 100
+        assert body["held_from"] == "2026-09-15"
+        assert body["notice"] == {
+            "code": "last_month_missing",
+            "month": "2026-10-01",
+            "message": (
+                "No data for October 2026 is available yet, "
+                "so this is your score from 15 Sep 2026."
+            ),
+        }
+        assert by_key(body)["spending_vs_budget"]["inputs"]["lines"][0] == {
+            "slug": "groceries",
+            "allocated": "450.00",
+            "spent": "450.00",
+        }, "the held score's own breakdown, not October's"
+        assert [r.scored_on for r in await snapshots(db_session, household)] == [
+            DAY_ONE
+        ], "nothing is written for a month that is not in yet"
+        october = await db_session.scalar(
+            select(func.count(Budget.id)).where(
+                Budget.household_id == household,
+                Budget.period_start == date(2026, 10, 1),
+            )
+        )
+        assert october == 0, "and October's budget is not settled from nothing"
+
+    async def test_a_snapshot_from_an_older_formula_is_held_as_it_was(
+        self, api_client, db_session, today
+    ):
+        """Held means read back, not recomputed under today's formula."""
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165576404"
+        )
+        await api_client.get(SCORE)
+        await db_session.execute(
+            text(
+                "UPDATE health_score_snapshot SET score = 41, formula_version = 'v0' "
+                "WHERE household_id = :household"
+            ),
+            {"household": household},
+        )
+        await db_session.commit()
+
+        today(NOVEMBER)
+        body = (await api_client.get(SCORE)).json()
+
+        assert (body["score"], body["formula_version"]) == (41, "v0")
+
+    async def test_with_no_score_to_hold_it_says_so(
+        self, api_client, db_session, today
+    ):
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165576402"
+        )
+
+        today(NOVEMBER)
+        body = (await api_client.get(SCORE)).json()
+
+        assert body["status"] == "ready"
+        assert body["score"] is None
+        assert body["components"] == []
+        assert body["held_from"] is None
+        assert body["notice"]["message"] == (
+            "No data for October 2026 is available yet. "
+            "Your score will appear once it is imported."
+        )
+        assert await snapshots(db_session, household) == []
+
+    async def test_it_is_scored_again_once_the_month_arrives(
+        self, api_client, db_session, today
+    ):
+        household, account, _ = await a_scored_household(
+            api_client, db_session, "+14165576403"
+        )
+        await api_client.get(SCORE)
+        today(NOVEMBER)
+        assert (await api_client.get(SCORE)).json()["notice"] is not None
+
+        income = await a_system_category_id(db_session, "income")
+        db_session.add(
+            tx(
+                household,
+                account,
+                minor=500_000,
+                month=10,
+                day=1,
+                credit=True,
+                category_id=income,
+                description="PAYROLL",
+            )
+        )
+        await db_session.commit()
+        body = (await api_client.get(SCORE)).json()
+
+        assert body["notice"] is None
+        assert body["held_from"] is None
+        assert [r.scored_on for r in await snapshots(db_session, household)] == [
+            DAY_ONE,
+            NOVEMBER,
+        ]
+
+
+class TestNothingScorableAnyMore:
+    async def test_today_s_snapshot_goes_rather_than_outlive_today_s_score(
+        self, api_client, db_session, today
+    ):
+        """Scored earlier today on debt alone (no debts: 100). Then a debt with
+        no minimum is added: nothing is scorable, and today's row must not go
+        on saying 100."""
+        household, account = await a_household(api_client, "+14165576501")
+        db_session.add_all(filler(household, account, 20, month=8))
+        await db_session.commit()
+        assert (await api_client.get(SCORE)).json()["score"] == 100
+        assert len(await snapshots(db_session, household)) == 1
+
+        await setup_wizard(api_client, debts=[{"name": "Loan", "balance": "900.00"}])
+        body = (await api_client.get(SCORE)).json()
+
+        assert body["score"] is None
+        assert body["history"] == []
+        assert await snapshots(db_session, household) == []

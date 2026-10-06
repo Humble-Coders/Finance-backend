@@ -16,7 +16,12 @@ from app.api.deps import current_identity
 from app.core.money import from_minor_units
 from app.db import get_session
 from app.schemas.budget import LearningNeedsOut, LearningOut
-from app.schemas.health_score import ComponentOut, HealthScoreOut, SnapshotOut
+from app.schemas.health_score import (
+    ComponentOut,
+    HealthScoreOut,
+    NoticeOut,
+    SnapshotOut,
+)
 from app.services import health_score as service
 from app.services.capabilities import currency_for, require_feature
 from app.services.identity import ResolvedIdentity
@@ -86,7 +91,7 @@ async def read_health_score(
     currency = await currency_for(session, household)
     current = await service.current_score(session, household.id, currency, _today())
     learning = current.learning
-    if current.result is None or current.inputs is None:
+    if not learning.ready:
         return HealthScoreOut(
             status="learning",
             learning=LearningOut(
@@ -97,7 +102,26 @@ async def read_health_score(
             ),
         )
     await session.commit()
+    history = [
+        SnapshotOut(
+            scored_on=snap.scored_on,
+            score=snap.score,
+            formula_version=snap.formula_version,
+        )
+        for snap in current.history
+    ]
+    notice = (
+        None
+        if current.missing_month is None
+        else NoticeOut(
+            code="last_month_missing",
+            month=current.missing_month,
+            message=_missing_line(current.missing_month, current.held_from),
+        )
+    )
     result = current.result
+    if result is None or current.inputs is None:
+        return HealthScoreOut(status="ready", history=history, notice=notice)
     return HealthScoreOut(
         status="ready",
         score=result.score,
@@ -112,12 +136,36 @@ async def read_health_score(
             )
             for c in result.components
         ],
-        history=[
-            SnapshotOut(
-                scored_on=snap.scored_on,
-                score=snap.score,
-                formula_version=snap.formula_version,
-            )
-            for snap in current.history
-        ],
+        history=history,
+        notice=notice,
+        held_from=current.held_from,
     )
+
+
+def _missing_line(month: date, held_from: date | None) -> str:
+    """The line shown when last month has no data yet."""
+    name = f"{_MONTHS[month.month - 1]} {month.year}"
+    if held_from is None:
+        return (
+            f"No data for {name} is available yet. "
+            "Your score will appear once it is imported."
+        )
+    held = f"{held_from.day} {_MONTHS[held_from.month - 1][:3]} {held_from.year}"
+    return f"No data for {name} is available yet, so this is your score from {held}."
+
+
+# English names rather than strftime's, which follow the server's locale.
+_MONTHS = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)

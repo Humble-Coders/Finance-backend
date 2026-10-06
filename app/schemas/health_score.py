@@ -34,6 +34,19 @@ class SnapshotOut(BaseModel):
     formula_version: str
 
 
+class NoticeOut(BaseModel):
+    """Why the score shown is not today's.
+
+    `code` is for the client to choose its own wording from its strings;
+    `message` is an English line for anything that does not.
+    """
+
+    code: Literal["last_month_missing"]
+    # The complete month that has no data yet (its first day).
+    month: date
+    message: str
+
+
 class HealthScoreOut(BaseModel):
     status: Literal["learning", "ready"]
     # Present only while learning.
@@ -44,3 +57,8 @@ class HealthScoreOut(BaseModel):
     components: list[ComponentOut] = []
     # Up to the last 12 snapshots, oldest first.
     history: list[SnapshotOut] = []
+    # Set when last month has no data yet: the score and components are the
+    # latest snapshot's, computed on `held_from` (both null when there is no
+    # snapshot to hold).
+    notice: NoticeOut | None = None
+    held_from: date | None = None

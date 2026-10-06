@@ -24,6 +24,7 @@ from app.services.health_score import (
     ScoreInputs,
     debt_payments,
     inputs_from_json,
+    result_from_json,
     savings_consistency,
     score,
     spending_vs_budget,
@@ -206,6 +207,18 @@ class TestTheStoredBreakdown:
         replayed = score(inputs_from_json(to_json(original, result)))
 
         assert replayed == result
+
+    def test_a_held_snapshot_is_read_back_as_stored_not_recomputed(self):
+        """A snapshot from an older formula keeps its own score and parts."""
+        original = inputs([month(8, 100_000, 90_000)], [line(40_000, 50_000)])
+        stored = to_json(original, score(original))
+        stored["components"][0]["score"] = "12.5"
+
+        held = result_from_json(stored, 41, "v0")
+
+        assert held.score == 41
+        assert held.formula_version == "v0"
+        assert held.components[0].score == Decimal("12.5")
 
     def test_it_records_the_formula_version(self):
         result = score(inputs([month(8, 100_000, 80_000)]))

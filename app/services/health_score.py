@@ -28,7 +28,9 @@ average rounded half-up to an integer.
 **History without a scheduler.** There is no worker, so the score is computed
 when it is read. Today's snapshot (UTC) is upserted on every read, so an
 import later in the day is reflected; a past day's snapshot is never
-rewritten. A day nobody opened the app has no snapshot.
+rewritten. A day nobody opened the app has no snapshot. Until the last
+complete month has any data — its statement not yet imported — nothing is
+scored and the latest snapshot is held instead (see `current_score`).
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -289,23 +291,61 @@ def inputs_from_json(data: dict) -> ScoreInputs:
     )
 
 
+def result_from_json(
+    data: dict, stored_score: int, formula_version: str
+) -> ScoreResult:
+    """A stored snapshot's result, exactly as it was computed.
+
+    Read back rather than recomputed: a snapshot from an older formula keeps
+    the score and parts it had, which `score` under today's formula would not
+    reproduce.
+    """
+    return ScoreResult(
+        stored_score,
+        formula_version,
+        tuple(
+            ComponentResult(
+                key=c["key"],
+                score=None if c["score"] is None else Decimal(c["score"]),
+                weight=Decimal(c["weight"]),
+                available=c["available"],
+            )
+            for c in data["components"]
+        ),
+    )
+
+
 # --- Reading and keeping ------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class HealthScore:
     learning: LearningState
-    # Present once ready.
+    # Present once ready — today's, or the one being held (see `missing_month`).
     inputs: ScoreInputs | None
     result: ScoreResult | None
     # Oldest first.
     history: list[HealthScoreSnapshot]
+    # Set when the last complete month has no data yet: nothing was scored
+    # today, and `result` is the latest snapshot's (None when there is none).
+    missing_month: date | None = None
+    # The day the held score was computed.
+    held_from: date | None = None
 
 
 async def current_score(
     session: AsyncSession, household_id: uuid.UUID, currency: str, today: date
 ) -> HealthScore:
-    """Today's score, with today's snapshot kept; nothing written while learning."""
+    """Today's score, with today's snapshot kept; nothing written while learning.
+
+    **A month not yet imported is not scored.** Most people import a month's
+    statement some days after it ends. Until then the last complete month has
+    no rows, and scoring it would read as nothing spent (spending within
+    budget) and nothing paid (debt missed) — a swing every month-start that
+    the daily snapshots would then keep as history. So until that month has
+    data, nothing is scored or written, and the latest snapshot is held,
+    with `missing_month` saying why (manager decision on review, 2026-10-06).
+    """
     learning = await learning_state(session, household_id, currency, today)
     if not learning.ready:
         return HealthScore(learning, None, None, [])
@@ -313,6 +353,21 @@ async def current_score(
     last = months_back(today.replace(day=1), 2)[0]
     window = months_back(last, SAVINGS_WINDOW_MONTHS)
     figures = await figures_by_month(session, household_id, currency, window)
+    last_figures = figures.get(last)
+    if last_figures is None:
+        history = await _history(session, household_id)
+        held = history[-1] if history else None
+        if held is None or held.components is None:
+            return HealthScore(learning, None, None, history, missing_month=last)
+        return HealthScore(
+            learning,
+            inputs_from_json(held.components),
+            result_from_json(held.components, held.score, held.formula_version),
+            history,
+            missing_month=last,
+            held_from=held.scored_on,
+        )
+
     # The budget 4.1 serves for that month, user-set lines and all.
     budget = await budget_for(session, household_id, currency, last, today, ready=True)
     debts, with_minimum, required = (
@@ -324,7 +379,6 @@ async def current_score(
             ).where(Debt.household_id == household_id, Debt.currency == currency)
         )
     ).one()
-    last_figures = figures.get(last)
 
     inputs = ScoreInputs(
         months=tuple(
@@ -339,28 +393,38 @@ async def current_score(
             debts=int(debts),
             debts_with_minimum=int(with_minimum),
             required=int(required),
-            paid=last_figures.debt_paid if last_figures else 0,
+            paid=last_figures.debt_paid,
         ),
     )
     result = score(inputs)
     if result.score is not None:
         await _keep(session, household_id, today, inputs, result)
-    history = list(
-        reversed(
-            (
-                await session.scalars(
-                    select(HealthScoreSnapshot)
-                    .where(HealthScoreSnapshot.household_id == household_id)
-                    .order_by(HealthScoreSnapshot.scored_on.desc())
-                    .limit(HISTORY_LENGTH)
-                    # Today's row may already be in the session from an
-                    # earlier read; it must show what was just upserted.
-                    .execution_options(populate_existing=True)
-                )
-            ).all()
+    else:
+        # Nothing scorable now. A snapshot kept earlier today would otherwise
+        # sit in the history saying today scored what today no longer does.
+        await session.execute(
+            delete(HealthScoreSnapshot).where(
+                HealthScoreSnapshot.household_id == household_id,
+                HealthScoreSnapshot.scored_on == today,
+            )
         )
+    return HealthScore(learning, inputs, result, await _history(session, household_id))
+
+
+async def _history(
+    session: AsyncSession, household_id: uuid.UUID
+) -> list[HealthScoreSnapshot]:
+    """The last snapshots, oldest first."""
+    newest_first = await session.scalars(
+        select(HealthScoreSnapshot)
+        .where(HealthScoreSnapshot.household_id == household_id)
+        .order_by(HealthScoreSnapshot.scored_on.desc())
+        .limit(HISTORY_LENGTH)
+        # Today's row may already be in the session from an earlier read; it
+        # must show what was just upserted.
+        .execution_options(populate_existing=True)
     )
-    return HealthScore(learning, inputs, result, history)
+    return list(reversed(newest_first.all()))
 
 
 async def _keep(

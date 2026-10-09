@@ -20,7 +20,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_identity
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import get_session
 from app.models.enums import StatementImportStatus
 from app.models.identity import Household
@@ -48,6 +48,7 @@ from app.services.statements import (
     TooManyRowsError,
     parse_statement,
 )
+from app.services.transfers import pair_transfers
 
 router = APIRouter(tags=["statements"])
 
@@ -63,6 +64,11 @@ TIER_NOT_CONFIRMED = "ai_processing_unavailable"
 TOO_LONG = "statement_too_long"
 TOO_MANY_ROWS = "too_many_transactions"
 UNKNOWN_IMPORT = "unknown_import"
+IMPORT_SUPERSEDED = "import_superseded"
+# The failure_reason of an import replaced by a later reading of the statement.
+SUPERSEDED = "superseded"
+# How long a read-but-unsaved import may be replaced rather than counted.
+REREAD_WINDOW = timedelta(hours=24)
 INVALID_ROW = "invalid_row"
 UNKNOWN_ACCOUNT = "unknown_account"
 PARSE_FAILED = "parse_failed"
@@ -124,6 +130,64 @@ async def _imports_this_month(session: AsyncSession, household: Household) -> in
         )
     )
     return int(result.scalar_one())
+
+
+async def _replace_unsaved(
+    session: AsyncSession, household: Household, settings: Settings
+) -> bool:
+    """Retire the household's newest import that was read but never saved, so
+    reading the statement again does not count as a second import (#73).
+
+    Called only at the limit — below it nothing needs replacing, and with a
+    larger allowance two different statements read side by side are both
+    still wanted. "Never saved" is no transaction pointing at it: an import
+    stays `awaiting_review` after its rows are saved, and `confirmed_at` waits
+    for the review queue, so neither says it.
+
+    The replaced import becomes `failed` / `superseded`, which `_imports_this_
+    month` does not count, and saving it later is refused (`confirm_rows`), so
+    one allowance can never save two statements. Not deleted: diagnostic text
+    the person agreed to keep has its own 30 days. At most
+    `import_rereads_per_day` a day, because each read is a model call.
+
+    Returns whether one was replaced. The caller commits.
+    """
+    since = datetime.now(UTC) - REREAD_WINDOW
+    rereads = await session.scalar(
+        select(func.count())
+        .select_from(StatementImport)
+        .where(
+            StatementImport.household_id == household.id,
+            StatementImport.failure_reason == SUPERSEDED,
+            StatementImport.updated_at >= since,
+        )
+    )
+    if int(rereads or 0) >= settings.import_rereads_per_day:
+        return False
+    unsaved = await session.scalar(
+        select(StatementImport)
+        .where(
+            StatementImport.household_id == household.id,
+            StatementImport.status == StatementImportStatus.awaiting_review,
+            StatementImport.created_at >= since,
+            ~select(Transaction.id)
+            .where(Transaction.statement_import_id == StatementImport.id)
+            .exists(),
+        )
+        .order_by(StatementImport.created_at.desc())
+        .limit(1)
+    )
+    if unsaved is None:
+        return False
+    unsaved.status = StatementImportStatus.failed
+    unsaved.failure_reason = SUPERSEDED
+    await session.flush()
+    log.info(
+        "import_superseded",
+        household_id=str(household.id),
+        import_id=str(unsaved.id),
+    )
+    return True
 
 
 def _next_month(now: datetime) -> datetime:
@@ -228,6 +292,10 @@ async def parse(
         log.info("import_quota_exempt", household_id=str(household.id))
     else:
         used = await _imports_this_month(session, household)
+        if used >= settings.free_imports_per_month and await _replace_unsaved(
+            session, household, settings
+        ):
+            used -= 1
         if used >= settings.free_imports_per_month:
             resets_at = _next_month(datetime.now(UTC))
             log.info(
@@ -443,6 +511,24 @@ async def confirm_rows(
     settings = get_settings()
     household = identity.household
     record = await _owned_import(session, household, import_id)
+    if record.failure_reason == SUPERSEDED:
+        # Read again since, and the later reading took its place in the
+        # month's allowance. Saving this one too would be two statements for
+        # one import (#73); the app reads the statement again.
+        log_conflict(
+            IMPORT_SUPERSEDED,
+            "import_read_again_since",
+            household_id=str(household.id),
+            import_id=str(record.id),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": IMPORT_SUPERSEDED,
+                "message": "This statement was read again since. Save the "
+                "newer reading instead.",
+            },
+        )
 
     owned = await session.execute(
         select(Account.id).where(
@@ -494,6 +580,9 @@ async def confirm_rows(
         await file_rows(
             session, settings, household.id, outcome.saved_ids, may_ask_model=True
         )
+        # After filing, so the categorizer cannot overwrite what it files: a
+        # card bill and its payment, and savings moved, are transfers (#73).
+        await pair_transfers(session, household.id, outcome.saved_ids)
 
     await session.flush()
     # Shared with the review queue (3.4), which resolves the rest of these rows

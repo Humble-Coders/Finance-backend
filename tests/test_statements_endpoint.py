@@ -113,6 +113,32 @@ async def consent_to_ai(api_client) -> None:
     assert response.status_code == 200, response.text
 
 
+async def save_parsed(api_client, monkeypatch, parsed, account_id=None) -> None:
+    """Save every row a parse returned, as the app does after the check step.
+
+    The categorizer gets no model — its rows go to review — so nothing here
+    reaches a provider, whatever key a developer's `.env` holds.
+    """
+    from app.services import filing
+
+    def no_model(_settings):
+        raise LlmError("no model in tests")
+
+    monkeypatch.setattr(filing, "build_client", no_model)
+    if account_id is None:
+        account = await api_client.post(
+            "/accounts", json={"name": "RBC Chequing", "kind": "chequing"}
+        )
+        assert account.status_code == 201, account.text
+        account_id = account.json()["id"]
+    payload = parsed.json()
+    saved = await api_client.post(
+        f"/statements/{payload['import_id']}/transactions",
+        json={"account_id": account_id, "rows": payload["rows"]},
+    )
+    assert saved.status_code == 200, saved.text
+
+
 def body(**overrides) -> dict:
     return {"source_kind": "pdf_text", "page_count": 2, "text": STATEMENT, **overrides}
 
@@ -264,6 +290,7 @@ class TestQuota:
         await consent_to_ai(api_client)
 
         first = await api_client.post(PARSE, json=body())
+        await save_parsed(api_client, monkeypatch, first)
         second = await api_client.post(PARSE, json=body())
 
         assert first.status_code == 200
@@ -271,6 +298,64 @@ class TestQuota:
         detail = second.json()["detail"]
         assert detail["code"] == "import_quota_exceeded"
         assert detail["resets_at"], "a limit must say when it lifts"
+
+
+class TestReadingAgain:
+    """A statement read but never saved may be read again without costing a
+    second import (#73): the app shows the rows for checking before it saves,
+    and a phone that kills the app mid-check reads the file again."""
+
+    async def test_an_unsaved_reading_is_replaced_not_counted(
+        self, api_client, db_session, monkeypatch
+    ):
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571040")
+        await consent_to_ai(api_client)
+
+        first = await api_client.post(PARSE, json=body())
+        second = await api_client.post(PARSE, json=body())
+
+        assert (first.status_code, second.status_code) == (200, 200), second.text
+        replaced = await db_session.get(
+            StatementImport, uuid.UUID(first.json()["import_id"])
+        )
+        await db_session.refresh(replaced)
+        assert replaced.status == StatementImportStatus.failed
+        assert replaced.failure_reason == "superseded"
+
+    async def test_the_replaced_reading_cannot_be_saved(self, api_client, monkeypatch):
+        """Or one allowance would save two statements."""
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571041")
+        await consent_to_ai(api_client)
+
+        first = await api_client.post(PARSE, json=body())
+        newer = await api_client.post(PARSE, json=body())
+        account = await api_client.post(
+            "/accounts", json={"name": "RBC Chequing", "kind": "chequing"}
+        )
+        stale = await api_client.post(
+            f"/statements/{first.json()['import_id']}/transactions",
+            json={"account_id": account.json()["id"], "rows": first.json()["rows"]},
+        )
+
+        assert newer.status_code == 200
+        assert stale.status_code == 409
+        assert stale.json()["detail"]["code"] == "import_superseded"
+        await save_parsed(api_client, monkeypatch, newer, account.json()["id"])
+
+    async def test_reading_again_is_bounded(self, api_client, monkeypatch):
+        """Three more readings a day, then the limit: each one is a model
+        call somebody pays for."""
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571042")
+        await consent_to_ai(api_client)
+
+        codes = [
+            (await api_client.post(PARSE, json=body())).status_code for _ in range(5)
+        ]
+
+        assert codes == [200, 200, 200, 200, 429]
 
 
 class TestTheTestAccountExemption:
@@ -317,6 +402,7 @@ class TestTheTestAccountExemption:
 
         self._settings_with(monkeypatch, str(uuid.uuid4()))
         first = await api_client.post(PARSE, json=body())
+        await save_parsed(api_client, monkeypatch, first)
         second = await api_client.post(PARSE, json=body())
 
         assert first.status_code == 200
@@ -368,7 +454,8 @@ class TestTheTestAccountExemption:
         await consent_to_ai(api_client)
         monkeypatch.setattr(endpoint, "get_settings", lambda: default)
 
-        await api_client.post(PARSE, json=body())
+        first = await api_client.post(PARSE, json=body())
+        await save_parsed(api_client, monkeypatch, first)
         second = await api_client.post(PARSE, json=body())
 
         assert second.status_code == 429

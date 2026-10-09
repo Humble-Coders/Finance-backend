@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     # entitlements, where per-plan limits belong.
     free_imports_per_month: int = 1
 
+    # How many times a day a statement that was read but never saved may be
+    # read again without counting as another import (#73). The app shows the
+    # rows for checking before it saves them; if the phone kills the app
+    # mid-check, it reads the file again, and that must not cost the month.
+    # Bounded because every read is a model call somebody pays for.
+    import_rereads_per_day: int = 3
+
     # Households the monthly import limit does not apply to: comma-separated
     # UUIDs, empty by default so the exemption exists only where it is
     # configured. For test accounts — importing the same statement twenty times

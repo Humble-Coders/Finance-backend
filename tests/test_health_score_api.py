@@ -99,7 +99,7 @@ class TestTheScore:
         body = response.json()
         assert body["status"] == "ready"
         assert body["score"] == 100
-        assert body["formula_version"] == "v2"
+        assert body["formula_version"] == "v3"
         parts = by_key(body)
         assert {k: (c["score"], c["weight"]) for k, c in parts.items()} == {
             "savings_consistency": (100, "40.00"),
@@ -126,7 +126,7 @@ class TestTheScore:
         ]
         assert months[2]["income"] == "5050.00", "the August refund is a credit"
         assert body["history"] == [
-            {"scored_on": "2026-09-15", "score": 100, "formula_version": "v2"}
+            {"scored_on": "2026-09-15", "score": 100, "formula_version": "v3"}
         ]
 
     async def test_it_reads_the_budget_4_1_serves(self, api_client, db_session, today):
@@ -234,8 +234,8 @@ class TestHistory:
 
         (row,) = await snapshots(db_session, household)
 
-        assert row.formula_version == "v2"
-        assert row.components["formula_version"] == "v2"
+        assert row.formula_version == "v3"
+        assert row.components["formula_version"] == "v3"
         assert score(inputs_from_json(row.components)).score == row.score == 83
 
     async def test_history_is_the_last_twelve(self, api_client, db_session, today):
@@ -469,7 +469,7 @@ class TestFormulaV2:
         assert parts["goal_completion"]["weight"] == "15.00"
         assert parts["savings_consistency"]["weight"] == "34.00"
         assert body["score"] == 93
-        assert body["formula_version"] == "v2"
+        assert body["formula_version"] == "v3"
 
     async def test_a_goal_made_last_month_does_not_count_yet(
         self, api_client, db_session, today
@@ -551,7 +551,7 @@ class TestFormulaV2:
             == 71
         )
         assert score(inputs_from_json(yesterday.components)).score == 71
-        assert today_row.formula_version == "v2"
+        assert today_row.formula_version == "v3"
 
 
 class TestNoChangeAcrossFormulas:
@@ -584,16 +584,31 @@ class TestNoChangeAcrossFormulas:
 
         score_out = (await api_client.get("/dashboard")).json()["health_score"]
 
-        assert score_out["formula_version"] == "v2"
+        assert score_out["formula_version"] == "v3"
         assert score_out["previous_score"] is None
 
-    async def test_a_v2_score_last_month_gives_the_change(
+    async def test_a_v2_score_last_month_gives_no_change(
+        self, api_client, db_session, today
+    ):
+        """v3 (#73) counts income and expenses without own-account moves, so a
+        v2 score is the old counting, not last month's household."""
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165576803"
+        )
+        await self.last_month(db_session, household, "v2")
+
+        score_out = (await api_client.get("/dashboard")).json()["health_score"]
+
+        assert score_out["formula_version"] == "v3"
+        assert score_out["previous_score"] is None
+
+    async def test_a_v3_score_last_month_gives_the_change(
         self, api_client, db_session, today
     ):
         household, _, _ = await a_scored_household(
             api_client, db_session, "+14165576802"
         )
-        await self.last_month(db_session, household, "v2")
+        await self.last_month(db_session, household, "v3")
 
         score_out = (await api_client.get("/dashboard")).json()["health_score"]
 

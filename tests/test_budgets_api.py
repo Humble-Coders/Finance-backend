@@ -20,7 +20,7 @@ from app.models.categorization import Category
 from app.models.enums import ReviewReason, TransactionDirection
 from app.models.money import Transaction
 from app.models.planning import Budget
-from app.services.dashboard import countable, month_bounds
+from app.services.dashboard import NOT_A_FLOW, countable, month_bounds
 from tests.conftest import requires_db
 from tests.test_dashboard import a_household, a_system_category_id, setup_wizard, tx
 
@@ -180,11 +180,14 @@ class TestTheGeneratedBudget:
         not_budgeted = await debits(
             Transaction.category_id.is_not(None),
             Category.slug.not_in([line["slug"] for line in budgeted]),
+            Category.slug.not_in(NOT_A_FLOW),
         )
         dashboard = (
             await api_client.get("/dashboard", params={"month": "2026-09"})
         ).json()
-        assert cents(body["total_spent"]) + cents(
+        # Savings is a budget line but not an expense (#73): money set aside
+        # went to another of the household's accounts, not anywhere.
+        assert cents(body["total_spent"]) - cents(body["savings"]["spent"]) + cents(
             body["uncategorised_spent"]
         ) + not_budgeted == cents(dashboard["expenses"]["actual"])
 

@@ -45,6 +45,7 @@ from app.services.ledger import ExactDuplicate, collides_with, save_manual
 from app.services.normalization import merchant as readable_merchant
 from app.services.normalization import normalized
 from app.services.review import PAGE_SIZE, Cursor, CursorError, stamp_if_finished
+from app.services.transfers import pair_transfers
 
 router = APIRouter(tags=["transactions"])
 
@@ -379,6 +380,10 @@ async def add_transaction(
             [row.id],
             may_ask_model=await _may_ask_model(session, identity, get_settings()),
         )
+    # A card payment typed in can be the other half of one imported (#73).
+    await pair_transfers(
+        session, household_id, [row.id], chosen=body.category_id is not None
+    )
 
     await session.flush()
     await session.commit()

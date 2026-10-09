@@ -123,7 +123,7 @@ import returns `409 import_superseded`.
 | Pairing adds one query per import, whatever the row count | **Met, reworded** | At most **4** reads per save, for 1 row or 30 (`TestCost`). See Deviations. |
 | Re-parse: free re-read within 24 hours, superseded save is 409, the 4th replacement or a read after a saved import is 429 | **Met** | `TestReadingAgain`, `TestQuota::test_the_second_import_in_a_month_is_refused` |
 | Migration applies, reverses and re-applies in CI | **Met locally** | `check_migrations.sh` on a fresh container; CI runs on the PR |
-| `ruff` and `pytest` pass; `database` job count grew | **Met locally** | Integration tests went from 529 to 551 (+22). Check that CI's `database` job count grows by 22. |
+| `ruff` and `pytest` pass; `database` job count grew | **Met locally** | Integration tests went from 528 to 551 (+23: 19 transfers, 3 re-read, 1 score). Check that CI's `database` job count grows by 23. |
 
 ## Deviations / decisions
 

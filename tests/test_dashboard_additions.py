@@ -76,12 +76,14 @@ class TestSpendByCategory:
             body["expenses"]["actual"]
         )
         assert [(e["slug"], e["spent"]) for e in entries] == [
-            ("transfers", "500.00"),
             ("debt_payment", "300.00"),
             ("groceries", "150.01"),
             ("dining", "45.00"),
             (None, "12.34"),
-        ], "largest first; the duplicate and the USD row are nowhere"
+        ], (
+            "largest first; the duplicate, the USD row and the transfer (#73) "
+            "are nowhere"
+        )
         uncategorised = entries[-1]
         assert uncategorised["category_id"] is None
         assert uncategorised["name"] is None

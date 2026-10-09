@@ -123,7 +123,7 @@ class TestTheScore:
             inputs([month(8, 100_000, 80_000)], [line(40_000, 40_000)], NO_DEBTS)
         )
         assert result.score == 100
-        assert result.formula_version == "v2"
+        assert result.formula_version == "v3"
 
     def test_every_component_at_0(self):
         debt = DebtPicture(debts=1, debts_with_minimum=1, required=25_000, paid=0)
@@ -224,7 +224,7 @@ class TestTheStoredBreakdown:
         result = score(inputs([month(8, 100_000, 80_000)]))
         assert (
             to_json(inputs([month(8, 100_000, 80_000)]), result)["formula_version"]
-            == "v2"
+            == "v3"
         )
 
 

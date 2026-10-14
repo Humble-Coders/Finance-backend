@@ -81,8 +81,10 @@ _RECEIVING = frozenset(
         AccountKind.investment,
     }
 )
-# Accounts money leaves mostly for another of the household's own.
-_SENDING = frozenset({AccountKind.savings, AccountKind.investment})
+# Accounts money leaves mostly for another of the household's own. Not an
+# investment account: its statement lists purchases ("BUY XYZ") as debits,
+# and one matching a pay cheque to the cent would hide that income.
+_SENDING = frozenset({AccountKind.savings})
 
 # A card credit filed as one of these is the card being paid.
 _CARD_PAYMENT = frozenset({INCOME_SLUG, TRANSFERS_SLUG, OTHER_SLUG})
@@ -96,6 +98,10 @@ class Paired:
     pairs: int = 0
     # Rows whose category this changed; each is now waiting for review.
     refiled: int = 0
+    # Of those, rows saved before this call — an earlier import's half of a
+    # pair. The save's own `needs_review` counts only its own import, so
+    # without this the person is not told that an older row is waiting too.
+    refiled_earlier: int = 0
 
 
 @dataclass
@@ -284,7 +290,11 @@ async def pair_transfers(
             side.row.review_reason = ReviewReason.own_transfer
     await session.flush()
 
-    outcome = Paired(pairs=len(best), refiled=len(to_file))
+    outcome = Paired(
+        pairs=len(best),
+        refiled=len(to_file),
+        refiled_earlier=sum(1 for side in to_file if side.row.id not in new),
+    )
     if outcome.pairs or outcome.refiled:
         # Counts only: which rows, and for how much, is the household's.
         log.info(

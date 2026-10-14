@@ -177,6 +177,10 @@ class SaveOutcomeOut(BaseModel):
     # Saved, but pointed at something they might be a second copy of.
     flagged: int
     needs_review: int
+    # Rows from earlier imports this save sent back to review: the other half
+    # of a card payment or a savings move it paired (#73). Not in
+    # `needs_review`, which is this import's own rows.
+    earlier_needs_review: int = 0
 
 
 class StatementImportOut(BaseModel):

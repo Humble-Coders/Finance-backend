@@ -22,6 +22,11 @@ manual entry, against rows already saved, so the import order doesn't matter.
 - **Card payments:** a payment received on a card account, filed as income or "other", is
   always a transfer. A bank-side payment with no partner keeps counting.
 
+**Debt paid counts the card being paid, once.** When the bank side becomes a transfer, the
+card's payment received (a transfer credit on a card account) counts as debt paid instead. So the
+debts card and the score's debt-payments part keep counting the payment, whichever statements are
+imported. This was added after review.
+
 **Health score** moves to formula `v3`: the same arithmetic over the corrected income and
 expenses, so "vs last month" is hidden across the change.
 
@@ -37,11 +42,19 @@ import returns `409 import_superseded`.
   - used in `_sums_by_direction`, `figures_by_month` (income and expenses only), `_daily` and
     `spend_by_category`;
   - each needs the outer join on `Category`.
+- `app/services/dashboard.py`: `paid_card_debt()`, added after review.
+  - `figures_by_month`'s `debt_paid` is now Debt payment debits **plus** card payments received.
+  - The debts card's `moved` reads that figure instead of `_moved_by_category`.
+  - The score reads the same `debt_paid`.
 
 **Pairing**
 - `app/services/transfers.py` (new): `pair_transfers`, with the module docstring giving the
   rules and why they lean towards not pairing.
-- `app/api/statements.py`: `confirm_rows` calls `pair_transfers` after `file_rows`.
+- `app/api/statements.py`: `confirm_rows` calls `pair_transfers` after `file_rows`, and reports
+  `earlier_needs_review`.
+- `app/schemas/statements.py`: `SaveOutcomeOut.earlier_needs_review` (additive, defaults to 0), added
+  after review. It counts rows from earlier imports that this save sent back to Review;
+  `needs_review` still counts only this import's rows.
 - `app/api/transactions.py`: `add_transaction` calls it, with `chosen=` set when the person
   picked the category.
 - `app/models/enums.py`: `ReviewReason.own_transfer`.
@@ -60,7 +73,7 @@ import returns `409 import_superseded`.
 - `app/config.py`: `import_rereads_per_day = 3`.
 
 **Tests**
-- `tests/test_transfers.py` (new, `integration`, 19 tests):
+- `tests/test_transfers.py` (new, `integration`, 26 tests):
   - a card bill in both import orders, card only, and bank only then the card;
   - a refund;
   - savings with one side imported and with both;
@@ -68,7 +81,13 @@ import returns `409 import_superseded`.
   - a person's rule, a doubtful amount, groceries never re-filed, another household;
   - manual entry, with and without a chosen category;
   - every total agreeing;
-  - a fixed query count.
+  - a fixed query count;
+  - added after review:
+    - debt paid with the bank only, the card only, and both;
+    - a loan payment staying Debt payment, counted once;
+    - a suspected duplicate never being a partner;
+    - an investment purchase never hiding pay;
+    - `earlier_needs_review` reporting the bank row a card import re-filed.
 - `tests/test_statements_endpoint.py`: `TestReadingAgain` (3 tests). The three quota tests now
   save the first import before the second read, because an unsaved re-read is free by design.
   They use `save_parsed`, with no model.
@@ -95,7 +114,7 @@ import returns `409 import_superseded`.
    ```
 3. Run the suites (separately, as in earlier tickets):
    ```
-   .venv/bin/pytest -q -m integration      # 551 passed
+   .venv/bin/pytest -q -m integration      # 558 passed
    .venv/bin/pytest -q -m "not integration" # 398 passed
    .venv/bin/ruff check . && .venv/bin/ruff format --check .
    ```
@@ -116,14 +135,14 @@ import returns `409 import_superseded`.
 | Card bill, both statements, either order: expenses $1,000, income unchanged, breakdown once, both rows `transfers` + `own_transfer` | **Met** | `TestACardBill::test_bank_first_then_card`, `test_card_first_then_bank` |
 | Card statement only: payment is `transfers` + `own_transfer`, not income | **Met** | `test_the_card_alone_files_its_payment_as_a_transfer` |
 | Bank statement only: payment still counts; the card statement later pairs it | **Met** | `test_the_bank_alone_still_counts_the_payment` |
-| Savings: no change to expenses, net not lowered, savings rate rises, investments card shows it | **Met** | `TestSaving` (expenses, net, `investments.moved`). The savings rate is `net / income`, which reads the same figures. |
-| No false pairs: ties, same import, person-categorised, suspected duplicates | **Met** | `TestNoFalsePairs`. Same import is excluded because a pair needs two accounts and an import is one account. Doubtful rows are covered by the low-confidence test; suspected duplicates use the same filter (`_DOUBTFUL`). |
+| Savings: no change to expenses, net not lowered, savings rate rises, investments card shows it | **Met for expenses, net and the investments card** (`TestSaving`). The savings rate is **reasoned, not tested**: it is `net / income` over the same `figures_by_month` the tests check, but no test scores it. |
+| No false pairs: ties, same import, person-categorised, suspected duplicates | **Met** | `TestNoFalsePairs`. Same import is excluded because a pair needs two accounts and an import is one account. Low confidence: `test_a_doubtful_amount_is_never_paired`. Suspected duplicates: `test_a_suspected_duplicate_is_never_a_partner`. Investment purchases: `test_an_investment_purchase_never_hides_pay`. |
 | Every total uses the same rule | **Met** | `TestEveryTotalAgrees` (month, trend, daily, breakdown) and `test_spent_is_the_dashboard_s_count` (budget) |
 | Score: new snapshots are `v3`; no change across v2 → v3; v1 and v2 snapshots still load | **Met** | `test_health_score_api.py` (`TestNoChangeAcrossFormulas`, the v1 snapshot test) |
 | Pairing adds one query per import, whatever the row count | **Met, reworded** | At most **4** reads per save, for 1 row or 30 (`TestCost`). See Deviations. |
 | Re-parse: free re-read within 24 hours, superseded save is 409, the 4th replacement or a read after a saved import is 429 | **Met** | `TestReadingAgain`, `TestQuota::test_the_second_import_in_a_month_is_refused` |
-| Migration applies, reverses and re-applies in CI | **Met locally** | `check_migrations.sh` on a fresh container; CI runs on the PR |
-| `ruff` and `pytest` pass; `database` job count grew | **Met locally** | Integration tests went from 528 to 551 (+23: 19 transfers, 3 re-read, 1 score). Check that CI's `database` job count grows by 23. |
+| Migration applies, reverses and re-applies in CI | **Met** | CI's `database` job and `check_migrations.sh` (empty database). The downgrade was also rehearsed by hand on a fresh container **with a paired `own_transfer` pair present**: reasons cleared to NULL, rows still `needs_review`, then the re-upgrade was clean. |
+| `ruff` and `pytest` pass; `database` job count grew | **Met** | Integration tests went from 528 on `main` to 558 (+30: 26 transfers, 3 re-read, 1 score). CI showed 551 before the review fixes; it should show 558 now. |
 
 ## Deviations / decisions
 
@@ -150,7 +169,8 @@ Decided while building:
 6. **A pair needs evidence.** Equal opposite amounts alone (pay going in, rent going out on the
    card) are not enough. The evidence is one of:
    - the credit lands on a card, loan, savings or investment account;
-   - the debit leaves a savings or investment account;
+   - the debit leaves a **savings** account. Investment accounts were removed after review:
+     their statements list purchases as debits, and one matching a pay cheque would hide income;
    - either side is already filed as Transfers or Savings.
 
    A side filed as spending (Groceries, etc.) is never re-filed.
@@ -162,7 +182,10 @@ Decided while building:
 8. **Query count:** a fixed ceiling (at most 4 reads) instead of "one query". The new rows,
    their candidates, the household's rules and the Transfers category each need a read; none
    depends on the row count.
-9. **Re-parse is checked only at the limit.** With a larger allowance, two different statements
+9. **Debt paid includes card payments received** (after review). Once the bank side is a
+   transfer, the card's side is the record of the card being paid; exactly one side is ever
+   counted. A loan is excluded, because its bank side stays Debt payment.
+10. **Re-parse is checked only at the limit.** With a larger allowance, two different statements
    read one after the other are both wanted, so nothing is replaced. Only the newest unsaved
    import is replaced.
 
@@ -179,5 +202,13 @@ Decided while building:
   harmless (it saved nothing), but 4.7 should treat `import_superseded` as "read again", as its
   ticket says.
 - **The mobile app** shows `own_transfer` as an unknown reason until 4.7 ([FinAI-Mobile-2026#55](https://github.com/Humble-Coders/FinAI-Mobile-2026/issues/55)) adds the wording.
+- **Known, conservative edge: a cancelled match can still double count.** When a tie or the
+  two-claimant rule cancels a match, the card rule still files the card's payment received as a
+  transfer, but the bank side stays Debt payment. In that rare case the payment still counts as
+  spending on top of the purchases, as it did before this PR, and debt paid counts it twice (both
+  sides). The person sees the card row in Review. Not pairing is the safer mistake.
+- **Known race, accepted as for the limit:** a save of import A running at the same moment as a
+  re-read that replaces A can save both statements on one allowance. This is the same
+  check-then-act trade-off as the monthly limit (see the comment in `parse`).
 - **Recategorising one side of a pair** leaves the other side and the link alone, as the ticket
   says. If people often undo pairs, clearing the link on recategorise is a small follow-up.

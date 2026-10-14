@@ -40,6 +40,8 @@ FILED_AS = {
     "transfer to savings": "savings",
     "deposit from chequing": "income",
     "amazon refund": "shopping",
+    "loan payment": "debt_payment",
+    "payment received": "income",
 }
 
 
@@ -64,7 +66,7 @@ def categorizer(monkeypatch):
 
 
 async def a_household(api_client, phone: str) -> dict[str, str]:
-    """Signed in, past the terms, with a chequing, a card and a savings account."""
+    """Signed in, past the terms, with one account of each kind pairing reads."""
     authenticate_as(phone=phone)
     me = (await api_client.get("/me")).json()
     version = (await api_client.get("/legal/terms")).json()["version"]
@@ -73,6 +75,8 @@ async def a_household(api_client, phone: str) -> dict[str, str]:
     for name, kind in (
         ("chequing", "chequing"),
         ("card", "credit_card"),
+        ("loan", "loan"),
+        ("investment", "investment"),
         ("savings", "savings"),
     ):
         response = await api_client.post("/accounts", json={"name": name, "kind": kind})
@@ -176,9 +180,30 @@ class TestACardBill:
     async def test_card_first_then_bank(self, api_client, db_session):
         me = await a_household(api_client, "+14165578002")
         await imported(api_client, db_session, me["household"], me["card"], CARD)
-        await imported(api_client, db_session, me["household"], me["chequing"], BANK)
+        saved = await imported(
+            api_client, db_session, me["household"], me["chequing"], BANK
+        )
 
         await assert_paid_once(api_client, db_session, me["household"])
+        # Only VISA PAYMENT is this import's: the card's payment was already a
+        # transfer (filed by the card rule), so no earlier row changed.
+        assert saved["earlier_needs_review"] == 0
+
+    async def test_an_earlier_row_sent_back_to_review_is_reported(
+        self, api_client, db_session
+    ):
+        """The bank's payment was saved first and counted as spending; the
+        card's import re-files it, and says so — its own `needs_review`
+        counts only the card's rows."""
+        me = await a_household(api_client, "+14165578006")
+        await imported(api_client, db_session, me["household"], me["chequing"], BANK)
+
+        saved = await imported(
+            api_client, db_session, me["household"], me["card"], CARD
+        )
+
+        assert saved["earlier_needs_review"] == 1
+        assert saved["needs_review"] == 1, "the card's own payment received"
 
     async def test_the_card_alone_files_its_payment_as_a_transfer(
         self, api_client, db_session
@@ -226,6 +251,66 @@ class TestACardBill:
         refund = await the_row(db_session, me["household"], "AMAZON REFUND")
         assert await slug_of(db_session, refund) == "shopping"
         assert refund.review_reason != ReviewReason.own_transfer
+
+
+class TestDebtPaid:
+    """Paying the card is paying debt, counted once whichever statements are
+    in: the bank's debit alone, the card's payment received alone, and with
+    both, the card's side — the bank's is a transfer by then (review of #74)."""
+
+    async def test_the_bank_statement_alone(self, api_client, db_session):
+        me = await a_household(api_client, "+14165578060")
+        await imported(api_client, db_session, me["household"], me["chequing"], BANK)
+
+        assert (await august(api_client))["debts"]["moved"] == "1000.00"
+
+    async def test_the_card_statement_alone(self, api_client, db_session):
+        me = await a_household(api_client, "+14165578061")
+        await imported(api_client, db_session, me["household"], me["card"], CARD)
+
+        assert (await august(api_client))["debts"]["moved"] == "1000.00"
+
+    async def test_both_statements_count_it_once(self, api_client, db_session):
+        me = await a_household(api_client, "+14165578062")
+        await imported(api_client, db_session, me["household"], me["chequing"], BANK)
+        await imported(api_client, db_session, me["household"], me["card"], CARD)
+
+        body = await august(api_client)
+        assert body["debts"]["moved"] == "1000.00"
+        point = next(p for p in body["trend"] if p["month"] == "2026-08-01")
+        assert point["debt_paid"] == "1000.00", "the score reads this figure"
+
+    async def test_a_loan_payment_stays_a_debt_payment(self, api_client, db_session):
+        """The loan's statement lists no purchases, so the payment is the debt
+        being paid: the bank's side keeps `debt_payment`, the loan's side is a
+        transfer, and the payment is counted once."""
+        me = await a_household(api_client, "+14165578063")
+        await imported(
+            api_client,
+            db_session,
+            me["household"],
+            me["chequing"],
+            [row("LOAN PAYMENT", "350.00", 10)],
+        )
+        await imported(
+            api_client,
+            db_session,
+            me["household"],
+            me["loan"],
+            [row("PAYMENT RECEIVED", "350.00", 11, credit=True)],
+        )
+
+        bank = await the_row(db_session, me["household"], "LOAN PAYMENT")
+        loan = await the_row(db_session, me["household"], "PAYMENT RECEIVED")
+        assert await slug_of(db_session, bank) == "debt_payment"
+        assert bank.review_reason is None, "unchanged, so nothing to confirm"
+        assert await slug_of(db_session, loan) == "transfers"
+        assert loan.review_reason == ReviewReason.own_transfer
+        assert bank.transfer_pair_id == loan.id
+        body = await august(api_client)
+        assert body["debts"]["moved"] == "350.00"
+        assert body["income"]["actual"] == "0.00"
+        assert body["expenses"]["actual"] == "350.00"
 
 
 class TestSaving:
@@ -434,6 +519,57 @@ class TestNoFalsePairs:
         groceries = await the_row(db_session, me["household"], "LOBLAWS 1042")
         assert await slug_of(db_session, groceries) == "groceries"
         assert groceries.transfer_pair_id is None
+
+    async def test_a_suspected_duplicate_is_never_a_partner(
+        self, api_client, db_session
+    ):
+        """VISA PMT is flagged as a possible copy of VISA PAYMENT. Were it a
+        candidate, the card's payment would have two equally near partners
+        and pair with neither."""
+        me = await a_household(api_client, "+14165578029")
+        await imported(api_client, db_session, me["household"], me["chequing"], BANK)
+        await imported(
+            api_client,
+            db_session,
+            me["household"],
+            me["chequing"],
+            [row("VISA PMT", "1000.00", 20)],
+        )
+        copy = await the_row(db_session, me["household"], "VISA PMT")
+        assert copy.review_reason == ReviewReason.suspected_duplicate
+
+        await imported(api_client, db_session, me["household"], me["card"], CARD)
+
+        bank = await the_row(db_session, me["household"], "VISA PAYMENT")
+        card = await the_row(db_session, me["household"], "PAYMENT THANK YOU")
+        copy = await the_row(db_session, me["household"], "VISA PMT")
+        assert bank.transfer_pair_id == card.id
+        assert copy.transfer_pair_id is None
+        assert copy.review_reason == ReviewReason.suspected_duplicate
+
+    async def test_an_investment_purchase_never_hides_pay(self, api_client, db_session):
+        """An investment statement lists purchases as debits. One matching a
+        pay cheque to the cent is still not the pay cheque."""
+        me = await a_household(api_client, "+14165578032")
+        await imported(
+            api_client,
+            db_session,
+            me["household"],
+            me["chequing"],
+            [row("PAYROLL ACME", "2000.00", 15, credit=True)],
+        )
+        await imported(
+            api_client,
+            db_session,
+            me["household"],
+            me["investment"],
+            [row("BUY XEQT 40 UNITS", "2000.00", 16)],
+        )
+
+        pay = await the_row(db_session, me["household"], "PAYROLL ACME")
+        assert await slug_of(db_session, pay) == "income"
+        assert pay.transfer_pair_id is None
+        assert (await august(api_client))["income"]["actual"] == "2000.00"
 
     async def test_another_household_s_row_is_never_a_partner(
         self, api_client, db_session

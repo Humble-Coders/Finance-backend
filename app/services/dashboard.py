@@ -28,8 +28,8 @@ from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.categorization import Category
-from app.models.enums import ReviewReason, TransactionDirection
-from app.models.money import StatementImport, Transaction
+from app.models.enums import AccountKind, ReviewReason, TransactionDirection
+from app.models.money import Account, StatementImport, Transaction
 from app.models.planning import Debt
 from app.models.setup import FinancialProfile, Investment, Obligation
 
@@ -76,6 +76,33 @@ _WORD = re.compile(r"[a-z]+")
 DEBT_PAYMENT_SLUG = "debt_payment"
 SAVINGS_SLUG = "savings"
 TRANSFERS_SLUG = "transfers"
+
+
+def paid_card_debt():
+    """A card's "payment received" (#73): the card being paid down.
+
+    Before pairing, a card bill paid from chequing was a `debt_payment` debit
+    on the bank's statement, and that is what "debt paid" counted. Once the
+    card's own statement is imported, the bank's side becomes a transfer — or
+    the payment would be spent twice — so the payment is counted on the card's
+    side instead: a transfer credit on a credit-card account. Exactly one of
+    the two is ever counted:
+
+    * bank statement only: the bank's `debt_payment` debit;
+    * card statement only: the card's payment received;
+    * both: the card's payment received; the bank's side is a transfer.
+
+    A loan is not here. Paired with a loan, the bank's side stays
+    `debt_payment` (`transfers._keeps`), so counting the loan's side too would
+    count the payment twice. The query must join `Account` on the row's
+    account and outer-join `Category` on its category.
+    """
+    return and_(
+        Transaction.direction == TransactionDirection.credit,
+        Category.slug == TRANSFERS_SLUG,
+        Account.kind == AccountKind.credit_card,
+    )
+
 
 # Money that only moved between the household's own accounts. A card bill paid
 # from chequing is a debit on one statement and a credit on the other; money
@@ -425,9 +452,11 @@ async def figures_by_month(
 
     Counted by `countable`, the rule every figure on the dashboard uses, so a
     trend bar and the card it sits under can never disagree; income and
-    expenses are the flows among those rows (`is_flow`). Invested and
-    debt-paid match `_moved_by_category`: debits filed under that slug, the
-    household's own category of the slug included.
+    expenses are the flows among those rows (`is_flow`). Invested matches
+    `_moved_by_category`: debits filed under that slug, the household's own
+    category of the slug included. Debt paid is `debt_payment` debits plus
+    card payments received (`paid_card_debt`), and is what the debts card
+    shows for the month.
     """
     if not months:
         return {}
@@ -449,8 +478,9 @@ async def figures_by_month(
             total(debit, flow),
             total(debit, Category.slug == SAVINGS_SLUG),
             total(credit, Category.slug == SAVINGS_SLUG),
-            total(debit, Category.slug == DEBT_PAYMENT_SLUG),
+            total(debit, Category.slug == DEBT_PAYMENT_SLUG) + total(paid_card_debt()),
         )
+        .join(Account, Account.id == Transaction.account_id)
         # Outer: an unfiled row still counts toward income and expenses.
         .outerjoin(Category, Category.id == Transaction.category_id)
         .where(
@@ -516,7 +546,7 @@ async def build(
     )
 
     moved = await _moved_by_category(
-        session, household_id, currency, month, (SAVINGS_SLUG, DEBT_PAYMENT_SLUG)
+        session, household_id, currency, month, (SAVINGS_SLUG,)
     )
 
     # Every debit in the month, once, and then matched in memory. The
@@ -634,7 +664,9 @@ async def build(
         ),
         debts=Stock(
             balance_minor_units=int(outstanding or 0),
-            moved_minor_units=moved.get(DEBT_PAYMENT_SLUG, 0),
+            # From the month's figures, not `_moved_by_category`: a card's
+            # payment received counts as debt paid too (`paid_card_debt`).
+            moved_minor_units=this_month.debt_paid,
             previous_moved_minor_units=(
                 previous.debt_paid if previous is not None else None
             ),

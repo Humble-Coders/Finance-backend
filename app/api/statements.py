@@ -48,7 +48,7 @@ from app.services.statements import (
     TooManyRowsError,
     parse_statement,
 )
-from app.services.transfers import pair_transfers
+from app.services.transfers import Paired, pair_transfers
 
 router = APIRouter(tags=["statements"])
 
@@ -574,6 +574,7 @@ async def confirm_rows(
             },
         ) from exc
 
+    paired = Paired()
     if outcome.saved_ids:
         # The parse endpoint already required consent to AI processing, so an
         # import may always ask the model.
@@ -582,7 +583,7 @@ async def confirm_rows(
         )
         # After filing, so the categorizer cannot overwrite what it files: a
         # card bill and its payment, and savings moved, are transfers (#73).
-        await pair_transfers(session, household.id, outcome.saved_ids)
+        paired = await pair_transfers(session, household.id, outcome.saved_ids)
 
     await session.flush()
     # Shared with the review queue (3.4), which resolves the rest of these rows
@@ -598,6 +599,7 @@ async def confirm_rows(
         duplicates=outcome.duplicates,
         flagged=outcome.flagged,
         needs_review=still_to_review,
+        earlier_needs_review=paired.refiled_earlier,
     )
 
 

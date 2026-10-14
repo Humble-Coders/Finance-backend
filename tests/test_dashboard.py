@@ -784,7 +784,9 @@ class TestTheBreakdowns:
         body = (await api_client.get(DASHBOARD, params=MONTH)).json()
 
         assert body["income"]["previous"] == "3000.00"
-        assert body["expenses"]["previous"] == "1550.00", "every debit is an expense"
+        assert (
+            body["expenses"]["previous"] == "1350.00"
+        ), "every debit but money set aside is an expense (#73)"
         assert body["investments"]["previous_moved"] == "200.00"
         assert body["debts"]["previous_moved"] == "150.00"
 
@@ -842,12 +844,14 @@ class TestTheBreakdowns:
         june = next(point for point in trend if point["month"] == "2026-06-01")
         july = next(point for point in trend if point["month"] == "2026-07-01")
 
-        assert june["income"] == "4050.00", "a withdrawal from savings is money in"
-        assert june["expenses"] == "1550.00"
+        assert (
+            june["income"] == "4000.00"
+        ), "a withdrawal from savings is the household's own money (#73)"
+        assert june["expenses"] == "1250.00", "and so is a deposit into it"
         assert june["invested"] == "300.00"
         assert june["withdrawn"] == "50.00"
         assert june["debt_paid"] == "250.00"
-        assert june["net"] == "2500.00", "net is still income minus expenses"
+        assert june["net"] == "2750.00", "net is still income minus expenses"
         assert july["income"] is None and july["invested"] is None, "a gap, not zeroes"
 
     async def test_money_taken_out_of_savings_is_shown_beside_what_went_in(

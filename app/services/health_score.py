@@ -9,6 +9,14 @@ Two halves, as in `app/services/budget.py`:
 * **`current_score`** gathers the inputs, scores them, and keeps today's
   snapshot.
 
+**Formula v3** (backend #73) — v2's arithmetic, unchanged, over corrected
+inputs: a month's income and expenses no longer count money moved between
+the household's own accounts (`dashboard.NOT_A_FLOW` — transfers, savings).
+Saving no longer lowers `net`, and a card bill no longer inflates `income`, so
+the savings rate means what it says. Bumped because the same arithmetic over
+different inputs is a different score: a v2 → v3 change is partly the counting
+moving, not the person.
+
 **Formula v2** (backend #66) — v1's three parts (manager decision
 2026-10-04, settling PRD OD4) plus goal completion, with v1's weights scaled
 to 85 % and goals at 15 %:
@@ -61,7 +69,7 @@ from app.services.learning import LearningState, learning_state
 # trend never compares two formulas without saying so — and a snapshot whose
 # breakdown no longer reproduces its score is how a silent change is caught.
 
-FORMULA_VERSION = "v2"
+FORMULA_VERSION = "v3"
 
 SAVINGS_CONSISTENCY = "savings_consistency"
 SPENDING_VS_BUDGET = "spending_vs_budget"

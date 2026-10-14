@@ -243,6 +243,16 @@ class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
         ForeignKey("transaction.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # The other half of a move between two of the household's own accounts —
+    # a card bill and the card's "payment received" (#73). Set on both rows.
+    # Its job is "one partner each": a bank payment already paired with one
+    # card must not be claimed again by a second card's payment of the same
+    # amount, and without a record of the pair nothing could tell.
+    transfer_pair_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("transaction.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     account: Mapped[Account] = relationship(back_populates="transactions")
     statement_import: Mapped[StatementImport | None] = relationship(

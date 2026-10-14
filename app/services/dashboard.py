@@ -28,8 +28,8 @@ from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.categorization import Category
-from app.models.enums import ReviewReason, TransactionDirection
-from app.models.money import StatementImport, Transaction
+from app.models.enums import AccountKind, ReviewReason, TransactionDirection
+from app.models.money import Account, StatementImport, Transaction
 from app.models.planning import Debt
 from app.models.setup import FinancialProfile, Investment, Obligation
 
@@ -75,6 +75,43 @@ _WORD = re.compile(r"[a-z]+")
 # is. Slugs rather than ids: ids differ per environment, the taxonomy does not.
 DEBT_PAYMENT_SLUG = "debt_payment"
 SAVINGS_SLUG = "savings"
+TRANSFERS_SLUG = "transfers"
+
+
+def paid_card_debt():
+    """A card's "payment received" (#73): the card being paid down.
+
+    Before pairing, a card bill paid from chequing was a `debt_payment` debit
+    on the bank's statement, and that is what "debt paid" counted. Once the
+    card's own statement is imported, the bank's side becomes a transfer — or
+    the payment would be spent twice — so the payment is counted on the card's
+    side instead: a transfer credit on a credit-card account. Exactly one of
+    the two is ever counted:
+
+    * bank statement only: the bank's `debt_payment` debit;
+    * card statement only: the card's payment received;
+    * both: the card's payment received; the bank's side is a transfer.
+
+    A loan is not here. Paired with a loan, the bank's side stays
+    `debt_payment` (`transfers._keeps`), so counting the loan's side too would
+    count the payment twice. The query must join `Account` on the row's
+    account and outer-join `Category` on its category.
+    """
+    return and_(
+        Transaction.direction == TransactionDirection.credit,
+        Category.slug == TRANSFERS_SLUG,
+        Account.kind == AccountKind.credit_card,
+    )
+
+
+# Money that only moved between the household's own accounts. A card bill paid
+# from chequing is a debit on one statement and a credit on the other; money
+# put into savings is a debit here and a deposit there. Counted as flows, a
+# card bill is spent twice and earned once, and saving lowers what the month
+# kept — the opposite of what the figure is for. So rows filed under these
+# slugs are in neither income nor expenses (#73). Savings still shows, as what
+# was set aside, on the investments card.
+NOT_A_FLOW = (SAVINGS_SLUG, TRANSFERS_SLUG)
 
 
 _MONTH = re.compile(r"^(\d{4})-(\d{2})$")
@@ -280,39 +317,66 @@ def countable(household_id: uuid.UUID, currency: str) -> list:
     ]
 
 
+def is_flow():
+    """The rows income and expenses are made of: everything `countable` that
+    is not money moving between the household's own accounts (`NOT_A_FLOW`).
+
+    An unfiled row is a flow: it is money in or out until somebody says
+    otherwise, as it always was. The query must outer-join `Category` on the
+    row's category — this reads its slug, and a household's own category of
+    that slug means the same thing.
+
+    A condition rather than a filter, used inside the sums, so a month whose
+    only rows are transfers still has data — it is a month we hold a statement
+    for, in which nothing came in or went out.
+    """
+    return or_(Category.slug.is_(None), Category.slug.not_in(NOT_A_FLOW))
+
+
 def _in_month(month: date) -> list:
     first, last = month_bounds(month)
     return [Transaction.occurred_on >= first, Transaction.occurred_on <= last]
 
 
 def _sums_by_direction(household_id: uuid.UUID, currency: str, month: date) -> Select:
-    return select(
-        func.coalesce(
-            func.sum(
-                case(
-                    (
-                        Transaction.direction == TransactionDirection.credit,
-                        Transaction.amount_minor_units,
-                    ),
-                    else_=0,
-                )
+    flow = is_flow()
+    return (
+        select(
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                flow,
+                                Transaction.direction == TransactionDirection.credit,
+                            ),
+                            Transaction.amount_minor_units,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
             ),
-            0,
-        ),
-        func.coalesce(
-            func.sum(
-                case(
-                    (
-                        Transaction.direction == TransactionDirection.debit,
-                        Transaction.amount_minor_units,
-                    ),
-                    else_=0,
-                )
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                flow,
+                                Transaction.direction == TransactionDirection.debit,
+                            ),
+                            Transaction.amount_minor_units,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
             ),
-            0,
-        ),
-        func.count(Transaction.id),
-    ).where(*countable(household_id, currency), *_in_month(month))
+            func.count(Transaction.id),
+        )
+        .outerjoin(Category, Category.id == Transaction.category_id)
+        .where(*countable(household_id, currency), *_in_month(month))
+    )
 
 
 def _tokens(text: str) -> set[str]:
@@ -387,9 +451,12 @@ async def figures_by_month(
     no data, which callers render as a gap and never as zero.
 
     Counted by `countable`, the rule every figure on the dashboard uses, so a
-    trend bar and the card it sits under can never disagree. Invested and
-    debt-paid match `_moved_by_category`: debits filed under that slug, the
-    household's own category of the slug included.
+    trend bar and the card it sits under can never disagree; income and
+    expenses are the flows among those rows (`is_flow`). Invested matches
+    `_moved_by_category`: debits filed under that slug, the household's own
+    category of the slug included. Debt paid is `debt_payment` debits plus
+    card payments received (`paid_card_debt`), and is what the debts card
+    shows for the month.
     """
     if not months:
         return {}
@@ -399,6 +466,7 @@ async def figures_by_month(
     credit = Transaction.direction == TransactionDirection.credit
     debit = Transaction.direction == TransactionDirection.debit
     amount = Transaction.amount_minor_units
+    flow = is_flow()
 
     def total(*when) -> object:
         return func.coalesce(func.sum(case((and_(*when), amount), else_=0)), 0)
@@ -406,12 +474,13 @@ async def figures_by_month(
     result = await session.execute(
         select(
             bucket,
-            total(credit),
-            total(debit),
+            total(credit, flow),
+            total(debit, flow),
             total(debit, Category.slug == SAVINGS_SLUG),
             total(credit, Category.slug == SAVINGS_SLUG),
-            total(debit, Category.slug == DEBT_PAYMENT_SLUG),
+            total(debit, Category.slug == DEBT_PAYMENT_SLUG) + total(paid_card_debt()),
         )
+        .join(Account, Account.id == Transaction.account_id)
         # Outer: an unfiled row still counts toward income and expenses.
         .outerjoin(Category, Category.id == Transaction.category_id)
         .where(
@@ -477,7 +546,7 @@ async def build(
     )
 
     moved = await _moved_by_category(
-        session, household_id, currency, month, (SAVINGS_SLUG, DEBT_PAYMENT_SLUG)
+        session, household_id, currency, month, (SAVINGS_SLUG,)
     )
 
     # Every debit in the month, once, and then matched in memory. The
@@ -595,7 +664,9 @@ async def build(
         ),
         debts=Stock(
             balance_minor_units=int(outstanding or 0),
-            moved_minor_units=moved.get(DEBT_PAYMENT_SLUG, 0),
+            # From the month's figures, not `_moved_by_category`: a card's
+            # payment received counts as debt paid too (`paid_card_debt`).
+            moved_minor_units=this_month.debt_paid,
             previous_moved_minor_units=(
                 previous.debt_paid if previous is not None else None
             ),
@@ -617,8 +688,8 @@ async def _daily(
 ) -> list[DayPoint]:
     """The month's running balance, one point per day, for the home chart.
 
-    Counted by `countable`, the rule the net figure uses, so the line ends
-    exactly where "net this month" says — two figures on one card that
+    Counted by `countable` and `is_flow`, the rules the net figure uses, so the
+    line ends exactly where "net this month" says — two figures on one card that
     disagreed would each make the other look wrong. One grouped query; the
     running sum is taken here.
 
@@ -632,19 +703,27 @@ async def _daily(
     first, last = month_bounds(month)
     if first > today:
         return []
+    flow = is_flow()
     result = await session.execute(
         select(
             Transaction.occurred_on,
             func.sum(
                 case(
                     (
-                        Transaction.direction == TransactionDirection.credit,
+                        and_(
+                            flow, Transaction.direction == TransactionDirection.credit
+                        ),
                         Transaction.amount_minor_units,
                     ),
-                    else_=-Transaction.amount_minor_units,
+                    (
+                        and_(flow, Transaction.direction == TransactionDirection.debit),
+                        -Transaction.amount_minor_units,
+                    ),
+                    else_=0,
                 )
             ),
         )
+        .outerjoin(Category, Category.id == Transaction.category_id)
         .where(*countable(household_id, currency), *_in_month(month))
         .group_by(Transaction.occurred_on)
     )
@@ -714,8 +793,10 @@ async def spend_by_category(
 ) -> list[CategorySpend]:
     """Where the month's money went: countable debits by category, largest first.
 
-    One grouped query, counted by `countable` exactly as `expenses.actual` is,
-    so the entries — the uncategorised one included — sum to it to the cent.
+    One grouped query, counted by `countable` and `is_flow` exactly as
+    `expenses.actual` is, so the entries — the uncategorised one included — sum
+    to it to the cent. Transfers and savings are not in it: they are not money
+    that went anywhere but another of the household's accounts.
     A household's own category is its own entry, beside the system one.
     """
     total = func.sum(Transaction.amount_minor_units)
@@ -726,6 +807,7 @@ async def spend_by_category(
             *countable(household_id, currency),
             *_in_month(month),
             Transaction.direction == TransactionDirection.debit,
+            is_flow(),
         )
         .group_by(Transaction.category_id, Category.slug, Category.name)
         .order_by(total.desc(), Category.name.nulls_last())

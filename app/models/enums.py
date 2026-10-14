@@ -92,6 +92,10 @@ class ReviewReason(enum.Enum):
     low_confidence = "low_confidence"
     unknown_category = "unknown_category"
     suspected_duplicate = "suspected_duplicate"
+    # Filed as a transfer because it looks like money moving between two of the
+    # household's own accounts (#73) — a card bill paid from chequing. Counted
+    # in neither income nor expenses until somebody says otherwise.
+    own_transfer = "own_transfer"
 
 
 class AuthProvider(enum.Enum):

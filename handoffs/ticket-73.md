@@ -24,9 +24,16 @@ manual entry, against rows already saved, so the import order doesn't matter.
 
 **Debt paid counts the card being paid, once.** When the bank side becomes a transfer, the
 card's payment received (a transfer credit on a card account) counts as debt paid instead. So the
-debts card, the score's debt-payments part and the **Budget's Debt line** (spent, and the months
-it learns from) keep counting the payment, and all agree, whichever statements are imported. This
-was added after the two reviews.
+debts card and the score's debt-payments part keep counting the payment, whichever statements are
+imported. This was added after review.
+
+**The Budget's Debt line deliberately differs from Home's "debt paid."** The Budget asks "where did
+the money go?". When the card statement is imported, its purchases already answer that in their
+own lines, so the payoff is not more money spent. The Debt line holds only debt payments not visible
+as purchases: loans, and a bank-side card payment whose card statement isn't imported.
+- A second-review change that made the two agree counted the card bill twice in the Budget's total
+  and in its learned plan. It was reverted after the third review.
+- Tests now pin both sides: the purchases or the payment, never both.
 
 **Health score** moves to formula `v3`: the same arithmetic over the corrected income and
 expenses, so "vs last month" is hidden across the change.
@@ -47,9 +54,8 @@ import returns `409 import_superseded`.
   - `figures_by_month`'s `debt_paid` is now Debt payment debits **plus** card payments received.
   - The debts card's `moved` reads that figure instead of `_moved_by_category`.
   - The score reads the same `debt_paid`.
-- `app/services/budget.py`: `_card_debt_paid`, added after the second review. Card payments
-  received go to the Debt line's spent (in `_view`) and to its learned history (in `_history`),
-  so Budget and Home show the same figure.
+- `app/services/budget.py`: **unchanged from `main`**. A second-review change here was reverted after
+  the third review; see the Summary.
 
 **Pairing**
 - `app/services/transfers.py` (new): `pair_transfers`, with the module docstring giving the
@@ -92,8 +98,17 @@ import returns `409 import_superseded`.
     - a suspected duplicate never being a partner;
     - an investment purchase never hiding pay;
     - `earlier_needs_review` reporting the bank row a card import re-filed;
-  - added after the second review: the Budget's Debt line equals Home's debt paid with the bank
-    only, the card only, and both; and the learned history includes the card's payment received.
+  - added after the third review (`TestTheBudgetCountsACardBillOnce`): a card bill raises the
+    Budget's total spent by its purchases or by the bank's payment, never both:
+
+    | Imported | Debt line | Total spent rises by |
+    |---|---|---|
+    | Bank only | $1,300 | $1,000 |
+    | Card only | $300 | $600 |
+    | Both | $300 | $600 |
+
+    Home's debt paid reads $1,300 in all three cases. The learned Debt history ignores the card's
+    payment received.
 - `tests/test_statements_endpoint.py`: `TestReadingAgain` (3 tests). The three quota tests now
   save the first import before the second read, because an unsaved re-read is free by design.
   They use `save_parsed`, with no model.
@@ -190,8 +205,9 @@ Decided while building:
    depends on the row count.
 9. **Debt paid includes card payments received** (after review). Once the bank side is a
    transfer, the card's side is the record of the card being paid; exactly one side is ever
-   counted. A loan is excluded, because its bank side stays Debt payment. The same rule applies
-   on Home, in the score and in the Budget's Debt line (`paid_card_debt` in each query).
+   counted. A loan is excluded, because its bank side stays Debt payment. The rule applies on
+   Home and in the score only. The Budget's Debt line doesn't use it, because the card's purchases
+   are already budgeted (see the Summary).
 10. **Re-parse is checked only at the limit.** With a larger allowance, two different statements
    read one after the other are both wanted, so nothing is replaced. Only the newest unsaved
    import is replaced.
@@ -217,11 +233,17 @@ Decided while building:
 - **Known race, accepted as for the limit:** a save of import A running at the same moment as a
   re-read that replaces A can save both statements on one allowance. This is the same
   check-then-act trade-off as the monthly limit (see the comment in `parse`).
+- **Pre-existing, not changed here: the Debt line's allocation includes every listed debt's
+  minimum, a Visa's included, while the Visa's purchases are also budgeted in categories.** With the
+  card statement imported, the line can look under-paid against that minimum. This is the same root
+  cause as the next point, and the same follow-up fixes both.
 - **Pre-existing, not changed here: any card payoff counts toward "debt paid".** A household that
   pays its card in full but misses a **loan** payment can still score 100 on debt payments
   (paid ≥ required), exactly as the bank-side Debt payment did before this PR. Counting only
   payments towards the debts the person listed needs debts linked to accounts (`Debt.account_id`
-  is optional, and the setup wizard doesn't set it), which is a product decision. Suggested as a
-  follow-up ticket.
+  is optional, and the setup wizard doesn't set it), which is a product decision. **Suggested
+  follow-up ticket: link debts to accounts.** Then debt paid counts only payments towards listed
+  debts, and a card whose statement is imported leaves the Budget's Debt line, because its
+  purchases are its budget.
 - **Recategorising one side of a pair** leaves the other side and the link alone, as the ticket
   says. If people often undo pairs, clearing the link on recategorise is a small follow-up.

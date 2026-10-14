@@ -714,10 +714,19 @@ class TestCost:
         assert max(reads) <= 4, reads
 
 
-class TestTheBudgetAgreesWithHome:
-    """The budget's debt line and Home's "debt paid" are one figure, whichever
-    statements are in (second review of #74). The ready household already
-    pays $300 a month on its Visa; this adds a $1,000 card bill."""
+class TestTheBudgetCountsACardBillOnce:
+    """The budget asks "where did the money go?"; Home's debts card asks "were
+    the debts paid?" — so they differ on purpose (third review of #74).
+
+    With the card's statement in, its purchases are already in their lines,
+    and its payoff is not more money spent: the debt line holds only payments
+    not visible as purchases — loans, and a card paid from chequing whose
+    statement is not imported. Home's "debt paid", and the score, count the
+    payoff, because paying the card is paying a debt.
+
+    The ready household pays $300 a month on its Visa, has a groceries line,
+    and has no entertainment line.
+    """
 
     @pytest.fixture(autouse=True)
     def pinned_today(self, monkeypatch):
@@ -727,18 +736,8 @@ class TestTheBudgetAgreesWithHome:
     def september(row_: dict) -> dict:
         return {**row_, "occurred_on": row_["occurred_on"].replace("-08-", "-09-")}
 
-    @pytest.mark.parametrize(
-        ("phone", "bank", "card"),
-        [
-            ("+14165578070", True, False),
-            ("+14165578071", False, True),
-            ("+14165578072", True, True),
-        ],
-        ids=["bank only", "card only", "both"],
-    )
-    async def test_the_debt_line_is_home_s_debt_paid(
-        self, api_client, db_session, phone, bank, card
-    ):
+    async def a_card_bill(self, api_client, db_session, phone, *, bank, card):
+        """$600 groceries and $400 cinema on the card, paid in full."""
         household, _, _ = await a_ready_household(api_client, db_session, phone)
         accounts = {}
         for name, kind in (("chq2", "chequing"), ("visa", "credit_card")):
@@ -746,33 +745,56 @@ class TestTheBudgetAgreesWithHome:
                 "/accounts", json={"name": name, "kind": kind}
             )
             accounts[name] = created.json()["id"]
-        if bank:
-            await imported(
-                api_client,
-                db_session,
-                str(household),
-                accounts["chq2"],
-                [self.september(row("VISA PAYMENT", "1000.00", 10))],
-            )
+        before = (await api_client.get("/budgets/2026-09")).json()
         if card:
             await imported(
                 api_client,
                 db_session,
                 str(household),
                 accounts["visa"],
-                [self.september(row("PAYMENT THANK YOU", "1000.00", 12, credit=True))],
+                [self.september(r) for r in CARD],
             )
-
-        budget = (await api_client.get("/budgets/2026-09")).json()
+        if bank:
+            await imported(
+                api_client,
+                db_session,
+                str(household),
+                accounts["chq2"],
+                [self.september(row("VISA PAYMENT", "1000.00", 20))],
+            )
+        after = (await api_client.get("/budgets/2026-09")).json()
         home = (await api_client.get("/dashboard", params={"month": "2026-09"})).json()
+        return before, after, home
 
-        assert budget["debt"]["spent"] == home["debts"]["moved"] == "1300.00"
+    @pytest.mark.parametrize(
+        ("phone", "bank", "card", "debt_line", "budget_rise"),
+        [
+            # The bank's payment is the only record of the card's spending.
+            ("+14165578070", True, False, "1300.00", 100_000),
+            # The purchases are in their lines; groceries is one, cinema not.
+            ("+14165578071", False, True, "300.00", 60_000),
+            ("+14165578072", True, True, "300.00", 60_000),
+        ],
+        ids=["bank only", "card only", "both"],
+    )
+    async def test_a_card_bill_is_budgeted_once(
+        self, api_client, db_session, phone, bank, card, debt_line, budget_rise
+    ):
+        before, after, home = await self.a_card_bill(
+            api_client, db_session, phone, bank=bank, card=card
+        )
 
-    async def test_the_learned_debt_line_counts_the_card_s_side(
+        assert after["debt"]["spent"] == debt_line
+        assert cents(after["total_spent"]) - cents(before["total_spent"]) == (
+            budget_rise
+        ), "the purchases or the payment, never both"
+        assert home["debts"]["moved"] == "1300.00", "the debt was paid, either way"
+
+    async def test_the_learned_debt_line_does_not_count_the_card_s_side(
         self, api_client, db_session
     ):
-        """With both statements in, the bank's payment is a transfer; the
-        months the debt line learns from must still see the payment."""
+        """Its purchases are learned by their own lines; learning the payoff
+        too would plan the same money twice."""
         household, _, _ = await a_ready_household(
             api_client, db_session, "+14165578073"
         )
@@ -795,11 +817,12 @@ class TestTheBudgetAgreesWithHome:
         )
 
         def debt(history) -> list[int]:
-            window, totals = history
+            _, totals = history
             return next(v for k, v in totals.items() if k.slug == "debt_payment")
 
-        assert [a - b for a, b in zip(debt(after), debt(before), strict=True)] == [
-            0,
-            0,
-            100_000,
-        ], "June, July, August: the card's payment received is August's"
+        assert debt(after) == debt(before)
+
+
+def cents(amount: str) -> int:
+    whole, part = amount.split(".")
+    return int(whole) * 100 + int(part)

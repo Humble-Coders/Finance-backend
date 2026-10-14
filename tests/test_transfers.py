@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import date
 
 import pytest
 from sqlalchemy import select
@@ -17,8 +18,10 @@ from sqlalchemy import select
 from app.models.categorization import Category, CategoryCorrection
 from app.models.enums import ReviewReason, SourceKind, StatementImportStatus
 from app.models.money import StatementImport, Transaction
+from app.services import budget as budget_service
 from app.services import filing, transfers
 from tests.conftest import requires_db
+from tests.test_budgets_api import a_ready_household
 from tests.test_ledger_endpoint import authenticate_as
 
 pytestmark = [
@@ -709,3 +712,94 @@ class TestCost:
         # row or thirty.
         assert len(reads) == 2
         assert max(reads) <= 4, reads
+
+
+class TestTheBudgetAgreesWithHome:
+    """The budget's debt line and Home's "debt paid" are one figure, whichever
+    statements are in (second review of #74). The ready household already
+    pays $300 a month on its Visa; this adds a $1,000 card bill."""
+
+    @pytest.fixture(autouse=True)
+    def pinned_today(self, monkeypatch):
+        monkeypatch.setattr("app.api.budgets._today", lambda: date(2026, 9, 15))
+
+    @staticmethod
+    def september(row_: dict) -> dict:
+        return {**row_, "occurred_on": row_["occurred_on"].replace("-08-", "-09-")}
+
+    @pytest.mark.parametrize(
+        ("phone", "bank", "card"),
+        [
+            ("+14165578070", True, False),
+            ("+14165578071", False, True),
+            ("+14165578072", True, True),
+        ],
+        ids=["bank only", "card only", "both"],
+    )
+    async def test_the_debt_line_is_home_s_debt_paid(
+        self, api_client, db_session, phone, bank, card
+    ):
+        household, _, _ = await a_ready_household(api_client, db_session, phone)
+        accounts = {}
+        for name, kind in (("chq2", "chequing"), ("visa", "credit_card")):
+            created = await api_client.post(
+                "/accounts", json={"name": name, "kind": kind}
+            )
+            accounts[name] = created.json()["id"]
+        if bank:
+            await imported(
+                api_client,
+                db_session,
+                str(household),
+                accounts["chq2"],
+                [self.september(row("VISA PAYMENT", "1000.00", 10))],
+            )
+        if card:
+            await imported(
+                api_client,
+                db_session,
+                str(household),
+                accounts["visa"],
+                [self.september(row("PAYMENT THANK YOU", "1000.00", 12, credit=True))],
+            )
+
+        budget = (await api_client.get("/budgets/2026-09")).json()
+        home = (await api_client.get("/dashboard", params={"month": "2026-09"})).json()
+
+        assert budget["debt"]["spent"] == home["debts"]["moved"] == "1300.00"
+
+    async def test_the_learned_debt_line_counts_the_card_s_side(
+        self, api_client, db_session
+    ):
+        """With both statements in, the bank's payment is a transfer; the
+        months the debt line learns from must still see the payment."""
+        household, _, _ = await a_ready_household(
+            api_client, db_session, "+14165578073"
+        )
+        before = await budget_service._history(
+            db_session, household, "CAD", date(2026, 9, 1)
+        )
+        card = await api_client.post(
+            "/accounts", json={"name": "visa", "kind": "credit_card"}
+        )
+        await imported(
+            api_client,
+            db_session,
+            str(household),
+            card.json()["id"],
+            [row("PAYMENT THANK YOU", "1000.00", 12, credit=True)],
+        )
+
+        after = await budget_service._history(
+            db_session, household, "CAD", date(2026, 9, 1)
+        )
+
+        def debt(history) -> list[int]:
+            window, totals = history
+            return next(v for k, v in totals.items() if k.slug == "debt_payment")
+
+        assert [a - b for a, b in zip(debt(after), debt(before), strict=True)] == [
+            0,
+            0,
+            100_000,
+        ], "June, July, August: the card's payment received is August's"

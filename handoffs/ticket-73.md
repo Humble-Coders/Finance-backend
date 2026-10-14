@@ -24,8 +24,9 @@ manual entry, against rows already saved, so the import order doesn't matter.
 
 **Debt paid counts the card being paid, once.** When the bank side becomes a transfer, the
 card's payment received (a transfer credit on a card account) counts as debt paid instead. So the
-debts card and the score's debt-payments part keep counting the payment, whichever statements are
-imported. This was added after review.
+debts card, the score's debt-payments part and the **Budget's Debt line** (spent, and the months
+it learns from) keep counting the payment, and all agree, whichever statements are imported. This
+was added after the two reviews.
 
 **Health score** moves to formula `v3`: the same arithmetic over the corrected income and
 expenses, so "vs last month" is hidden across the change.
@@ -46,6 +47,9 @@ import returns `409 import_superseded`.
   - `figures_by_month`'s `debt_paid` is now Debt payment debits **plus** card payments received.
   - The debts card's `moved` reads that figure instead of `_moved_by_category`.
   - The score reads the same `debt_paid`.
+- `app/services/budget.py`: `_card_debt_paid`, added after the second review. Card payments
+  received go to the Debt line's spent (in `_view`) and to its learned history (in `_history`),
+  so Budget and Home show the same figure.
 
 **Pairing**
 - `app/services/transfers.py` (new): `pair_transfers`, with the module docstring giving the
@@ -73,7 +77,7 @@ import returns `409 import_superseded`.
 - `app/config.py`: `import_rereads_per_day = 3`.
 
 **Tests**
-- `tests/test_transfers.py` (new, `integration`, 26 tests):
+- `tests/test_transfers.py` (new, `integration`, 30 tests):
   - a card bill in both import orders, card only, and bank only then the card;
   - a refund;
   - savings with one side imported and with both;
@@ -87,7 +91,9 @@ import returns `409 import_superseded`.
     - a loan payment staying Debt payment, counted once;
     - a suspected duplicate never being a partner;
     - an investment purchase never hiding pay;
-    - `earlier_needs_review` reporting the bank row a card import re-filed.
+    - `earlier_needs_review` reporting the bank row a card import re-filed;
+  - added after the second review: the Budget's Debt line equals Home's debt paid with the bank
+    only, the card only, and both; and the learned history includes the card's payment received.
 - `tests/test_statements_endpoint.py`: `TestReadingAgain` (3 tests). The three quota tests now
   save the first import before the second read, because an unsaved re-read is free by design.
   They use `save_parsed`, with no model.
@@ -114,7 +120,7 @@ import returns `409 import_superseded`.
    ```
 3. Run the suites (separately, as in earlier tickets):
    ```
-   .venv/bin/pytest -q -m integration      # 558 passed
+   .venv/bin/pytest -q -m integration      # 562 passed
    .venv/bin/pytest -q -m "not integration" # 398 passed
    .venv/bin/ruff check . && .venv/bin/ruff format --check .
    ```
@@ -142,7 +148,7 @@ import returns `409 import_superseded`.
 | Pairing adds one query per import, whatever the row count | **Met, reworded** | At most **4** reads per save, for 1 row or 30 (`TestCost`). See Deviations. |
 | Re-parse: free re-read within 24 hours, superseded save is 409, the 4th replacement or a read after a saved import is 429 | **Met** | `TestReadingAgain`, `TestQuota::test_the_second_import_in_a_month_is_refused` |
 | Migration applies, reverses and re-applies in CI | **Met** | CI's `database` job and `check_migrations.sh` (empty database). The downgrade was also rehearsed by hand on a fresh container **with a paired `own_transfer` pair present**: reasons cleared to NULL, rows still `needs_review`, then the re-upgrade was clean. |
-| `ruff` and `pytest` pass; `database` job count grew | **Met** | Integration tests went from 528 on `main` to 558 (+30: 26 transfers, 3 re-read, 1 score). CI showed 551 before the review fixes; it should show 558 now. |
+| `ruff` and `pytest` pass; `database` job count grew | **Met** | Integration tests went from 528 on `main` to 562 (+34: 30 transfers, 3 re-read, 1 score). CI's `database` job should show 562. |
 
 ## Deviations / decisions
 
@@ -184,7 +190,8 @@ Decided while building:
    depends on the row count.
 9. **Debt paid includes card payments received** (after review). Once the bank side is a
    transfer, the card's side is the record of the card being paid; exactly one side is ever
-   counted. A loan is excluded, because its bank side stays Debt payment.
+   counted. A loan is excluded, because its bank side stays Debt payment. The same rule applies
+   on Home, in the score and in the Budget's Debt line (`paid_card_debt` in each query).
 10. **Re-parse is checked only at the limit.** With a larger allowance, two different statements
    read one after the other are both wanted, so nothing is replaced. Only the newest unsaved
    import is replaced.
@@ -210,5 +217,11 @@ Decided while building:
 - **Known race, accepted as for the limit:** a save of import A running at the same moment as a
   re-read that replaces A can save both statements on one allowance. This is the same
   check-then-act trade-off as the monthly limit (see the comment in `parse`).
+- **Pre-existing, not changed here: any card payoff counts toward "debt paid".** A household that
+  pays its card in full but misses a **loan** payment can still score 100 on debt payments
+  (paid ≥ required), exactly as the bank-side Debt payment did before this PR. Counting only
+  payments towards the debts the person listed needs debts linked to accounts (`Debt.account_id`
+  is optional, and the setup wizard doesn't set it), which is a product decision. Suggested as a
+  follow-up ticket.
 - **Recategorising one side of a pair** leaves the other side and the link alone, as the ticket
   says. If people often undo pairs, clearing the link on recategorise is a small follow-up.

@@ -56,7 +56,7 @@ from sqlalchemy.orm import selectinload
 from app.core.money import round_up_to_whole_unit
 from app.models.categorization import Category
 from app.models.enums import TransactionDirection
-from app.models.money import Transaction
+from app.models.money import Account, Transaction
 from app.models.planning import Budget, BudgetLine, Debt
 from app.models.setup import FinancialProfile
 from app.services.dashboard import (
@@ -65,6 +65,7 @@ from app.services.dashboard import (
     countable,
     month_bounds,
     months_back,
+    paid_card_debt,
 )
 
 WINDOW_MONTHS = 3
@@ -503,7 +504,49 @@ async def _history(
     history: dict[CategoryRef, list[int]] = defaultdict(lambda: [0] * len(window))
     for category_id, slug, at, total in result:
         history[CategoryRef(category_id, slug)][position[at.date()]] = int(total)
+
+    # Cards paid down, on the card's side, belong to the debt line exactly as
+    # the dashboard counts them (#73) — or a household that imports both
+    # statements would see its learned debt allocation fall to the minimums.
+    paid = await _card_debt_paid(
+        session, household_id, currency, window[0], month_bounds(window[-1])[1]
+    )
+    if paid:
+        system = await _system_ids(session)
+        debt = CategoryRef(system[DEBT_PAYMENT_SLUG], DEBT_PAYMENT_SLUG)
+        for at, total in paid.items():
+            history[debt][position[at]] += total
     return window, dict(history)
+
+
+async def _card_debt_paid(
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    currency: str,
+    first: date,
+    last: date,
+) -> dict[date, int]:
+    """Card payments received (`dashboard.paid_card_debt`) by month.
+
+    The debt line's money, beside `debt_payment` debits, so the line and
+    Home's "debt paid" agree whichever statements are imported: a card bill
+    paid from chequing is the bank's debit until the card's statement turns
+    it into a transfer, and then it is the card's payment received.
+    """
+    bucket = func.date_trunc("month", Transaction.occurred_on)
+    result = await session.execute(
+        select(bucket, func.sum(Transaction.amount_minor_units))
+        .join(Account, Account.id == Transaction.account_id)
+        .join(Category, Category.id == Transaction.category_id)
+        .where(
+            *countable(household_id, currency),
+            paid_card_debt(),
+            Transaction.occurred_on >= first,
+            Transaction.occurred_on <= last,
+        )
+        .group_by(bucket)
+    )
+    return {at.date(): int(total) for at, total in result}
 
 
 async def _expected_income(
@@ -610,6 +653,10 @@ async def _view(
             uncategorised_count += int(count)
         else:
             spent[_line_key(category_id, slug, system)] += int(total)
+    for total in (
+        await _card_debt_paid(session, household_id, currency, first, last)
+    ).values():
+        spent[system[DEBT_PAYMENT_SLUG]] += total
 
     own = [
         line

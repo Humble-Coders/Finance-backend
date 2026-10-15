@@ -36,6 +36,7 @@ it. A wrong pair hides real money, so the rules lean towards not pairing:
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -166,13 +167,14 @@ async def pair_transfers(
     household_id: uuid.UUID,
     saved_ids: list[uuid.UUID],
     *,
-    chosen: bool = False,
+    chosen: Collection[uuid.UUID] = (),
 ) -> Paired:
     """File the moves between own accounts among [saved_ids]; see the module.
 
     Call after `file_rows`, so the categorizer cannot overwrite what this
-    files. `chosen` is whether the person picked the saved rows' category
-    themselves — a transaction typed in with one; an import never has.
+    files. `chosen` names the saved rows whose category the person picked
+    themselves — a transaction typed in with one, or an import row they
+    changed while checking it.
 
     A fixed number of queries whatever the row count — the candidates for
     every saved row come back from one.
@@ -192,7 +194,10 @@ async def pair_transfers(
             _not_doubtful(Transaction),
         )
     )
-    new = {row.id: _Side(row, kind, slug, chosen) for row, kind, slug in result}
+    picked = set(chosen)
+    new = {
+        row.id: _Side(row, kind, slug, row.id in picked) for row, kind, slug in result
+    }
     if not new:
         return Paired()
 

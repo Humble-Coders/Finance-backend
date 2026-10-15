@@ -16,12 +16,13 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_identity
 from app.config import Settings, get_settings
 from app.db import get_session
+from app.models.categorization import Category
 from app.models.enums import StatementImportStatus
 from app.models.identity import Household
 from app.models.money import Account, StatementImport, StatementImportText, Transaction
@@ -37,7 +38,8 @@ from app.schemas.statements import (
 from app.services.ai_consent import CONSENT_REQUIRED, current_policy, has_consented
 from app.services.capabilities import currency_for, require_feature
 from app.services.conflicts import log_conflict
-from app.services.filing import file_rows
+from app.services.corrections import learn
+from app.services.filing import file_rows, suggest
 from app.services.identity import ResolvedIdentity
 from app.services.ledger import RowToSave, RowValidationError, save_rows
 from app.services.llm import LlmError, build_client, close_client
@@ -352,6 +354,19 @@ async def parse(
             else None
         )
         outcome = await parse_statement(client, body.text, currency, period)
+        # Categorised now rather than on save, so the person sees and can
+        # change every category while checking the import. Never raises on a
+        # model problem: a row it cannot answer comes back without one.
+        suggested = (
+            await suggest(
+                session,
+                client,
+                household.id,
+                [(row.description, row.amount) for row in outcome.rows],
+            )
+            if outcome.rows
+            else []
+        )
     except TooManyRowsError as exc:
         # Read fine, simply bigger than this endpoint handles. Saying "we could
         # not read that statement" would be both wrong and unactionable.
@@ -414,8 +429,9 @@ async def parse(
                 amount=row.amount,
                 direction=row.direction,
                 confidence=row.confidence,
+                category_id=category_id,
             )
-            for row in outcome.rows
+            for row, category_id in zip(outcome.rows, suggested, strict=False)
         ],
         unparsed_line_count=outcome.unparsed_line_count,
         model=outcome.model,
@@ -541,6 +557,8 @@ async def confirm_rows(
             detail={"code": UNKNOWN_ACCOUNT, "message": "No such account."},
         )
 
+    await _categories_or_422(session, household, body)
+
     currency = await currency_for(session, household)
     try:
         outcome = await save_rows(
@@ -556,6 +574,7 @@ async def confirm_rows(
                     amount=row.amount,
                     direction=row.direction,
                     confidence=row.confidence,
+                    category_id=row.category_id,
                 )
                 for row in body.rows
             ],
@@ -575,15 +594,35 @@ async def confirm_rows(
         ) from exc
 
     paired = Paired()
+    chosen: list[uuid.UUID] = []
     if outcome.saved_ids:
-        # The parse endpoint already required consent to AI processing, so an
-        # import may always ask the model.
-        await file_rows(
-            session, settings, household.id, outcome.saved_ids, may_ask_model=True
-        )
+        if body.categorised:
+            # Categorised when it was read, and checked by the person: only a
+            # row left without a category is filed now — by the household's
+            # rules, else to review. Asking the model again would only repeat
+            # the answer it could not give.
+            unfiled = [
+                outcome.saved_at[i]
+                for i, row in enumerate(body.rows)
+                if i in outcome.saved_at and row.category_id is None
+            ]
+            if unfiled:
+                await file_rows(
+                    session, settings, household.id, unfiled, may_ask_model=False
+                )
+            chosen = await _learn_chosen(session, household, body, outcome.saved_at)
+        else:
+            # An app that does not show categories before saving: every row is
+            # categorised here, as before. The parse endpoint already required
+            # consent to AI processing, so an import may always ask the model.
+            await file_rows(
+                session, settings, household.id, outcome.saved_ids, may_ask_model=True
+            )
         # After filing, so the categorizer cannot overwrite what it files: a
         # card bill and its payment, and savings moved, are transfers (#73).
-        paired = await pair_transfers(session, household.id, outcome.saved_ids)
+        paired = await pair_transfers(
+            session, household.id, outcome.saved_ids, chosen=chosen
+        )
 
     await session.flush()
     # Shared with the review queue (3.4), which resolves the rest of these rows
@@ -601,6 +640,71 @@ async def confirm_rows(
         needs_review=still_to_review,
         earlier_needs_review=paired.refiled_earlier,
     )
+
+
+async def _categories_or_422(
+    session: AsyncSession, household: Household, body: ConfirmRowsIn
+) -> None:
+    """Every category a row names is one this household can use: a shared one
+    or its own. 422 naming the first row that is not, before anything is
+    written — never a row saved under another household's category."""
+    named = {row.category_id for row in body.rows if row.category_id is not None}
+    if not named:
+        return
+    result = await session.execute(
+        select(Category.id).where(
+            Category.id.in_(named),
+            or_(Category.household_id.is_(None), Category.household_id == household.id),
+        )
+    )
+    usable = set(result.scalars().all())
+    for index, row in enumerate(body.rows):
+        if row.category_id is not None and row.category_id not in usable:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": INVALID_ROW,
+                    "message": "That category cannot be used.",
+                    "field": f"rows.{index}.category_id",
+                    "reason": "unknown category",
+                },
+            )
+
+
+async def _learn_chosen(
+    session: AsyncSession,
+    household: Household,
+    body: ConfirmRowsIn,
+    saved_at: dict[int, uuid.UUID],
+) -> list[uuid.UUID]:
+    """Rules from the categories the person changed while checking, and the
+    rows they changed.
+
+    A category different from the one suggested is a correction, exactly as
+    fixing a saved row is (`PATCH /transactions/{id}`): it teaches a rule for
+    that merchant, so the next statement files it the same way. One accepted
+    as suggested teaches nothing. The changed rows are returned so pairing
+    treats their category as the person's own and never re-files it.
+    """
+    changed = [
+        (saved_at[index], row)
+        for index, row in enumerate(body.rows)
+        if index in saved_at
+        and row.category_id is not None
+        and row.category_id != row.suggested_category_id
+    ]
+    for transaction_id, row in changed:
+        saved = await session.get(Transaction, transaction_id)
+        if saved is None:
+            continue
+        await learn(
+            session,
+            household_id=household.id,
+            row=saved,
+            predicted_category_id=row.suggested_category_id,
+            corrected_category_id=row.category_id,
+        )
+    return [transaction_id for transaction_id, _ in changed]
 
 
 @router.get("/statements", response_model=StatementImportsOut)

@@ -74,6 +74,10 @@ class ParsedRowOut(BaseModel):
     amount: str
     direction: TransactionDirection
     confidence: int
+    # The category the household's rules or the model suggest, so the person
+    # sees and can change it before anything is saved. None where neither
+    # knows ("No category yet").
+    category_id: uuid.UUID | None = None
 
 
 class StatementParseOut(BaseModel):
@@ -152,6 +156,12 @@ class ConfirmRowIn(BaseModel):
     amount: str
     direction: TransactionDirection
     confidence: int = Field(default=100, ge=0, le=100)
+    # The category to save the row under, as the person left it while
+    # checking. With `suggested_category_id` — what the parse suggested — the
+    # server can tell a category the person chose from one they accepted: a
+    # chosen one teaches a rule for the merchant, as fixing a saved row does.
+    category_id: uuid.UUID | None = None
+    suggested_category_id: uuid.UUID | None = None
 
     @field_validator("amount")
     @classmethod
@@ -167,6 +177,11 @@ class ConfirmRowIn(BaseModel):
 class ConfirmRowsIn(BaseModel):
     account_id: uuid.UUID
     rows: list[ConfirmRowIn] = Field(min_length=1, max_length=2_000)
+    # True from apps that show categories before saving: the rows were
+    # categorised when the statement was read, so one left without a category
+    # goes to review rather than back to the model. Older apps send nothing and
+    # keep the old behaviour — every row categorised on save.
+    categorised: bool = False
 
 
 class SaveOutcomeOut(BaseModel):

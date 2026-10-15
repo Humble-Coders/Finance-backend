@@ -22,10 +22,11 @@ from app.models.categorization import Category
 from app.models.enums import ReviewReason
 from app.models.money import Transaction
 from app.services.categorization import categorize
-from app.services.corrections import apply_rules
-from app.services.llm import LlmError, build_client, close_client
+from app.services.corrections import apply_rules, merchant_key, rules_for
+from app.services.llm import LlmClient, LlmError, build_client, close_client
+from app.services.normalization import merchant as readable_merchant
 
-__all__ = ["file_rows"]
+__all__ = ["file_rows", "suggest"]
 
 log = structlog.get_logger()
 
@@ -143,3 +144,52 @@ async def file_rows(
         if not suggestion.recognised:
             row.needs_review = True
             row.review_reason = row.review_reason or ReviewReason.unknown_category
+
+
+async def suggest(
+    session: AsyncSession,
+    client: LlmClient,
+    household_id: uuid.UUID,
+    rows: list[tuple[str, str]],
+) -> list[uuid.UUID | None]:
+    """A category for each (description, amount) of a statement not saved yet.
+
+    The same order of precedence as `file_rows`, moved to before saving so the
+    person can see and change every category while checking the import: the
+    household's own rules first, applied exactly; then the model, on merchant
+    and amount alone. None where neither knows — no merchant to go on, or an
+    answer the model could not give — which the app shows as "No category yet"
+    and which goes to review if saved that way.
+
+    The caller holds consent: the parse that produced these rows required it.
+    """
+    merchants = [readable_merchant(description) for description, _ in rows]
+    rules = await rules_for(session, household_id, merchants)
+
+    suggested: list[uuid.UUID | None] = [
+        rules.get(key) if (key := merchant_key(merchant)) else None
+        for merchant in merchants
+    ]
+    ask = [
+        index
+        for index, merchant in enumerate(merchants)
+        if merchant and suggested[index] is None
+    ]
+    if not ask:
+        return suggested
+
+    # The entire payload: a shop name and a price, as `file_rows` sends.
+    answers = await categorize(
+        session,
+        client,
+        household_id=household_id,
+        pairs=[(merchants[index] or "", rows[index][1]) for index in ask],
+    )
+    slugs = await session.execute(
+        select(Category.slug, Category.id).where(Category.household_id.is_(None))
+    )
+    by_slug = {slug: ident for slug, ident in slugs.all()}
+    for index, answer in zip(ask, answers, strict=False):
+        if answer.recognised:
+            suggested[index] = by_slug.get(answer.slug)
+    return suggested

@@ -504,12 +504,14 @@ class TestWhatAPersonTyped:
     ):
         """The bound must not refuse ordinary statements. A day of tolerance
         ahead covers a timezone edge."""
-        from datetime import date, timedelta
+        from datetime import UTC, datetime, timedelta
 
         use_model(monkeypatch, FakeModel())
         me = await onboard(api_client, "+14165582001")
         account = await an_account(api_client)
-        today = date.today()
+        # The server's today, which is UTC's: the machine's local date can be a
+        # day ahead (India after midnight), and its "tomorrow" two days ahead.
+        today = datetime.now(UTC).date()
 
         response = await save(
             api_client,

@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.categorization import CategoryCorrection
 from app.models.money import Transaction
 
-__all__ = ["Learned", "merchant_key", "learn", "apply_rules"]
+__all__ = ["Learned", "merchant_key", "learn", "apply_rules", "rules_for"]
 
 
 def merchant_key(merchant: str | None) -> str | None:
@@ -162,6 +162,32 @@ async def learn(
     return Learned(rule_recorded=True, recategorized=moved.rowcount or 0)
 
 
+async def rules_for(
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    merchants: list[str | None],
+) -> dict[str, uuid.UUID]:
+    """This household's rules for [merchants], keyed by `merchant_key`.
+
+    One query whatever the count. Shared by filing saved rows (`apply_rules`)
+    and suggesting categories for rows not saved yet (`filing.suggest`), so a
+    rule means the same thing before and after saving.
+    """
+    wanted = {key for merchant in merchants if (key := merchant_key(merchant))}
+    if not wanted:
+        return {}
+    result = await session.execute(
+        select(
+            CategoryCorrection.merchant_pattern,
+            CategoryCorrection.corrected_category_id,
+        ).where(
+            CategoryCorrection.household_id == household_id,
+            CategoryCorrection.merchant_pattern.in_(wanted),
+        )
+    )
+    return dict(result.all())
+
+
 async def apply_rules(
     session: AsyncSession,
     household_id: uuid.UUID,
@@ -184,20 +210,9 @@ async def apply_rules(
     suspected duplicate keeps that flag: the rule says what Etsy *is*, not that
     this line was read correctly.
     """
-    wanted = {key for row in rows if (key := merchant_key(row.merchant))}
-    if not wanted:
+    rules = await rules_for(session, household_id, [row.merchant for row in rows])
+    if not rules:
         return []
-
-    result = await session.execute(
-        select(
-            CategoryCorrection.merchant_pattern,
-            CategoryCorrection.corrected_category_id,
-        ).where(
-            CategoryCorrection.household_id == household_id,
-            CategoryCorrection.merchant_pattern.in_(wanted),
-        )
-    )
-    rules = dict(result.all())
 
     ruled = []
     for row in rows:

@@ -382,7 +382,10 @@ async def add_transaction(
         )
     # A card payment typed in can be the other half of one imported (#73).
     await pair_transfers(
-        session, household_id, [row.id], chosen=body.category_id is not None
+        session,
+        household_id,
+        [row.id],
+        chosen=[row.id] if body.category_id is not None else (),
     )
 
     await session.flush()

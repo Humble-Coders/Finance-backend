@@ -586,6 +586,43 @@ class TestNoFalsePairs:
         assert bank.transfer_pair_id is None
 
 
+class TestChosenWhileChecking:
+    async def test_a_category_changed_before_saving_is_never_refiled(
+        self, api_client, db_session
+    ):
+        """The person said the card's credit is income (a refund paid out as
+        cash back, say). The card rule would file it as a transfer; their
+        choice wins, as a typed-in category does."""
+        me = await a_household(api_client, "+14165578090")
+        income = await db_session.scalar(
+            select(Category.id).where(
+                Category.household_id.is_(None), Category.slug == "income"
+            )
+        )
+        record = StatementImport(
+            household_id=uuid.UUID(me["household"]),
+            source_kind=SourceKind.pdf_text,
+            status=StatementImportStatus.awaiting_review,
+        )
+        db_session.add(record)
+        await db_session.flush()
+        sent = {
+            **row("PAYMENT THANK YOU", "1000.00", 22, credit=True),
+            "category_id": str(income),
+            "suggested_category_id": None,
+        }
+
+        response = await api_client.post(
+            f"/statements/{record.id}/transactions",
+            json={"account_id": me["card"], "rows": [sent], "categorised": True},
+        )
+
+        assert response.status_code == 200, response.text
+        card = await the_row(db_session, me["household"], "PAYMENT THANK YOU")
+        assert card.category_id == income
+        assert card.review_reason != ReviewReason.own_transfer
+
+
 class TestTypedIn:
     async def test_a_payment_typed_in_pairs_with_the_imported_card(
         self, api_client, db_session

@@ -31,6 +31,7 @@ Two layers, deliberately different in severity:
 
 from __future__ import annotations
 
+import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -100,6 +101,9 @@ class RowToSave:
     amount: str
     direction: TransactionDirection
     confidence: int
+    # Chosen while checking the import (#55 follow-up): kept as given, never
+    # re-filed by the categorizer. None leaves the row to `file_rows`.
+    category_id: uuid.UUID | None = None
 
 
 @dataclass
@@ -110,6 +114,9 @@ class SaveOutcome:
     # Near matches: saved, flagged, and pointed at what they collided with.
     flagged: int = 0
     saved_ids: list = field(default_factory=list)
+    # Each saved row's id by its position in the request, so a caller can act
+    # on the rows it sent — a duplicate the database refused has no entry.
+    saved_at: dict = field(default_factory=dict)
 
 
 def _numbered(
@@ -215,7 +222,7 @@ async def save_rows(
     numbered = _numbered(rows, currency)
     candidates = await _candidates(session, account_id, statement_import_id, numbered)
 
-    for row, key, minor, occurrence in numbered:
+    for position, (row, key, minor, occurrence) in enumerate(numbered):
         existing = _near_match(candidates, row.occurred_on, minor, key)
         flagged = existing is not None
         low = row.confidence < LOW_CONFIDENCE
@@ -245,6 +252,7 @@ async def save_rows(
                     else None
                 ),
                 duplicate_of_id=existing.id if existing else None,
+                category_id=row.category_id,
             )
             # The database is the dedup, not this loop: two imports running at
             # once would both pass any check we made here and both insert.
@@ -266,6 +274,7 @@ async def save_rows(
             continue
         outcome.saved += 1
         outcome.saved_ids.append(inserted)
+        outcome.saved_at[position] = inserted
         if flagged:
             outcome.flagged += 1
 

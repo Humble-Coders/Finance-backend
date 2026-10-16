@@ -182,6 +182,18 @@ class ConfirmRowsIn(BaseModel):
     # goes to review rather than back to the model. Older apps send nothing and
     # keep the old behaviour — every row categorised on save.
     categorised: bool = False
+    # The balance the statement closed at and its date, as the person
+    # confirmed them on the check screen (#76). The phone reads them before
+    # redacting — they sit in the summary block the redactor removes — and the
+    # person corrects them if need be. A debt linked to this account takes the
+    # balance when it is newer than the one it has. Both or neither.
+    closing_balance: str | None = None
+    closing_date: date | None = None
+
+    @field_validator("closing_date")
+    @classmethod
+    def _closing_within_living_memory(cls, value: date | None) -> date | None:
+        return None if value is None else date_within_living_memory(value)
 
 
 class SaveOutcomeOut(BaseModel):
@@ -196,6 +208,8 @@ class SaveOutcomeOut(BaseModel):
     # of a card payment or a savings move it paired (#73). Not in
     # `needs_review`, which is this import's own rows.
     earlier_needs_review: int = 0
+    # Debts linked to this account whose balance the statement updated (#76).
+    debts_updated: int = 0
 
 
 class StatementImportOut(BaseModel):

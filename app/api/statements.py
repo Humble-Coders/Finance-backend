@@ -12,7 +12,7 @@ request that was never allowed must not cost money.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_identity
 from app.config import Settings, get_settings
+from app.core.money import MoneyError, to_minor_units
 from app.db import get_session
 from app.models.categorization import Category
 from app.models.enums import StatementImportStatus
@@ -39,6 +40,7 @@ from app.services.ai_consent import CONSENT_REQUIRED, current_policy, has_consen
 from app.services.capabilities import currency_for, require_feature
 from app.services.conflicts import log_conflict
 from app.services.corrections import learn
+from app.services.debts import take_statement_balance
 from app.services.filing import file_rows, suggest
 from app.services.identity import ResolvedIdentity
 from app.services.ledger import RowToSave, RowValidationError, save_rows
@@ -558,6 +560,7 @@ async def confirm_rows(
         )
 
     await _categories_or_422(session, household, body)
+    closing = _closing_balance_or_422(body, await currency_for(session, household))
 
     currency = await currency_for(session, household)
     try:
@@ -625,6 +628,15 @@ async def confirm_rows(
         )
 
     await session.flush()
+    debts_updated = 0
+    if closing is not None:
+        record.closing_balance_minor_units, record.currency, record.closing_date = (
+            closing
+        )
+        debts_updated = await take_statement_balance(
+            session, household.id, body.account_id, record
+        )
+
     # Shared with the review queue (3.4), which resolves the rest of these rows
     # one at a time. Two copies of "is this import finished?" is two chances to
     # disagree about what finished means — and it counts once, for both the
@@ -639,7 +651,55 @@ async def confirm_rows(
         flagged=outcome.flagged,
         needs_review=still_to_review,
         earlier_needs_review=paired.refiled_earlier,
+        debts_updated=debts_updated,
     )
+
+
+def _closing_balance_or_422(
+    body: ConfirmRowsIn, currency: str
+) -> tuple[int, str, date] | None:
+    """The confirmed closing balance as (minor units, currency, date), or None.
+
+    Both or neither, and never negative: a debt's balance is what is owed. A
+    card in credit has nothing to pay off, so it updates no debt. 422 names the
+    field, before anything is written.
+    """
+    if body.closing_balance is None and body.closing_date is None:
+        return None
+    if body.closing_balance is None or body.closing_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": INVALID_ROW,
+                "message": "A closing balance needs its date, and the date "
+                "its balance.",
+                "field": (
+                    "closing_date" if body.closing_date is None else "closing_balance"
+                ),
+            },
+        )
+    try:
+        minor = to_minor_units(body.closing_balance, currency)
+    except MoneyError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": INVALID_ROW,
+                "message": "That balance cannot be saved.",
+                "field": "closing_balance",
+                "reason": str(error),
+            },
+        ) from error
+    if minor < 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": INVALID_ROW,
+                "message": "A balance owed is never negative.",
+                "field": "closing_balance",
+            },
+        )
+    return minor, currency, body.closing_date
 
 
 async def _categories_or_422(

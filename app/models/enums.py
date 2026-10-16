@@ -135,6 +135,15 @@ class BalanceSource(enum.Enum):
     statement = "statement"
 
 
+class PlanStrategy(enum.Enum):
+    """Which debt gets the extra money first (#76). Avalanche — highest rate
+    first — is always cheapest; snowball — smallest balance first — clears
+    debts sooner, for people who need the wins."""
+
+    avalanche = "avalanche"
+    snowball = "snowball"
+
+
 class GoalKind(enum.Enum):
     """What a goal is for — chosen so an app can show a fitting picture.
 

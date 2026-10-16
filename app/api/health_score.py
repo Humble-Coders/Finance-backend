@@ -74,6 +74,7 @@ def _inputs(key: str, inputs: service.ScoreInputs, currency: str) -> dict:
         "debts_with_minimum": debt.debts_with_minimum,
         "required": money(debt.required),
         "paid": money(debt.paid),
+        **({"covered": money(debt.covered)} if debt.covered is not None else {}),
     }
 
 

@@ -27,9 +27,15 @@ from app.models.base import (
     money_amount,
     money_currency,
 )
-from app.models.enums import BalanceSource, DebtKind, GoalHorizon, GoalKind
+from app.models.enums import (
+    BalanceSource,
+    DebtKind,
+    GoalHorizon,
+    GoalKind,
+    PlanStrategy,
+)
 
-__all__ = ["Budget", "BudgetLine", "Goal", "Debt"]
+__all__ = ["Budget", "BudgetLine", "Goal", "Debt", "PlanPreference"]
 
 
 class Budget(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
@@ -222,4 +228,39 @@ class Debt(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
         nullable=False,
         default=BalanceSource.setup,
         server_default=BalanceSource.setup.value,
+    )
+
+
+class PlanPreference(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
+    """The choices behind a household's plan (#76) — one row, once the person
+    has saved them. Until then the plan runs on suggested values.
+
+    The buffer is an emergency-fund goal: its target is the buffer and its
+    saved amount the progress, so the person sees and fills it where they
+    already keep their goals. No goal means no buffer.
+    """
+
+    __tablename__ = "plan_preference"
+    __table_args__ = (
+        Index("uq_plan_preference_household", "household_id", unique=True),
+        CheckConstraint(
+            "goal_share_bps BETWEEN 0 AND 10000", name="goal_share_is_a_percentage"
+        ),
+        CheckConstraint(
+            "rate_line_bps BETWEEN 0 AND 10000", name="rate_line_is_a_percentage"
+        ),
+    )
+
+    buffer_goal_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("goal.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Of what remains after the buffer, the share that goes to goals while any
+    # debt is above the rate line. Basis points: 20% is 2000.
+    goal_share_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Debts at or below this rate only get their minimum.
+    rate_line_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    strategy: Mapped[PlanStrategy] = mapped_column(
+        SAEnum(PlanStrategy, name="plan_strategy"), nullable=False
     )

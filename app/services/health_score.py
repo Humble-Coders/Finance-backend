@@ -9,6 +9,12 @@ Two halves, as in `app/services/budget.py`:
 * **`current_score`** gathers the inputs, scores them, and keeps today's
   snapshot.
 
+**Formula v4** (backend #76) — v3, with debt payments measured per debt where
+a debt is linked to an account whose statement is in: the payments that
+reached that account count toward that debt, up to its minimum, and the other
+debts share the rest (`debts.covered_minimums`). A card paid off in full can no
+longer cover a missed loan payment. With nothing linked it scores exactly as v3.
+
 **Formula v3** (backend #73) — v2's arithmetic, unchanged, over corrected
 inputs: a month's income and expenses no longer count money moved between
 the household's own accounts (`dashboard.NOT_A_FLOW` — transfers, savings).
@@ -60,6 +66,7 @@ from app.models.derived import HealthScoreSnapshot
 from app.models.planning import Debt, Goal
 from app.services.budget import budget_for
 from app.services.dashboard import figures_by_month, months_back
+from app.services.debts import covered_minimums
 from app.services.learning import LearningState, learning_state
 
 # --- The formula --------------------------------------------------------------
@@ -69,7 +76,7 @@ from app.services.learning import LearningState, learning_state
 # trend never compares two formulas without saying so — and a snapshot whose
 # breakdown no longer reproduces its score is how a silent change is caught.
 
-FORMULA_VERSION = "v3"
+FORMULA_VERSION = "v4"
 
 SAVINGS_CONSISTENCY = "savings_consistency"
 SPENDING_VS_BUDGET = "spending_vs_budget"
@@ -135,6 +142,10 @@ class DebtPicture:
     required: int
     # Last complete month's debt_payment debits.
     paid: int
+    # Of the minimums, how much those payments cover, each linked debt on its
+    # own (v4, `debts.covered_minimums`). None on a snapshot from before v4,
+    # which measured `paid` against `required` as a whole.
+    covered: int | None = None
 
 
 @dataclass(frozen=True)
@@ -239,7 +250,8 @@ def debt_payments(debt: DebtPicture) -> Decimal | None:
         return None
     if debt.required <= 0:
         return _HUNDRED
-    return min(_HUNDRED, _HUNDRED * Decimal(debt.paid) / Decimal(debt.required))
+    met = debt.paid if debt.covered is None else debt.covered
+    return min(_HUNDRED, _HUNDRED * Decimal(met) / Decimal(debt.required))
 
 
 def _month_index(month: date) -> int:
@@ -354,6 +366,11 @@ def to_json(inputs: ScoreInputs, result: ScoreResult) -> dict:
                 "debts_with_minimum": inputs.debt.debts_with_minimum,
                 "required": inputs.debt.required,
                 "paid": inputs.debt.paid,
+                **(
+                    {"covered": inputs.debt.covered}
+                    if inputs.debt.covered is not None
+                    else {}
+                ),
             },
             "goals": [
                 {
@@ -532,6 +549,9 @@ async def current_score(
             debts_with_minimum=int(with_minimum),
             required=int(required),
             paid=last_figures.debt_paid,
+            covered=await covered_minimums(
+                session, household_id, currency, last, last_figures.debt_paid
+            ),
         ),
         goals=await _goal_paces(session, household_id),
         last_complete_month=last,

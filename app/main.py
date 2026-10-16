@@ -21,6 +21,7 @@ from app.api import (
     health_score,
     legal,
     me,
+    plan,
     statements,
     transactions,
 )
@@ -47,6 +48,7 @@ app.include_router(budgets.router)
 app.include_router(capabilities.router)
 app.include_router(dashboard.router)
 app.include_router(debts.router)
+app.include_router(plan.router)
 app.include_router(categories.router)
 app.include_router(me.router)
 app.include_router(legal.router)

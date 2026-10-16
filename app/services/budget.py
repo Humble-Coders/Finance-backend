@@ -48,15 +48,15 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.money import round_up_to_whole_unit
 from app.models.categorization import Category
-from app.models.enums import TransactionDirection
-from app.models.money import Transaction
+from app.models.enums import AccountKind, TransactionDirection
+from app.models.money import Account, Transaction
 from app.models.planning import Budget, BudgetLine, Debt
 from app.models.setup import FinancialProfile
 from app.services.dashboard import (
@@ -380,13 +380,9 @@ async def _regenerate(
     month: date,
 ) -> None:
     system = await _system_ids(session)
-    _, history = await _history(session, household_id, currency, month)
+    window, history = await _history(session, household_id, currency, month)
     income = await _expected_income(session, household_id, currency)
-    minimums = await session.scalar(
-        select(func.coalesce(func.sum(Debt.minimum_payment_minor_units), 0)).where(
-            Debt.household_id == household_id, Debt.currency == currency
-        )
-    )
+    minimums = await _minimums(session, household_id, currency, window)
     suggestion = suggest(history, income, int(minimums), currency)
     # Categorised spending, not merely rows: a month read while last month's
     # statement is still awaiting review would otherwise lock with nothing.
@@ -504,6 +500,43 @@ async def _history(
     for category_id, slug, at, total in result:
         history[CategoryRef(category_id, slug)][position[at.date()]] = int(total)
     return window, dict(history)
+
+
+async def _minimums(
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    currency: str,
+    window: list[date],
+) -> int:
+    """The debts' minimum payments the Debt line must at least hold.
+
+    Without a card linked to its debt (#76) that card's minimum is counted —
+    as before. With one linked whose statements are in the window, its
+    purchases are already budgeted in their own lines, and paying them off is
+    not more money spent: counting its minimum as well would budget the same
+    money twice. A loan's minimum always counts; its statement lists no
+    purchases.
+    """
+    budgeted_cards = None
+    if window:
+        budgeted_cards = (
+            select(Transaction.account_id)
+            .join(Account, Account.id == Transaction.account_id)
+            .where(
+                *countable(household_id, currency),
+                Account.kind == AccountKind.credit_card,
+                Transaction.occurred_on >= window[0],
+                Transaction.occurred_on <= month_bounds(window[-1])[1],
+            )
+        )
+    statement = select(
+        func.coalesce(func.sum(Debt.minimum_payment_minor_units), 0)
+    ).where(Debt.household_id == household_id, Debt.currency == currency)
+    if budgeted_cards is not None:
+        statement = statement.where(
+            or_(Debt.account_id.is_(None), Debt.account_id.not_in(budgeted_cards))
+        )
+    return int(await session.scalar(statement) or 0)
 
 
 async def _expected_income(

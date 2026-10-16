@@ -17,15 +17,24 @@ import uuid
 from datetime import date, timedelta
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from app.models.enums import AccountKind, BalanceSource
-from app.models.money import Account, StatementImport
+from app.models.categorization import Category
+from app.models.enums import AccountKind, BalanceSource, TransactionDirection
+from app.models.money import Account, StatementImport, Transaction
 from app.models.planning import Debt
+from app.services.dashboard import (
+    DEBT_PAYMENT_SLUG,
+    TRANSFERS_SLUG,
+    countable,
+    month_bounds,
+)
 
 __all__ = [
     "DEBT_ACCOUNT_KINDS",
+    "covered_minimums",
     "STALE_AFTER_DAYS",
     "UnusableAccount",
     "is_stale",
@@ -130,3 +139,107 @@ async def take_statement_balance(
             debts=updated,
         )
     return updated
+
+
+async def covered_minimums(
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    currency: str,
+    month: date,
+    debt_paid: int,
+) -> int:
+    """How much of the debts' minimums [month]'s payments cover (score v4).
+
+    A debt linked to an account whose statement for [month] is imported is
+    measured on its own: the payments that reached that account (its
+    transfers and debt payments in), up to its minimum. Every other debt
+    shares what is left of the month's debt paid — as all of them did before —
+    up to their minimums together. So a card paid off in full counts toward
+    the card, and can no longer hide a missed loan payment, once the card is
+    linked and its statement is in.
+
+    With nothing linked this is `min(debt_paid, minimums)`: the v3 measure.
+    """
+    first, last = month_bounds(month)
+    in_month = (Transaction.occurred_on >= first, Transaction.occurred_on <= last)
+    debts = list(
+        (
+            await session.execute(
+                select(Debt).where(
+                    Debt.household_id == household_id,
+                    Debt.currency == currency,
+                    Debt.minimum_payment_minor_units.is_not(None),
+                )
+            )
+        ).scalars()
+    )
+    linked = {d.account_id for d in debts if d.account_id is not None}
+    with_statement: set[uuid.UUID] = set()
+    if linked:
+        result = await session.execute(
+            select(Transaction.account_id)
+            .where(
+                *countable(household_id, currency),
+                *in_month,
+                Transaction.account_id.in_(linked),
+            )
+            .distinct()
+        )
+        with_statement = set(result.scalars().all())
+
+    received: dict[uuid.UUID, int] = {}
+    card_credits = 0
+    paired_debits = 0
+    if with_statement:
+        result = await session.execute(
+            select(
+                Transaction.account_id,
+                Account.kind,
+                func.sum(Transaction.amount_minor_units),
+            )
+            .join(Account, Account.id == Transaction.account_id)
+            .join(Category, Category.id == Transaction.category_id)
+            .where(
+                *countable(household_id, currency),
+                *in_month,
+                Transaction.account_id.in_(with_statement),
+                Transaction.direction == TransactionDirection.credit,
+                Category.slug.in_((TRANSFERS_SLUG, DEBT_PAYMENT_SLUG)),
+            )
+            .group_by(Transaction.account_id, Account.kind)
+        )
+        for account_id, kind, total in result:
+            received[account_id] = int(total)
+            if kind == AccountKind.credit_card and total:
+                # Counted in debt paid already (`dashboard.paid_card_debt`):
+                # attributed here, so it leaves the shared pool.
+                card_credits += int(total)
+        # A bank-side debt payment paired with one of those accounts — a loan's
+        # — is the same money arriving there: also attributed, not pooled.
+        partner = aliased(Transaction)
+        paired_debits = int(
+            await session.scalar(
+                select(func.coalesce(func.sum(Transaction.amount_minor_units), 0))
+                .join(partner, partner.id == Transaction.transfer_pair_id)
+                .join(Category, Category.id == Transaction.category_id)
+                .where(
+                    *countable(household_id, currency),
+                    *in_month,
+                    Transaction.direction == TransactionDirection.debit,
+                    Category.slug == DEBT_PAYMENT_SLUG,
+                    partner.account_id.in_(with_statement),
+                )
+            )
+            or 0
+        )
+
+    covered = 0
+    pooled_required = 0
+    for debt in debts:
+        minimum = debt.minimum_payment_minor_units or 0
+        if debt.account_id in with_statement:
+            covered += min(received.get(debt.account_id, 0), minimum)
+        else:
+            pooled_required += minimum
+    pool = max(0, debt_paid - card_credits - paired_debits)
+    return covered + min(pool, pooled_required)

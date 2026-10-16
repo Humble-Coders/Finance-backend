@@ -117,7 +117,7 @@ class TestTheScore:
             )
         )
         assert result.score == 93
-        assert result.formula_version == "v3"
+        assert result.formula_version == "v4"
         goals = next(c for c in result.components if c.key == "goal_completion")
         assert goals.weight == 15
         assert goals.display_score == 50

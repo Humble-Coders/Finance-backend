@@ -27,7 +27,7 @@ from app.models.base import (
     money_amount,
     money_currency,
 )
-from app.models.enums import GoalHorizon, GoalKind
+from app.models.enums import BalanceSource, DebtKind, GoalHorizon, GoalKind
 
 __all__ = ["Budget", "BudgetLine", "Goal", "Debt"]
 
@@ -157,6 +157,16 @@ class Debt(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     __table_args__ = (
         currency_check(),
         CheckConstraint("due_day BETWEEN 1 AND 31", name="due_day_in_month"),
+        CheckConstraint(
+            "interest_rate_bps BETWEEN 0 AND 10000", name="rate_is_a_percentage"
+        ),
+        CheckConstraint(
+            "promo_rate_bps BETWEEN 0 AND 10000", name="promo_rate_is_a_percentage"
+        ),
+        CheckConstraint(
+            "(promo_rate_bps IS NULL) = (promo_ends_on IS NULL)",
+            name="promo_rate_and_end_together",
+        ),
     )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -189,3 +199,27 @@ class Debt(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     # The day of the month the payment falls due, when the user said. Null is
     # "not said", never a default — see Obligation.due_day.
     due_day: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+
+    # What it is (#76). The wizard does not ask, so its debts start as `other`.
+    kind: Mapped[DebtKind] = mapped_column(
+        SAEnum(DebtKind, name="debt_kind"),
+        nullable=False,
+        default=DebtKind.other,
+        server_default=DebtKind.other.value,
+    )
+    # A promotional rate and the day it ends — a balance transfer at 0% until
+    # March. The payoff schedule charges this rate until then and
+    # `interest_rate_bps` after. Both or neither.
+    promo_rate_bps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    promo_ends_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    # The day the balance was true, and where it came from. A statement only
+    # replaces a balance older than its own closing date, so the newest
+    # figure always wins whichever way it arrived.
+    balance_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
+    balance_source: Mapped[BalanceSource] = mapped_column(
+        SAEnum(BalanceSource, name="balance_source"),
+        nullable=False,
+        default=BalanceSource.setup,
+        server_default=BalanceSource.setup.value,
+    )

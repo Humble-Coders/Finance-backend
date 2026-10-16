@@ -10,7 +10,10 @@ are converted by `app.core.money` alone, and are stored as integer minor units
 whole wizard after every step, which is what makes it resumable: the same call
 repeated leaves the same rows. Debts are the exception that needs care —
 statements create debts too (M3), so only rows flagged `entered_via_setup` are
-replaced.
+touched, and since #76 they are updated **in place, by position**, rather than
+replaced: a debt's type, promotion, account link and a balance updated since
+(by hand or from a statement) are not the wizard's to know, and a wizard save
+must not wipe them.
 
 **There is no status.** Income and monthly expense are mandatory and gated by
 the onboarding rule (app/services/onboarding.py), which reads those columns
@@ -22,12 +25,14 @@ it (#29).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.money import MoneyError, from_minor_units, to_minor_units
+from app.models.enums import BalanceSource
 from app.models.identity import Household
 from app.models.planning import Debt
 from app.models.setup import FinancialProfile, Investment, Obligation
@@ -44,6 +49,8 @@ __all__ = [
     "SetupValidationError",
     "get_setup",
     "save_setup",
+    "rate_bps",
+    "rate_percent",
 ]
 
 # Basis points: 5.25% -> 525, an integer for the same reason money is.
@@ -76,7 +83,7 @@ def _amount(value: str, currency: str, field: str) -> int:
     return minor_units
 
 
-def _rate_bps(value: str | None, field: str) -> int | None:
+def rate_bps(value: str | None, field: str) -> int | None:
     if value is None or not str(value).strip():
         return None
     try:
@@ -91,7 +98,7 @@ def _rate_bps(value: str | None, field: str) -> int | None:
     return int(scaled)
 
 
-def _rate_percent(bps: int | None) -> str | None:
+def rate_percent(bps: int | None) -> str | None:
     if bps is None:
         return None
     return f"{Decimal(bps) / _BPS_PER_PERCENT:.2f}"
@@ -185,7 +192,7 @@ async def _payload(
                     if d.minimum_payment_minor_units is not None
                     else None
                 ),
-                interest_rate_percent=_rate_percent(d.interest_rate_bps),
+                interest_rate_percent=rate_percent(d.interest_rate_bps),
                 due_day=d.due_day,
             )
             for d in debts
@@ -207,6 +214,61 @@ async def _payload(
             for o in obligations
         ],
     )
+
+
+async def _save_debts(
+    session: AsyncSession,
+    household: Household,
+    currency: str,
+    wanted: list[dict],
+) -> None:
+    """The wizard's debts, updated in place by position (#76).
+
+    Row N of the wizard is the wizard's Nth debt: its name, balance, minimum,
+    rate and due day are set; everything else about it — type, promotion,
+    account link, where its balance came from — is kept. Extra rows are
+    deleted and new ones added. Only debts the wizard owns are touched;
+    statement-derived debts (M3) never are.
+
+    A balance the wizard sends unchanged keeps its date and source, so a
+    balance read from a statement is not relabelled "typed at setup" by the
+    wizard re-sending what it was shown. A changed one is the person's own
+    figure, as of today.
+    """
+    existing = list(
+        (
+            await session.execute(
+                select(Debt)
+                .where(
+                    Debt.household_id == household.id, Debt.entered_via_setup.is_(True)
+                )
+                .order_by(Debt.position, Debt.created_at, Debt.name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    today = datetime.now(UTC).date()
+    for position, values in enumerate(wanted):
+        if position < len(existing):
+            debt = existing[position]
+            if debt.balance_minor_units != values["balance_minor_units"]:
+                debt.balance_as_of = today
+                debt.balance_source = BalanceSource.setup
+        else:
+            debt = Debt(
+                household_id=household.id,
+                currency=currency,
+                entered_via_setup=True,
+                balance_as_of=today,
+                balance_source=BalanceSource.setup,
+            )
+            session.add(debt)
+        for field, value in values.items():
+            setattr(debt, field, value)
+        debt.position = position
+    for extra in existing[len(wanted) :]:
+        await session.delete(extra)
 
 
 async def get_setup(session: AsyncSession, household: Household) -> FinancialSetupOut:
@@ -234,24 +296,22 @@ async def save_setup(
         if body.monthly_expense is not None and str(body.monthly_expense).strip()
         else None
     )
-    debts = [
-        Debt(
-            household_id=household.id,
-            name=d.name,
-            balance_minor_units=_amount(d.balance, currency, f"debts.{i}.balance"),
-            minimum_payment_minor_units=(
+    # Converted first, all of them: a bad amount in the last row must not leave
+    # half the debts updated.
+    wanted = [
+        {
+            "name": d.name,
+            "balance_minor_units": _amount(d.balance, currency, f"debts.{i}.balance"),
+            "minimum_payment_minor_units": (
                 _amount(d.minimum_payment, currency, f"debts.{i}.minimum_payment")
                 if d.minimum_payment is not None and str(d.minimum_payment).strip()
                 else None
             ),
-            interest_rate_bps=_rate_bps(
+            "interest_rate_bps": rate_bps(
                 d.interest_rate_percent, f"debts.{i}.interest_rate_percent"
             ),
-            currency=currency,
-            entered_via_setup=True,
-            position=i,
-            due_day=d.due_day,
-        )
+            "due_day": d.due_day,
+        }
         for i, d in enumerate(body.debts)
     ]
     investments = [
@@ -278,19 +338,14 @@ async def save_setup(
         for i, o in enumerate(body.obligations)
     ]
 
-    # Only what the wizard owns. Statement-derived debts (M3) are untouched.
-    await session.execute(
-        delete(Debt).where(
-            Debt.household_id == household.id, Debt.entered_via_setup.is_(True)
-        )
-    )
+    await _save_debts(session, household, currency, wanted)
     await session.execute(
         delete(Investment).where(Investment.household_id == household.id)
     )
     await session.execute(
         delete(Obligation).where(Obligation.household_id == household.id)
     )
-    session.add_all([*debts, *investments, *obligations])
+    session.add_all([*investments, *obligations])
 
     profile = await _profile(session, household)
     if profile is None:

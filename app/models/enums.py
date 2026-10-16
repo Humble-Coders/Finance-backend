@@ -112,6 +112,29 @@ class GoalHorizon(enum.Enum):
     long_term = "long_term"
 
 
+class DebtKind(enum.Enum):
+    """What a debt is (#76). It tells a person's debts apart on the plan, and
+    a balance transfer is the kind whose promotional rate ends. The payoff
+    order never reads it — only the rate decides that."""
+
+    credit_card = "credit_card"
+    line_of_credit = "line_of_credit"
+    car_loan = "car_loan"
+    balance_transfer = "balance_transfer"
+    student_loan = "student_loan"
+    mortgage = "mortgage"
+    other = "other"
+
+
+class BalanceSource(enum.Enum):
+    """Where a debt's balance came from (#76) — shown beside it, and the rule
+    for whether a statement may replace it."""
+
+    setup = "setup"
+    manual = "manual"
+    statement = "statement"
+
+
 class GoalKind(enum.Enum):
     """What a goal is for — chosen so an app can show a fitting picture.
 

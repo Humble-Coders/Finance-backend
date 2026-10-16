@@ -82,6 +82,7 @@ class StatementImport(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     """
 
     __tablename__ = "statement_import"
+    __table_args__ = (currency_check(),)
 
     source_kind: Mapped[SourceKind] = mapped_column(
         SAEnum(SourceKind, name="source_kind"), nullable=False
@@ -95,6 +96,14 @@ class StatementImport(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
         index=True,
     )
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The balance the statement closed at, and on which day, when the reader
+    # found one in its summary (#76). A card or loan account linked to a debt
+    # takes its balance from here when this is the newest it has heard.
+    closing_balance_minor_units: Mapped[int | None] = money_amount(
+        "closing_balance_minor_units", nullable=True
+    )
+    currency: Mapped[str | None] = money_currency(nullable=True)
+    closing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     extracted_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(

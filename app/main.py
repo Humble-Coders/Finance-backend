@@ -13,6 +13,7 @@ from app.api import (
     capabilities,
     categories,
     dashboard,
+    debts,
     errors,
     financial_setup,
     goals,
@@ -45,6 +46,7 @@ app.include_router(accounts.router)
 app.include_router(budgets.router)
 app.include_router(capabilities.router)
 app.include_router(dashboard.router)
+app.include_router(debts.router)
 app.include_router(categories.router)
 app.include_router(me.router)
 app.include_router(legal.router)

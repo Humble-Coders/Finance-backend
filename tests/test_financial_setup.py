@@ -98,7 +98,13 @@ class TestRoundTrip:
         ]
         assert saved["investments"] == [{"name": "TFSA", "amount": "15000.25"}]
         assert saved["obligations"] == [
-            {"name": "Rent", "monthly_amount": "1800.00", "due_day": None}
+            # A preset's category stands in for one never sent.
+            {
+                "name": "Rent",
+                "monthly_amount": "1800.00",
+                "due_day": None,
+                "category": "rent",
+            }
         ]
         assert (await api_client.get(SETUP)).json() == saved
 
@@ -470,3 +476,47 @@ class TestDueDays:
                 },
             )
             assert response.status_code == 422, day
+
+
+class TestACommitmentsCategory:
+    """Each commitment can name the spending category it belongs to."""
+
+    async def test_it_round_trips_and_a_custom_one_without_has_none(self, api_client):
+        await onboard(api_client, "+14165576901")
+        response = await api_client.put(
+            SETUP,
+            json={
+                "income": "5000.00",
+                "monthly_expense": "3000.00",
+                "obligations": [
+                    {"name": "Rogers", "monthly_amount": "65", "category": "utilities"},
+                    {"name": "Piano lessons", "monthly_amount": "80"},
+                ],
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert [(o["name"], o["category"]) for o in response.json()["obligations"]] == [
+            ("Rogers", "utilities"),
+            ("Piano lessons", None),
+        ]
+        again = (await api_client.get(SETUP)).json()
+        assert again["obligations"][0]["category"] == "utilities"
+
+    @pytest.mark.parametrize(
+        "category", ["income", "transfers", "savings", "debt_payment", "nonsense"]
+    )
+    async def test_only_a_spending_category_is_taken(self, api_client, category):
+        await onboard(api_client, "+14165576902")
+        response = await api_client.put(
+            SETUP,
+            json={
+                "income": "5000.00",
+                "monthly_expense": "3000.00",
+                "obligations": [
+                    {"name": "Rent", "monthly_amount": "1800", "category": category}
+                ],
+            },
+        )
+
+        assert response.status_code == 422

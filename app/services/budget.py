@@ -20,6 +20,9 @@ The rules (manager decisions, 2026-10-04, ticket #56):
 * `income` and `transfers` are not spending and are never a line.
 * **Debt** (`debt_payment`) is the larger of the observed median and the sum
   of the debts' minimum payments.
+* **Commitments hold their line up** the same way: a category's line is the
+  larger of its median and the setup commitments in it (rounded up), so Rent
+  $1,800 is budgeted from the first month, before any rent was seen.
 * **Savings** is whatever expected income has left after every other line.
   When nothing is left there is no savings line, and the budget reports the
   **shortfall** instead.
@@ -34,9 +37,18 @@ keeps the budget it had once that budget was built from categorised spending;
 one read before its statements were imported, or while they await review,
 fills in when they are.
 
-**Still learning.** Nothing is generated until the household passes the
-threshold in `app/services/learning.py`, but lines set by hand are kept and
-shown: manual budgeting is always available.
+**Still learning.** Nothing is generated from history until the household
+passes the threshold in `app/services/learning.py`. What setup already says —
+the commitments and the debts' minimums, and savings as what income leaves
+after them — is shown as lines from day one, without being stored; lines set
+by hand are kept and shown over them: manual budgeting is always available.
+
+**The month so far.** Beside the lines, a budget reports the month as the
+statements tell it (income, spending, what is left), the commitments seen paid
+or not, and — while the month is running — what is still to come: the
+commitments not seen yet, the rest of each line beyond them, and the income
+setup expects that has not arrived. Nothing is counted twice: a commitment's
+amount is taken out of its own line's remainder.
 """
 
 from __future__ import annotations
@@ -59,6 +71,8 @@ from app.models.enums import AccountKind, TransactionDirection
 from app.models.money import Account, Transaction
 from app.models.planning import Budget, BudgetLine, Debt
 from app.models.setup import FinancialProfile
+from app.services import commitments
+from app.services.commitments import Commitment
 from app.services.dashboard import (
     DEBT_PAYMENT_SLUG,
     SAVINGS_SLUG,
@@ -132,12 +146,21 @@ def suggest(
     expected_income: int,
     minimum_payments: int,
     currency: str,
+    floors: Mapping[uuid.UUID, int] | None = None,
 ) -> Suggestion:
     """The generated budget, from each category's monthly debit totals.
 
     Each sequence holds one total per month in the window, zeros included —
     the zeros are what filter one-offs. Every sequence is the same window.
+
+    [floors] is the least a category's line holds — its setup commitments —
+    whether or not it has any history.
     """
+    least = {
+        key: round_up_to_whole_unit(amount, currency)
+        for key, amount in (floors or {}).items()
+        if amount > 0
+    }
     spending: dict[uuid.UUID, int] = {}
     debt_months: list[int] | None = None
     for category, totals in monthly_totals_by_category.items():
@@ -152,9 +175,13 @@ def suggest(
                 else [a + b for a, b in zip(debt_months, totals, strict=True)]
             )
             continue
-        amount = round_up_to_whole_unit(median(totals), currency)
+        amount = max(
+            round_up_to_whole_unit(median(totals), currency),
+            least.pop(category.id, 0),
+        )
         if amount > 0:
             spending[category.id] = amount
+    spending.update(least)
 
     observed_debt = round_up_to_whole_unit(median(debt_months or []), currency)
     debt = max(observed_debt, minimum_payments, 0)
@@ -215,6 +242,14 @@ class BudgetView:
     # The month's actual income and spending, counted as Home counts them.
     month_income: int = 0
     month_spending: int = 0
+    # Setup's commitments, each with the payment seen for it this month.
+    commitments: list[Commitment] = field(default_factory=list)
+    month_ended: bool = False
+    # What is still to come; all None once the month has ended.
+    income_expected: int | None = None
+    commitments_due: int | None = None
+    budget_rest: int | None = None
+    projected_left: int | None = None
 
 
 class NotBudgetable(Exception):
@@ -233,15 +268,15 @@ async def budget_for(
     """[month]'s budget, generated or regenerated as the rules above say.
 
     While the household is still learning ([ready] false) nothing is
-    generated, and nothing is written: the view holds only the lines the user
-    set by hand, if any.
+    generated, and nothing is written: the view holds the lines the user set
+    by hand, and setup's lines for the rest.
     """
     if not ready:
         budget = await _existing(session, household_id, month)
-        return await _view(session, budget, household_id, currency, month, ready)
+        return await _view(session, budget, household_id, currency, month, today, ready)
     budget = await _prepared(session, household_id, currency, month, today, ready)
     await session.flush()
-    return await _view(session, budget, household_id, currency, month, ready)
+    return await _view(session, budget, household_id, currency, month, today, ready)
 
 
 async def set_line(
@@ -280,7 +315,7 @@ async def set_line(
         line.allocated_minor_units = amount
         line.is_user_set = True
     await _settle(session, budget, household_id, currency, system, ready)
-    return await _view(session, budget, household_id, currency, month, ready)
+    return await _view(session, budget, household_id, currency, month, today, ready)
 
 
 async def reset_line(
@@ -310,7 +345,7 @@ async def reset_line(
         else:
             budget.lines.remove(line)
     await _settle(session, budget, household_id, currency, system, ready)
-    return await _view(session, budget, household_id, currency, month, ready)
+    return await _view(session, budget, household_id, currency, month, today, ready)
 
 
 async def _settle(
@@ -404,7 +439,8 @@ async def _regenerate(
     window, history = await _history(session, household_id, currency, month)
     income = await _expected_income(session, household_id, currency)
     minimums = await _minimums(session, household_id, currency, window)
-    suggestion = suggest(history, income, int(minimums), currency)
+    held = await commitments.floors(session, household_id, currency)
+    suggestion = suggest(history, income, int(minimums), currency, held)
     # Categorised spending, not merely rows: a month read while last month's
     # statement is still awaiting review would otherwise lock with nothing.
     budget.has_history = bool(history)
@@ -622,12 +658,66 @@ def _find(budget: Budget, category_id: uuid.UUID) -> BudgetLine | None:
     )
 
 
+async def _from_setup(
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    currency: str,
+    month: date,
+    system: Mapping[str, uuid.UUID],
+) -> dict[uuid.UUID, int]:
+    """Line -> amount, from setup alone: each category's commitments and the
+    debts' minimums. What a household still learning is budgeted."""
+    window, _ = await _history(session, household_id, currency, month)
+    minimums = await _minimums(session, household_id, currency, window)
+    held = await commitments.floors(session, household_id, currency)
+    suggestion = suggest({}, 0, minimums, currency, held)
+    lines = dict(suggestion.spending)
+    if suggestion.debt > 0:
+        lines[system[DEBT_PAYMENT_SLUG]] = suggestion.debt
+    return lines
+
+
+def _still_to_come(
+    views: Sequence[LineView],
+    savings_id: uuid.UUID,
+    month_commitments: Sequence[Commitment],
+    income: int,
+    month_income: int,
+    month_spending: int,
+) -> tuple[int, int, int, int]:
+    """(income expected, commitments due, budget rest, projected left) for a
+    month still running.
+
+    * **Commitments due**: every commitment not seen paid yet.
+    * **Budget rest**: what each line has left beyond those — a line's
+      unspent allocation less the commitments still due in it, never below
+      zero — so Rent unpaid is counted once, as a commitment, not again as the
+      rent line's remainder. Savings is not spending and is left out.
+    * **Income expected**: setup's monthly income less what has arrived.
+    """
+    unseen = [c for c in month_commitments if c.match is None]
+    due = sum(c.expected_minor_units for c in unseen)
+    due_in: dict[uuid.UUID, int] = defaultdict(int)
+    for item in unseen:
+        if item.category_id is not None:
+            due_in[item.category_id] += item.expected_minor_units
+    rest = sum(
+        max(v.allocated - v.spent - due_in.get(v.category_id, 0), 0)
+        for v in views
+        if v.category_id != savings_id
+    )
+    expected = max(income - month_income, 0)
+    projected = month_income - month_spending + expected - due - rest
+    return expected, due, rest, projected
+
+
 async def _view(
     session: AsyncSession,
     budget: Budget | None,
     household_id: uuid.UUID,
     currency: str,
     month: date,
+    today: date,
     ready: bool,
 ) -> BudgetView:
     """What a client is shown.
@@ -636,7 +726,8 @@ async def _view(
     budget generated earlier can still hold suggested lines — a household
     drops back below the threshold when it deletes transactions — and those
     are kept for when it is ready again, but not shown: a suggestion from
-    history we have since lost is not one we stand behind.
+    history we have since lost is not one we stand behind. Setup's own lines
+    are shown in their place (`_from_setup`): those need no history.
     """
     system = await _system_ids(session)
     first, last = month_bounds(month)
@@ -670,7 +761,15 @@ async def _view(
         for line in (budget.lines if budget is not None else [])
         if ready or line.is_user_set
     ]
-    ids = [line.category_id for line in own]
+    # While learning: what setup alone budgets, for every line not set by hand.
+    setup_lines: dict[uuid.UUID, int] = {}
+    if not ready:
+        setup_lines = await _from_setup(session, household_id, currency, month, system)
+        for line in own:
+            setup_lines.pop(line.category_id, None)
+    ids = [line.category_id for line in own] + list(setup_lines)
+    if not ready:
+        ids.append(system[SAVINGS_SLUG])
     categories = {
         category.id: category
         for category in (
@@ -691,6 +790,40 @@ async def _view(
         )
 
     views = [view(line) for line in own]
+    for key, amount in setup_lines.items():
+        if key == system[SAVINGS_SLUG]:
+            continue
+        category = categories[key]
+        views.append(
+            LineView(
+                category_id=key,
+                slug=category.slug,
+                name=category.name,
+                suggested=amount,
+                allocated=amount,
+                is_user_set=False,
+                spent=spent.get(key, 0),
+            )
+        )
+    if not ready and not any(v.category_id == system[SAVINGS_SLUG] for v in views):
+        # Savings is what income leaves after every other line, hand-set ones
+        # included — as `_rebalance_savings` does once the household is ready.
+        left = await _income_for(session, budget, household_id, currency) - sum(
+            v.allocated for v in views
+        )
+        if left > 0:
+            category = categories[system[SAVINGS_SLUG]]
+            views.append(
+                LineView(
+                    category_id=category.id,
+                    slug=category.slug,
+                    name=category.name,
+                    suggested=left,
+                    allocated=left,
+                    is_user_set=False,
+                    spent=spent.get(category.id, 0),
+                )
+            )
     savings = next((v for v in views if v.category_id == system[SAVINGS_SLUG]), None)
     debt = next((v for v in views if v.category_id == system[DEBT_PAYMENT_SLUG]), None)
     lines = sorted(
@@ -739,6 +872,24 @@ async def _view(
     figures = (await figures_by_month(session, household_id, currency, [first])).get(
         first
     )
+    month_income = figures.income if figures else 0
+    month_spending = figures.expenses if figures else 0
+    month_commitments = await commitments.for_month(
+        session, household_id, currency, first, last
+    )
+    ended = last < today
+    to_come = (
+        None
+        if ended
+        else _still_to_come(
+            views,
+            system[SAVINGS_SLUG],
+            month_commitments,
+            income,
+            month_income,
+            month_spending,
+        )
+    )
     return BudgetView(
         month=first,
         currency=currency,
@@ -754,6 +905,12 @@ async def _view(
         unbudgeted=unbudgeted,
         unbudgeted_spent=unbudgeted_spent,
         spent_overall=total_spent + unbudgeted_spent + uncategorised_spent,
-        month_income=figures.income if figures else 0,
-        month_spending=figures.expenses if figures else 0,
+        month_income=month_income,
+        month_spending=month_spending,
+        commitments=month_commitments,
+        month_ended=ended,
+        income_expected=to_come[0] if to_come else None,
+        commitments_due=to_come[1] if to_come else None,
+        budget_rest=to_come[2] if to_come else None,
+        projected_left=to_come[3] if to_come else None,
     )

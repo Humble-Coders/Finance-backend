@@ -10,7 +10,9 @@ on (2.5); everything else is optional and editable later from the profile.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.services.commitments import COMMITMENT_SLUGS
 
 __all__ = [
     "DebtIn",
@@ -47,6 +49,19 @@ class ObligationIn(BaseModel):
     monthly_amount: str
     # Day of the month it falls due; omitted means not said.
     due_day: int | None = Field(default=None, ge=1, le=31)
+    # The shared spending category it belongs to, by slug (`rent`,
+    # `utilities`): its budget line never allocates less than it. Omitted
+    # means not said.
+    category: str | None = None
+
+    @field_validator("category")
+    @classmethod
+    def _a_commitment_category(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        if value not in COMMITMENT_SLUGS:
+            raise ValueError("not a spending category a commitment can belong to")
+        return value
 
 
 class FinancialSetupIn(BaseModel):
@@ -89,6 +104,9 @@ class ObligationOut(BaseModel):
     name: str
     monthly_amount: str
     due_day: int | None = None
+    # As saved, or the preset's for a row saved before it was asked; null
+    # when there is neither.
+    category: str | None = None
 
 
 class FinancialSetupOut(BaseModel):

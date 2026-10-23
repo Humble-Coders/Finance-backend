@@ -18,6 +18,7 @@ from app.core.money import MoneyError, from_minor_units, to_minor_units
 from app.db import get_session
 from app.models.categorization import Category
 from app.schemas.budget import (
+    BudgetCommitmentOut,
     BudgetLineIn,
     BudgetLineOut,
     BudgetOut,
@@ -116,6 +117,9 @@ def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
     def money(minor: int) -> str:
         return from_minor_units(minor, currency)
 
+    def maybe(minor: int | None) -> str | None:
+        return None if minor is None else money(minor)
+
     def line(item: service.LineView | None) -> BudgetLineOut | None:
         if item is None:
             return None
@@ -164,6 +168,22 @@ def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
         month_income=money(view.month_income),
         month_spending=money(view.month_spending),
         month_net=money(view.month_income - view.month_spending),
+        commitments=[
+            BudgetCommitmentOut(
+                name=c.name,
+                expected=money(c.expected_minor_units),
+                due_day=c.due_day,
+                category=c.category_slug,
+                paid_on=c.match.occurred_on if c.match else None,
+                paid_amount=money(c.match.amount_minor_units) if c.match else None,
+            )
+            for c in view.commitments
+        ],
+        month_ended=view.month_ended,
+        income_expected=maybe(view.income_expected),
+        commitments_due=maybe(view.commitments_due),
+        budget_rest=maybe(view.budget_rest),
+        projected_left=maybe(view.projected_left),
     )
 
 

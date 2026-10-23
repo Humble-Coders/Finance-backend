@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import delete, func, select, text, update
@@ -385,7 +386,9 @@ class TestStillLearning:
                 ("groceries", "300.00")
             ]
             assert body["lines"][0]["is_user_set"] is True
-            assert body["savings"] is None
+            # Savings is what setup's income leaves after them, from day one.
+            assert body["savings"]["allocated"] == "4700.00"
+            assert body["savings"]["is_user_set"] is False
             assert body["debt"] is None
 
     async def test_a_line_set_while_learning_is_kept_once_ready(
@@ -435,7 +438,8 @@ class TestStillLearning:
         self, api_client, db_session
     ):
         """Generated lines stay saved for when the household is ready again,
-        but a suggestion from history since deleted is not shown."""
+        but a suggestion from history since deleted is not shown — only the
+        user's lines, and what setup alone budgets."""
         household, _, ids = await a_ready_household(
             api_client, db_session, "+14165575108"
         )
@@ -456,8 +460,10 @@ class TestStillLearning:
         assert [(line["slug"], line["allocated"]) for line in body["lines"]] == [
             ("dining", "60.00")
         ]
-        assert body["savings"] is None
-        assert body["debt"] is None
+        # Setup's own lines need no history: the Visa's $250 minimum, and
+        # savings as the $5,000 income less both lines.
+        assert body["debt"]["allocated"] == "250.00"
+        assert body["savings"]["allocated"] == "4690.00"
 
 
 class TestTheUserDecides:
@@ -757,3 +763,103 @@ class TestBoundaries:
 
         assert response.status_code == 422
         assert response.json()["detail"]["code"] == code
+
+
+async def with_commitments(api_client, *obligations) -> None:
+    """The ready household's setup again — the Visa kept — with commitments."""
+    await setup_wizard(
+        api_client,
+        income="5000.00",
+        debts=[{"name": "Visa", "balance": "2000.00", "minimum_payment": "250.00"}],
+        obligations=list(obligations),
+    )
+
+
+RENT = {"name": "Rent", "monthly_amount": "1800.00", "due_day": 1, "category": "rent"}
+LOBLAWS = {"name": "Loblaws", "monthly_amount": "120.00", "category": "groceries"}
+
+
+class TestCommitmentsHoldTheirLine:
+    async def test_a_commitment_never_seen_is_budgeted_from_setup(
+        self, api_client, db_session
+    ):
+        await a_ready_household(api_client, db_session, "+14165577001")
+        await with_commitments(api_client, RENT, LOBLAWS)
+
+        body = (await api_client.get(SEPTEMBER)).json()
+
+        lines = by_slug(body)
+        assert lines["rent"]["allocated"] == "1800.00", "no rent history at all"
+        assert lines["groceries"]["allocated"] == "450.00", "the median beats $120"
+        assert body["savings"]["allocated"] == "2450.00"
+
+    async def test_a_learning_household_is_budgeted_its_commitments(
+        self, api_client, db_session
+    ):
+        household, account = await a_household(api_client, "+14165577002")
+        db_session.add_all(filler(household, account, 19, month=8))
+        await db_session.commit()
+        await setup_wizard(api_client, income="5000.00", obligations=[RENT])
+
+        body = (await api_client.get(SEPTEMBER)).json()
+
+        assert body["status"] == "learning"
+        assert [(line["slug"], line["allocated"]) for line in body["lines"]] == [
+            ("rent", "1800.00")
+        ]
+        assert body["lines"][0]["is_user_set"] is False
+        assert body["savings"]["allocated"] == "3200.00"
+        count = await db_session.scalar(
+            select(func.count())
+            .select_from(Budget)
+            .where(Budget.household_id == household)
+        )
+        assert count == 0, "shown from setup, not stored"
+
+
+class TestTheMonthSoFar:
+    async def test_a_running_month_counts_what_is_still_to_come_once(
+        self, api_client, db_session
+    ):
+        await a_ready_household(api_client, db_session, "+14165577101")
+        await with_commitments(api_client, RENT, LOBLAWS)
+
+        body = (await api_client.get(SEPTEMBER)).json()
+
+        assert body["month_ended"] is False
+        assert [
+            (c["name"], c["category"], c["paid_on"], c["paid_amount"])
+            for c in body["commitments"]
+        ] == [
+            ("Rent", "rent", None, None),
+            ("Loblaws", "groceries", "2026-09-02", "120.00"),
+        ]
+        # Rent unseen is due once, and not again as the rent line's remainder.
+        assert body["commitments_due"] == "1800.00"
+        # Groceries $450 less $150.01 spent; debt fully paid; rent counted above.
+        assert body["budget_rest"] == "299.99"
+        net = Decimal(body["month_net"])
+        expected = Decimal(body["income_expected"])
+        assert expected == max(Decimal("5000.00") - Decimal(body["month_income"]), 0)
+        assert Decimal(body["projected_left"]) == (
+            net + expected - Decimal("1800.00") - Decimal("299.99")
+        )
+
+    async def test_an_ended_month_has_nothing_still_to_come(
+        self, api_client, db_session
+    ):
+        await a_ready_household(api_client, db_session, "+14165577102")
+        await with_commitments(api_client, RENT)
+
+        body = (await api_client.get(AUGUST)).json()
+
+        assert body["month_ended"] is True
+        assert body["commitments"][0]["name"] == "Rent"
+        assert body["commitments"][0]["paid_on"] is None
+        for key in (
+            "income_expected",
+            "commitments_due",
+            "budget_rest",
+            "projected_left",
+        ):
+            assert body[key] is None

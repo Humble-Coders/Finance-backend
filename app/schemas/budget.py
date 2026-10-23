@@ -47,6 +47,22 @@ class UnbudgetedOut(BaseModel):
     spent: str
 
 
+class BudgetCommitmentOut(BaseModel):
+    """One setup commitment and whether its payment was seen this month.
+
+    `paid_on` null is **not seen**, not unpaid — as on Home, which matches
+    payments by the same rule. Clients must word it that way.
+    """
+
+    name: str
+    expected: str
+    due_day: int | None = None
+    # The category slug it belongs to; null when it has none.
+    category: str | None = None
+    paid_on: date | None = None
+    paid_amount: str | None = None
+
+
 class BudgetOut(BaseModel):
     status: Literal["learning", "ready"]
     month: date
@@ -79,6 +95,18 @@ class BudgetOut(BaseModel):
     month_income: str = "0.00"
     month_spending: str = "0.00"
     month_net: str = "0.00"
+    commitments: list[BudgetCommitmentOut] = []
+    # True once the month is over: nothing more is to come, and the four
+    # figures below are null.
+    month_ended: bool = False
+    # Setup's monthly income not yet seen this month (never below zero).
+    income_expected: str | None = None
+    # Commitments not seen paid yet.
+    commitments_due: str | None = None
+    # What the lines have left beyond the commitments still due in them.
+    budget_rest: str | None = None
+    # month_net + income_expected - commitments_due - budget_rest.
+    projected_left: str | None = None
 
 
 class BudgetLineIn(BaseModel):

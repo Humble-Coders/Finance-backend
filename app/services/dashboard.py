@@ -31,7 +31,9 @@ from app.models.categorization import Category
 from app.models.enums import AccountKind, ReviewReason, TransactionDirection
 from app.models.money import Account, StatementImport, Transaction
 from app.models.planning import Debt
-from app.models.setup import FinancialProfile, Investment, Obligation
+from app.models.setup import FinancialProfile, Investment
+from app.services.commitments import Commitment
+from app.services.commitments import for_month as month_commitments
 
 # How many months the sparkline covers, including the one being viewed.
 TREND_MONTHS = 10
@@ -188,32 +190,6 @@ class Stock:
     # savings. Observed, like `moved`, and never netted against it — both are
     # shown, because "put in 500, took out 500" is not "did nothing".
     withdrawn_minor_units: int = 0
-
-
-@dataclass(frozen=True)
-class Match:
-    """The transaction a commitment was paid by, as far as we can tell."""
-
-    transaction_id: uuid.UUID
-    occurred_on: date
-    amount_minor_units: int
-    description: str | None
-
-
-@dataclass(frozen=True)
-class Commitment:
-    """One obligation, and whether a payment for it turned up this month.
-
-    [match] being None means **not seen**, which is not the same as not paid:
-    a commitment settled in cash, from another account, or under a name the
-    statement writes differently will not be found. The wording the client
-    shows has to say "not seen this month" and never "unpaid".
-    """
-
-    name: str
-    expected_minor_units: int
-    match: Match | None = None
-    due_day: int | None = None
 
 
 @dataclass(frozen=True)
@@ -549,67 +525,9 @@ async def build(
         session, household_id, currency, month, (SAVINGS_SLUG,)
     )
 
-    # Every debit in the month, once, and then matched in memory. The
-    # alternative is a query per obligation, which is a query per row of a list
-    # the user controls the length of.
-    debits_this_month = list(
-        (
-            await session.execute(
-                select(Transaction).where(
-                    *countable(household_id, currency),
-                    *_in_month(month),
-                    Transaction.direction == TransactionDirection.debit,
-                )
-            )
-        )
-        .scalars()
-        .all()
+    commitments = await month_commitments(
+        session, household_id, currency, *month_bounds(month)
     )
-
-    obligations = list(
-        (
-            await session.execute(
-                select(Obligation)
-                .where(
-                    Obligation.household_id == household_id,
-                    Obligation.currency == currency,
-                )
-                .order_by(Obligation.position, Obligation.name)
-            )
-        )
-        .scalars()
-        .all()
-    )
-
-    # A transaction settles at most one commitment. Without this, two
-    # commitments of a similar size both claim the same payment and the
-    # checklist says two things were paid when one was.
-    claimed: set[uuid.UUID] = set()
-    commitments: list[Commitment] = []
-    for obligation in obligations:
-        available = [row for row in debits_this_month if row.id not in claimed]
-        found = match_commitment(
-            obligation.name, obligation.monthly_amount_minor_units, available
-        )
-        if found is not None:
-            claimed.add(found.id)
-        commitments.append(
-            Commitment(
-                name=obligation.name,
-                expected_minor_units=obligation.monthly_amount_minor_units,
-                due_day=obligation.due_day,
-                match=(
-                    Match(
-                        transaction_id=found.id,
-                        occurred_on=found.occurred_on,
-                        amount_minor_units=found.amount_minor_units,
-                        description=found.description,
-                    )
-                    if found is not None
-                    else None
-                ),
-            )
-        )
 
     window = months_back(month, TREND_MONTHS)
     figures = await figures_by_month(session, household_id, currency, window)

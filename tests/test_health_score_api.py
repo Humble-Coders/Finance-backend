@@ -99,7 +99,7 @@ class TestTheScore:
         body = response.json()
         assert body["status"] == "ready"
         assert body["score"] == 100
-        assert body["formula_version"] == "v3"
+        assert body["formula_version"] == "v4"
         parts = by_key(body)
         assert {k: (c["score"], c["weight"]) for k, c in parts.items()} == {
             "savings_consistency": (100, "40.00"),
@@ -117,6 +117,9 @@ class TestTheScore:
             "debts_with_minimum": 1,
             "required": "250.00",
             "paid": "300.00",
+            # v4: of the minimums, what the payments cover (nothing linked:
+            # the month's debt paid, up to the minimums).
+            "covered": "250.00",
         }
         months = parts["savings_consistency"]["inputs"]["months"]
         assert [m["month"] for m in months] == [
@@ -126,7 +129,7 @@ class TestTheScore:
         ]
         assert months[2]["income"] == "5050.00", "the August refund is a credit"
         assert body["history"] == [
-            {"scored_on": "2026-09-15", "score": 100, "formula_version": "v3"}
+            {"scored_on": "2026-09-15", "score": 100, "formula_version": "v4"}
         ]
 
     async def test_it_reads_the_budget_4_1_serves(self, api_client, db_session, today):
@@ -234,8 +237,8 @@ class TestHistory:
 
         (row,) = await snapshots(db_session, household)
 
-        assert row.formula_version == "v3"
-        assert row.components["formula_version"] == "v3"
+        assert row.formula_version == "v4"
+        assert row.components["formula_version"] == "v4"
         assert score(inputs_from_json(row.components)).score == row.score == 83
 
     async def test_history_is_the_last_twelve(self, api_client, db_session, today):
@@ -469,7 +472,7 @@ class TestFormulaV2:
         assert parts["goal_completion"]["weight"] == "15.00"
         assert parts["savings_consistency"]["weight"] == "34.00"
         assert body["score"] == 93
-        assert body["formula_version"] == "v3"
+        assert body["formula_version"] == "v4"
 
     async def test_a_goal_made_last_month_does_not_count_yet(
         self, api_client, db_session, today
@@ -551,7 +554,7 @@ class TestFormulaV2:
             == 71
         )
         assert score(inputs_from_json(yesterday.components)).score == 71
-        assert today_row.formula_version == "v3"
+        assert today_row.formula_version == "v4"
 
 
 class TestNoChangeAcrossFormulas:
@@ -584,7 +587,7 @@ class TestNoChangeAcrossFormulas:
 
         score_out = (await api_client.get("/dashboard")).json()["health_score"]
 
-        assert score_out["formula_version"] == "v3"
+        assert score_out["formula_version"] == "v4"
         assert score_out["previous_score"] is None
 
     async def test_a_v2_score_last_month_gives_no_change(
@@ -599,16 +602,31 @@ class TestNoChangeAcrossFormulas:
 
         score_out = (await api_client.get("/dashboard")).json()["health_score"]
 
-        assert score_out["formula_version"] == "v3"
+        assert score_out["formula_version"] == "v4"
         assert score_out["previous_score"] is None
 
-    async def test_a_v3_score_last_month_gives_the_change(
+    async def test_a_v3_score_last_month_gives_no_change(
+        self, api_client, db_session, today
+    ):
+        """v4 (#76) measures debt payments per linked debt, so a v3 score is
+        the old measure, not last month's household."""
+        household, _, _ = await a_scored_household(
+            api_client, db_session, "+14165576804"
+        )
+        await self.last_month(db_session, household, "v3")
+
+        score_out = (await api_client.get("/dashboard")).json()["health_score"]
+
+        assert score_out["formula_version"] == "v4"
+        assert score_out["previous_score"] is None
+
+    async def test_a_v4_score_last_month_gives_the_change(
         self, api_client, db_session, today
     ):
         household, _, _ = await a_scored_household(
             api_client, db_session, "+14165576802"
         )
-        await self.last_month(db_session, household, "v3")
+        await self.last_month(db_session, household, "v4")
 
         score_out = (await api_client.get("/dashboard")).json()["health_score"]
 

@@ -40,6 +40,13 @@ class BudgetLineOut(BaseModel):
     spent: str
 
 
+class UnbudgetedOut(BaseModel):
+    category_id: uuid.UUID
+    slug: str
+    name: str
+    spent: str
+
+
 class BudgetOut(BaseModel):
     status: Literal["learning", "ready"]
     month: date
@@ -60,6 +67,18 @@ class BudgetOut(BaseModel):
     # Spending with no category: reported, never budgeted.
     uncategorised_spent: str
     uncategorised_count: int
+    # Spending in categories this month has no line for, largest first —
+    # a first month has nothing to learn from, a one-off has a median of 0.
+    unbudgeted: list[UnbudgetedOut] = []
+    unbudgeted_spent: str = "0.00"
+    # The lines' spending, plus unbudgeted and uncategorised: everything
+    # spent against the budget this month.
+    spent_overall: str = "0.00"
+    # The month's actual income and spending, counted as the dashboard counts
+    # them (transfers and savings are neither), and income minus spending.
+    month_income: str = "0.00"
+    month_spending: str = "0.00"
+    month_net: str = "0.00"
 
 
 class BudgetLineIn(BaseModel):

@@ -145,6 +145,49 @@ class TestTheGeneratedBudget:
         assert body["uncategorised_spent"] == "12.34"
         assert body["uncategorised_count"] == 1
 
+    async def test_spending_with_no_line_is_reported_and_counted(
+        self, api_client, db_session
+    ):
+        """September's $45 at the bistro has no Dining line (a one-off has a
+        median of 0): it is listed, and "spent" counts it, with the $12.34 of
+        uncategorised spending. Transfers and savings never are."""
+        await a_ready_household(api_client, db_session, "+14165575010")
+
+        body = (await api_client.get(SEPTEMBER)).json()
+
+        assert [(u["slug"], u["spent"]) for u in body["unbudgeted"]] == [
+            ("dining", "45.00")
+        ]
+        assert body["unbudgeted_spent"] == "45.00"
+        assert body["total_spent"] == "450.01", "the lines alone, as before"
+        assert body["spent_overall"] == "507.35", "450.01 + 45.00 + 12.34"
+
+    async def test_the_month_s_income_and_spending_are_home_s(
+        self, api_client, db_session
+    ):
+        await a_ready_household(api_client, db_session, "+14165575011")
+
+        budget = (await api_client.get(SEPTEMBER)).json()
+        home = (await api_client.get("/dashboard", params={"month": "2026-09"})).json()
+
+        assert budget["month_income"] == home["income"]["actual"]
+        assert budget["month_spending"] == home["expenses"]["actual"]
+        assert budget["month_net"] == home["net"]
+
+    async def test_a_month_with_nothing_has_nothing_unbudgeted(
+        self, api_client, db_session
+    ):
+        await a_ready_household(api_client, db_session, "+14165575012")
+
+        body = (await api_client.get("/budgets/2026-05")).json()
+
+        assert body["unbudgeted"] == []
+        assert (
+            body["spent_overall"],
+            body["month_income"],
+            body["month_spending"],
+        ) == ("0.00", "0.00", "0.00")
+
     async def test_spent_is_the_dashboard_s_count(self, api_client, db_session):
         """Each line against `countable`, and the totals against /dashboard."""
         household, _, _ = await a_ready_household(

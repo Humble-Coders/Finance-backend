@@ -23,6 +23,7 @@ from app.schemas.budget import (
     BudgetOut,
     LearningNeedsOut,
     LearningOut,
+    UnbudgetedOut,
 )
 from app.services import budget as service
 from app.services.capabilities import currency_for, require_feature
@@ -149,6 +150,20 @@ def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
         shortfall=None if view.shortfall is None else money(view.shortfall),
         uncategorised_spent=money(view.uncategorised_spent),
         uncategorised_count=view.uncategorised_count,
+        unbudgeted=[
+            UnbudgetedOut(
+                category_id=u.category_id,
+                slug=u.slug,
+                name=u.name,
+                spent=money(u.spent),
+            )
+            for u in view.unbudgeted
+        ],
+        unbudgeted_spent=money(view.unbudgeted_spent),
+        spent_overall=money(view.spent_overall),
+        month_income=money(view.month_income),
+        month_spending=money(view.month_spending),
+        month_net=money(view.month_income - view.month_spending),
     )
 
 

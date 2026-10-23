@@ -44,7 +44,7 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
@@ -63,6 +63,7 @@ from app.services.dashboard import (
     DEBT_PAYMENT_SLUG,
     SAVINGS_SLUG,
     countable,
+    figures_by_month,
     month_bounds,
     months_back,
 )
@@ -181,6 +182,16 @@ class LineView:
 
 
 @dataclass(frozen=True)
+class UnbudgetedView:
+    """Spending in a category this month's budget has no line for."""
+
+    category_id: uuid.UUID
+    slug: str
+    name: str
+    spent: int
+
+
+@dataclass(frozen=True)
 class BudgetView:
     month: date
     currency: str
@@ -194,6 +205,16 @@ class BudgetView:
     shortfall: int | None
     uncategorised_spent: int
     uncategorised_count: int
+    # Spending in categories with no line — a first month has nothing to
+    # learn from, and a one-off has a median of 0 — largest first.
+    unbudgeted: list[UnbudgetedView] = field(default_factory=list)
+    unbudgeted_spent: int = 0
+    # Everything the month spent against the budget: the lines, the
+    # spending with no line, and the spending with no category.
+    spent_overall: int = 0
+    # The month's actual income and spending, counted as Home counts them.
+    month_income: int = 0
+    month_spending: int = 0
 
 
 class NotBudgetable(Exception):
@@ -679,6 +700,45 @@ async def _view(
     income = await _income_for(session, budget, household_id, currency)
     total_allocated = sum(v.allocated for v in views)
     over = total_allocated - income
+    total_spent = sum(v.spent for v in views)
+
+    # Spending no line holds. Income and transfers can never hold one, and
+    # money moved to savings is set aside, not spent.
+    lined = {v.category_id for v in views}
+    loose = {
+        key: amount for key, amount in spent.items() if key not in lined and amount > 0
+    }
+    named = (
+        {
+            category.id: category
+            for category in (
+                await session.scalars(
+                    select(Category).where(Category.id.in_(list(loose)))
+                )
+            )
+        }
+        if loose
+        else {}
+    )
+    unbudgeted = sorted(
+        (
+            UnbudgetedView(
+                category_id=key,
+                slug=named[key].slug,
+                name=named[key].name,
+                spent=amount,
+            )
+            for key, amount in loose.items()
+            if key in named
+            and named[key].slug not in NOT_BUDGETABLE
+            and named[key].slug != SAVINGS_SLUG
+        ),
+        key=lambda u: (-u.spent, u.name),
+    )
+    unbudgeted_spent = sum(u.spent for u in unbudgeted)
+    figures = (await figures_by_month(session, household_id, currency, [first])).get(
+        first
+    )
     return BudgetView(
         month=first,
         currency=currency,
@@ -687,8 +747,13 @@ async def _view(
         savings=savings,
         debt=debt,
         total_allocated=total_allocated,
-        total_spent=sum(v.spent for v in views),
+        total_spent=total_spent,
         shortfall=over if over > 0 else None,
         uncategorised_spent=uncategorised_spent,
         uncategorised_count=uncategorised_count,
+        unbudgeted=unbudgeted,
+        unbudgeted_spent=unbudgeted_spent,
+        spent_overall=total_spent + unbudgeted_spent + uncategorised_spent,
+        month_income=figures.income if figures else 0,
+        month_spending=figures.expenses if figures else 0,
     )

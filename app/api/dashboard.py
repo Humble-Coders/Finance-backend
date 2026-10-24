@@ -359,6 +359,7 @@ async def read_dashboard(
                     else None
                 ),
                 due_day=item.due_day,
+                category=item.category_slug,
             )
             for item in built.commitments
         ],

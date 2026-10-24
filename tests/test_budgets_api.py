@@ -863,3 +863,20 @@ class TestTheMonthSoFar:
             "projected_left",
         ):
             assert body[key] is None
+
+    async def test_a_month_s_spending_by_category_sums_to_its_spending(
+        self, api_client, db_session
+    ):
+        await a_ready_household(api_client, db_session, "+14165577103")
+
+        body = (await api_client.get(AUGUST)).json()
+
+        rows = [(c["slug"], c["spent"]) for c in body["spending_by_category"]]
+        assert rows == [
+            ("groceries", "450.00"),
+            ("debt_payment", "300.00"),
+            ("dining", "90.00"),
+        ], "transfers are not spending; the refund is not a debit"
+        assert sum(Decimal(c["spent"]) for c in body["spending_by_category"]) == (
+            Decimal(body["month_spending"])
+        )

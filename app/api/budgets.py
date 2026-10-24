@@ -22,6 +22,7 @@ from app.schemas.budget import (
     BudgetLineIn,
     BudgetLineOut,
     BudgetOut,
+    CategorySpendOut,
     LearningNeedsOut,
     LearningOut,
     UnbudgetedOut,
@@ -180,6 +181,15 @@ def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
             for c in view.commitments
         ],
         month_ended=view.month_ended,
+        spending_by_category=[
+            CategorySpendOut(
+                category_id=c.category_id,
+                slug=c.slug,
+                name=c.name,
+                spent=money(c.spent_minor_units),
+            )
+            for c in view.spending_by_category
+        ],
         income_expected=maybe(view.income_expected),
         commitments_due=maybe(view.commitments_due),
         budget_rest=maybe(view.budget_rest),

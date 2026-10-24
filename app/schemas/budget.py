@@ -63,6 +63,14 @@ class BudgetCommitmentOut(BaseModel):
     paid_amount: str | None = None
 
 
+class CategorySpendOut(BaseModel):
+    # Null for the one entry gathering every uncategorised row.
+    category_id: uuid.UUID | None = None
+    slug: str | None = None
+    name: str | None = None
+    spent: str
+
+
 class BudgetOut(BaseModel):
     status: Literal["learning", "ready"]
     month: date
@@ -99,6 +107,9 @@ class BudgetOut(BaseModel):
     # True once the month is over: nothing more is to come, and the four
     # figures below are null.
     month_ended: bool = False
+    # Where the month's money went, by category, largest first; sums to
+    # `month_spending`. Transfers and savings are not in it.
+    spending_by_category: list[CategorySpendOut] = []
     # Setup's monthly income not yet seen this month (never below zero).
     income_expected: str | None = None
     # Commitments not seen paid yet.

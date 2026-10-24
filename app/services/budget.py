@@ -76,10 +76,12 @@ from app.services.commitments import Commitment
 from app.services.dashboard import (
     DEBT_PAYMENT_SLUG,
     SAVINGS_SLUG,
+    CategorySpend,
     countable,
     figures_by_month,
     month_bounds,
     months_back,
+    spend_by_category,
 )
 
 WINDOW_MONTHS = 3
@@ -245,6 +247,10 @@ class BudgetView:
     # Setup's commitments, each with the payment seen for it this month.
     commitments: list[Commitment] = field(default_factory=list)
     month_ended: bool = False
+    # Where the month's money went, by category, largest first — the
+    # dashboard's own breakdown, so it sums to `month_spending` to the cent.
+    # What a month that has ended is shown as.
+    spending_by_category: list[CategorySpend] = field(default_factory=list)
     # What is still to come; all None once the month has ended.
     income_expected: int | None = None
     commitments_due: int | None = None
@@ -909,6 +915,9 @@ async def _view(
         month_spending=month_spending,
         commitments=month_commitments,
         month_ended=ended,
+        spending_by_category=await spend_by_category(
+            session, household_id, currency, first
+        ),
         income_expected=to_come[0] if to_come else None,
         commitments_due=to_come[1] if to_come else None,
         budget_rest=to_come[2] if to_come else None,

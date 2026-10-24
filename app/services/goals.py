@@ -418,14 +418,15 @@ async def compare_with_budget(
     view = await budget_for(
         session, household.id, currency, today.replace(day=1), today, ready=True
     )
-    if view.savings is None:
+    # The savings target when one is set; otherwise the room for one.
+    set_aside = view.savings.allocated if view.savings else view.savings_room
+    if set_aside <= 0:
         return None, NO_SAVINGS_LINE
     need = sum(
         monthly_need(goal, projection)
         for goal, projection in goals
         if goal.currency == currency
     )
-    set_aside = view.savings.allocated
     gap = need - set_aside
     return BudgetComparison(need, set_aside, gap if gap > 0 else None), None
 

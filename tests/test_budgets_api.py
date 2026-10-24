@@ -140,8 +140,10 @@ class TestTheGeneratedBudget:
         assert lines["groceries"]["spent"] == "150.01"
         assert body["debt"]["allocated"] == "300.00", "observed $300 beats $250 minimum"
         assert body["debt"]["spent"] == "300.00"
-        assert body["savings"]["allocated"] == "4250.00"
-        assert body["total_allocated"] == "5000.00"
+        # Savings is a target the person sets: none yet, only the room for one.
+        assert body["savings"] is None
+        assert body["savings_room"] == "4250.00"
+        assert body["total_allocated"] == "750.00", "groceries and debt; no target"
         assert body["shortfall"] is None
         assert body["uncategorised_spent"] == "12.34"
         assert body["uncategorised_count"] == 1
@@ -216,7 +218,9 @@ class TestTheGeneratedBudget:
             whole, part = amount.split(".")
             return int(whole) * 100 + int(part)
 
-        budgeted = [*body["lines"], body["debt"], body["savings"]]
+        budgeted = [
+            line for line in (*body["lines"], body["debt"], body["savings"]) if line
+        ]
         for line in budgeted:
             expected = await debits(Category.slug == line["slug"])
             assert cents(line["spent"]) == expected, line["slug"]
@@ -231,7 +235,8 @@ class TestTheGeneratedBudget:
         ).json()
         # Savings is a budget line but not an expense (#73): money set aside
         # went to another of the household's accounts, not anywhere.
-        assert cents(body["total_spent"]) - cents(body["savings"]["spent"]) + cents(
+        savings_spent = (body["savings"] or {}).get("spent", "0.00")
+        assert cents(body["total_spent"]) - cents(savings_spent) + cents(
             body["uncategorised_spent"]
         ) + not_budgeted == cents(dashboard["expenses"]["actual"])
 
@@ -386,9 +391,9 @@ class TestStillLearning:
                 ("groceries", "300.00")
             ]
             assert body["lines"][0]["is_user_set"] is True
-            # Savings is what setup's income leaves after them, from day one.
-            assert body["savings"]["allocated"] == "4700.00"
-            assert body["savings"]["is_user_set"] is False
+            # No savings target until one is set; the room for one shows.
+            assert body["savings"] is None
+            assert body["savings_room"] == "4700.00"
             assert body["debt"] is None
 
     async def test_a_line_set_while_learning_is_kept_once_ready(
@@ -432,7 +437,7 @@ class TestStillLearning:
         assert lines["dining"]["allocated"] == "75.00"
         assert lines["dining"]["is_user_set"] is True
         assert lines["groceries"]["allocated"] == "400.00"
-        assert body["savings"]["allocated"] == "4525.00"
+        assert body["savings_room"] == "4525.00"
 
     async def test_dropping_back_below_the_threshold_shows_only_the_user_s_lines(
         self, api_client, db_session
@@ -463,7 +468,7 @@ class TestStillLearning:
         # Setup's own lines need no history: the Visa's $250 minimum, and
         # savings as the $5,000 income less both lines.
         assert body["debt"]["allocated"] == "250.00"
-        assert body["savings"]["allocated"] == "4690.00"
+        assert body["savings_room"] == "4690.00"
 
 
 class TestTheUserDecides:
@@ -478,7 +483,7 @@ class TestTheUserDecides:
         )
         assert put.status_code == 200, put.text
         assert by_slug(put.json())["groceries"]["is_user_set"] is True
-        assert put.json()["savings"]["allocated"] == "3701.00", "rebalanced at once"
+        assert put.json()["savings_room"] == "3701.00", "rebalanced at once"
 
         # August's groceries rise to $750: the median moves to $500.
         db_session.add(
@@ -515,7 +520,7 @@ class TestTheUserDecides:
         groceries = by_slug(response.json())["groceries"]
         assert groceries["allocated"] == "450.00"
         assert groceries["is_user_set"] is False
-        assert response.json()["savings"]["allocated"] == "4250.00"
+        assert response.json()["savings_room"] == "4250.00"
 
     async def test_a_hand_added_line_with_no_history_is_removed_on_reset(
         self, api_client, db_session
@@ -791,7 +796,7 @@ class TestCommitmentsHoldTheirLine:
         lines = by_slug(body)
         assert lines["rent"]["allocated"] == "1800.00", "no rent history at all"
         assert lines["groceries"]["allocated"] == "450.00", "the median beats $120"
-        assert body["savings"]["allocated"] == "2450.00"
+        assert body["savings_room"] == "2450.00"
 
     async def test_a_learning_household_is_budgeted_its_commitments(
         self, api_client, db_session
@@ -808,7 +813,7 @@ class TestCommitmentsHoldTheirLine:
             ("rent", "1800.00")
         ]
         assert body["lines"][0]["is_user_set"] is False
-        assert body["savings"]["allocated"] == "3200.00"
+        assert body["savings_room"] == "3200.00"
         count = await db_session.scalar(
             select(func.count())
             .select_from(Budget)
@@ -879,4 +884,93 @@ class TestTheMonthSoFar:
         ], "transfers are not spending; the refund is not a debit"
         assert sum(Decimal(c["spent"]) for c in body["spending_by_category"]) == (
             Decimal(body["month_spending"])
+        )
+
+
+class TestYourOwnLinesCarryForward:
+    async def test_a_line_added_by_hand_is_in_every_month_after(
+        self, api_client, db_session
+    ):
+        _, _, ids = await a_ready_household(api_client, db_session, "+14165577201")
+        put = await api_client.put(
+            f"{AUGUST}/lines/{ids['dining']}", json={"amount": "60.00"}
+        )
+        assert put.status_code == 200, put.text
+
+        dining = by_slug((await api_client.get(SEPTEMBER)).json())["dining"]
+
+        assert dining["allocated"] == "60.00", "September started from August's"
+        assert dining["is_user_set"] is True
+
+    async def test_a_month_already_made_keeps_its_own(self, api_client, db_session):
+        _, _, ids = await a_ready_household(api_client, db_session, "+14165577202")
+        await api_client.get(SEPTEMBER)
+        await api_client.put(
+            f"{AUGUST}/lines/{ids['dining']}", json={"amount": "60.00"}
+        )
+
+        lines = by_slug((await api_client.get(SEPTEMBER)).json())
+
+        assert "dining" not in lines, "copied when a month is made, not after"
+
+
+class TestTheSavingsTarget:
+    async def test_none_is_filled_in_until_the_person_sets_one(
+        self, api_client, db_session
+    ):
+        _, _, ids = await a_ready_household(api_client, db_session, "+14165577301")
+        body = (await api_client.get(SEPTEMBER)).json()
+        assert body["savings"] is None
+        assert body["savings_room"] == "4250.00"
+        savings = body["savings_category_id"]
+
+        put = await api_client.put(
+            f"{SEPTEMBER}/lines/{savings}", json={"amount": "800.00"}
+        )
+
+        assert put.status_code == 200, put.text
+        target = put.json()["savings"]
+        assert target["allocated"] == "800.00"
+        assert target["is_user_set"] is True
+        assert target["suggested"] == "4250.00", "the room, for the editor to show"
+        assert put.json()["savings_due"] == "800.00", "nothing moved to savings yet"
+        assert Decimal(put.json()["projected_left"]) == Decimal(
+            body["projected_left"]
+        ) - Decimal("800.00")
+
+    async def test_removing_the_target_leaves_no_line(self, api_client, db_session):
+        await a_ready_household(api_client, db_session, "+14165577302")
+        savings = (await api_client.get(SEPTEMBER)).json()["savings_category_id"]
+        await api_client.put(f"{SEPTEMBER}/lines/{savings}", json={"amount": "800.00"})
+
+        response = await api_client.delete(f"{SEPTEMBER}/lines/{savings}/override")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["savings"] is None
+
+    async def test_left_is_income_less_spending_less_savings(
+        self, api_client, db_session
+    ):
+        household, account, _ = await a_ready_household(
+            api_client, db_session, "+14165577303"
+        )
+        savings = await a_system_category_id(db_session, "savings")
+        db_session.add(
+            tx(
+                household,
+                account,
+                minor=20_000,
+                month=9,
+                day=10,
+                category_id=savings,
+                description="TO SAVINGS",
+            )
+        )
+        await db_session.commit()
+
+        body = (await api_client.get(SEPTEMBER)).json()
+
+        assert body["month_saved"] == "200.00"
+        assert Decimal(body["month_left"]) == Decimal(body["month_net"]) - Decimal(
+            "200.00"
         )

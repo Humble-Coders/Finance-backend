@@ -226,13 +226,9 @@ async def build(
     view = await budget_for(
         session, household_id, currency, month, today, ready=learning.ready
     )
-    # With a shortfall there is nothing left over to split, whatever a stale
-    # Savings line still holds.
-    leftover = (
-        view.savings.allocated
-        if learning.ready and view.savings and view.shortfall is None
-        else 0
-    )
+    # What expected income leaves after every line but savings — the room a
+    # savings target would come out of. With a shortfall nothing is left.
+    leftover = view.savings_room if learning.ready and view.shortfall is None else 0
 
     row = await preference_row(session, household_id)
     hint = await suggested(session, household_id, currency, today)

@@ -193,7 +193,12 @@ def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
         income_expected=maybe(view.income_expected),
         commitments_due=maybe(view.commitments_due),
         budget_rest=maybe(view.budget_rest),
+        savings_due=maybe(view.savings_due),
         projected_left=maybe(view.projected_left),
+        month_saved=money(view.month_saved),
+        month_left=money(view.month_income - view.month_spending - view.month_saved),
+        savings_room=money(view.savings_room),
+        savings_category_id=view.savings_category_id,
     )
 
 

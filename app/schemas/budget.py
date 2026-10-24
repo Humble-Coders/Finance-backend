@@ -116,8 +116,19 @@ class BudgetOut(BaseModel):
     commitments_due: str | None = None
     # What the lines have left beyond the commitments still due in them.
     budget_rest: str | None = None
-    # month_net + income_expected - commitments_due - budget_rest.
+    # The savings target not yet moved to savings.
+    savings_due: str | None = None
+    # month_left + income_expected - commitments_due - budget_rest - savings_due:
+    # what will be free for goals or more savings.
     projected_left: str | None = None
+    # Money moved to savings this month, less any taken back out.
+    month_saved: str = "0.00"
+    # month_net - month_saved: income less spending less savings.
+    month_left: str = "0.00"
+    # Expected income less every line but savings: the room for a target.
+    savings_room: str = "0.00"
+    # The category a savings target is set on (`PUT .../lines/{id}`).
+    savings_category_id: uuid.UUID | None = None
 
 
 class BudgetLineIn(BaseModel):

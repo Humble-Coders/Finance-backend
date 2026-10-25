@@ -13,11 +13,16 @@ from datetime import UTC, date, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api import ai_budget as ai_budget_api
 from app.api.deps import current_identity
+from app.config import get_settings
 from app.core.money import MoneyError, from_minor_units, to_minor_units
 from app.db import get_session
 from app.models.enums import PlanStrategy
 from app.schemas.plan import (
+    DiagnosticIn,
+    DiagnosticOut,
+    DiagnosticsOut,
     GoalShareOut,
     PlanDebtOut,
     PlanOut,
@@ -27,7 +32,9 @@ from app.schemas.plan import (
     SuggestedOut,
     TotalsOut,
 )
+from app.services import goals as goal_service
 from app.services import plan as math
+from app.services import plan_diagnostics as diagnostics
 from app.services import plan_view as service
 from app.services.capabilities import currency_for, require_feature
 from app.services.conflicts import log_conflict
@@ -35,6 +42,8 @@ from app.services.dashboard import parse_month
 from app.services.financial_setup import SetupValidationError, rate_bps, rate_percent
 from app.services.goals import GOAL_LIMIT, GoalLimitReached
 from app.services.identity import ResolvedIdentity
+from app.services.learning import learning_state
+from app.services.llm import LlmError, build_client
 
 FEATURE = "debt_plan"
 GOAL_LIMIT_REACHED = "goal_limit_reached"
@@ -283,3 +292,155 @@ async def read_plan(
             ),
         ),
     )
+
+
+# --- Diagnostics ---------------------------------------------------------------
+
+
+async def _savings_defaults(
+    session: AsyncSession, household_id: uuid.UUID, currency: str, today: date
+) -> tuple[int, int]:
+    """(target, saved): what the person last ran with, else the Emergency
+    fund goal's, else the plan's suggested buffer and nothing saved."""
+    remembered = await diagnostics.remembered(session, household_id)
+    if remembered:
+        return remembered.get("savings_target", 0), remembered.get("savings_now", 0)
+    row = await service.preference_row(session, household_id)
+    goal = None
+    if row is not None and row.buffer_goal_id is not None:
+        goal = await goal_service.owned(session, household_id, row.buffer_goal_id)
+    if goal is None:
+        goal = await service._emergency_goal(session, household_id)
+    if goal is not None and goal.currency == currency:
+        return goal.target_minor_units, goal.saved_minor_units
+    hint = await service.suggested(session, household_id, currency, today)
+    return hint.buffer or 0, 0
+
+
+def _diagnostic_out(row, stored: bool, disclaimer: str | None) -> DiagnosticOut:
+    figures, advice = row.figures, row.advice
+    return DiagnosticOut(
+        kind=row.kind,
+        made_at=row.created_at.isoformat(),
+        stored=stored,
+        currency=row.currency,
+        **{k: v for k, v in figures.items() if k in DiagnosticOut.model_fields},
+        **{k: v for k, v in advice.items() if k in DiagnosticOut.model_fields},
+        disclaimer=disclaimer if row.kind == diagnostics.INVEST else None,
+    )
+
+
+async def _disclaimer(session: AsyncSession, household) -> str | None:
+    found = await goal_service.regional_disclaimer(session, household)
+    return found.body if found else None
+
+
+@router.get("/diagnostics", response_model=DiagnosticsOut)
+async def read_diagnostics(
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> DiagnosticsOut:
+    """The last run of each diagnostic, and what the form starts with."""
+    household = identity.household
+    today = _today()
+    currency = await currency_for(session, household)
+    target, saved = await _savings_defaults(session, household.id, currency, today)
+    disclaimer = await _disclaimer(session, household)
+    out = {}
+    left = {}
+    for kind in diagnostics.KINDS:
+        row = await diagnostics.latest(session, household.id, kind)
+        out[kind] = _diagnostic_out(row, True, disclaimer) if row else None
+        used = await diagnostics.runs_this_month(
+            session, household.id, kind, today.replace(day=1)
+        )
+        left[kind] = max(diagnostics.MAX_RUNS_A_MONTH - used, 0)
+    return DiagnosticsOut(
+        allocation=out[diagnostics.ALLOCATION],
+        invest=out[diagnostics.INVEST],
+        savings_target=from_minor_units(target, currency),
+        savings_now=from_minor_units(saved, currency),
+        runs_left=left,
+    )
+
+
+def _savings_amount(raw: str | None, currency: str, field: str) -> int | None:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        amount = to_minor_units(raw, currency)
+    except MoneyError as error:
+        raise _unprocessable("invalid_amount", field, str(error)) from error
+    if amount < 0:
+        raise _unprocessable("invalid_amount", field, "Savings cannot be negative.")
+    return amount
+
+
+@router.post("/diagnostics/{kind}", response_model=DiagnosticOut)
+async def run_diagnostic(
+    kind: str,
+    body: DiagnosticIn,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> DiagnosticOut:
+    """Run a diagnostic on the person's figures. The same figures as last time
+    return the stored run; otherwise a fresh one, up to four a month."""
+    if kind not in diagnostics.KINDS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail={"code": "not_found"}
+        )
+    household = identity.household
+    today = _today()
+    currency = await currency_for(session, household)
+    learning = await learning_state(session, household.id, currency, today)
+    if not learning.ready:
+        log_conflict(
+            "still_learning", "diagnostic_before_ready", household_id=str(household.id)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "still_learning",
+                "message": "Diagnostics need a full month of your spending first.",
+            },
+        )
+    target_default, saved_default = await _savings_defaults(
+        session, household.id, currency, today
+    )
+    target = _savings_amount(body.savings_target, currency, "savings_target")
+    saved = _savings_amount(body.savings_now, currency, "savings_now")
+    target = target_default if target is None else target
+    saved = saved_default if saved is None else saved
+
+    await ai_budget_api._may_ask(session, identity.user)
+    settings = get_settings()
+    advice_settings = (
+        settings.model_copy(update={"llm_model": settings.llm_advice_model})
+        if settings.llm_advice_model
+        else settings
+    )
+    try:
+        row, stored = await diagnostics.run(
+            session,
+            lambda: build_client(advice_settings),
+            household,
+            currency,
+            today,
+            kind,
+            target,
+            saved,
+        )
+    except diagnostics.LimitReached as error:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "diagnostic_limit_reached",
+                "message": (
+                    "That's all the fresh runs this month. The last answer stays."
+                ),
+            },
+        ) from error
+    except LlmError as error:
+        raise ai_budget_api._unavailable() from error
+    await session.commit()
+    return _diagnostic_out(row, stored, await _disclaimer(session, household))

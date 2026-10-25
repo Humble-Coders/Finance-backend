@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     # this; a deployment that forgot to would have failed every import.
     llm_model: str = "gemini-2.5-flash"
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    # The model for advice — Your plan's diagnostics — when it should differ
+    # from the everyday one (a stronger model where quality matters most;
+    # same provider and key). Empty uses `llm_model`.
+    llm_advice_model: str = ""
 
     # Tokens a thinking model may spend reasoning per call, reserved on top of
     # the answer's own allowance so a long think cannot crowd the answer out.

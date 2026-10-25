@@ -103,3 +103,81 @@ class PlanOut(BaseModel):
     split: SplitOut
     debts: list[PlanDebtOut]
     totals: TotalsOut
+
+
+class DiagnosticIn(BaseModel):
+    """The person's own savings figures, as decimal strings. Left out, the
+    ones they ran with last are used (else the plan's own buffer)."""
+
+    savings_target: str | None = None
+    savings_now: str | None = None
+
+
+class DiagnosticGoalOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    amount: str
+
+
+class DiagnosticStepOut(BaseModel):
+    # savings, goals, debt or invest
+    to: str
+    why: str
+
+
+class DiagnosticOut(BaseModel):
+    """One diagnostic run: the server's figures, and the AI's words about them.
+
+    Figures are the server's (decimal strings); the words carry no figures.
+    `stored` is true when nothing had changed and the last run was returned.
+    """
+
+    kind: str
+    made_at: str
+    stored: bool
+    currency: str
+    # Both kinds.
+    leftover: str
+    savings_target: str
+    savings_now: str
+    savings_gap: str
+    to_savings: str
+    to_goals: str
+    to_debt: str
+    to_invest: str
+    rate_line_percent: str | None = None
+    assumed_return_percent: str | None = None
+    # allocation
+    goals: list[DiagnosticGoalOut] = []
+    debt_first: str | None = None
+    debt_first_rate_percent: str | None = None
+    interest_saved: str | None = None
+    debt_free: str | None = None
+    debt_free_minimums: str | None = None
+    per_100: str | None = None
+    debt_per_100: str | None = None
+    invest_per_100: str | None = None
+    # invest
+    buffer_full: bool | None = None
+    expensive_debts: list[str] = []
+    goals_covered: bool | None = None
+    existing_investments: str | None = None
+    disclaimer: str | None = None
+    # The AI's words.
+    headline: str | None = None
+    steps: list[DiagnosticStepOut] = []
+    note: str | None = None
+    why: str | None = None
+    where: str | None = None
+    next: str | None = None
+
+
+class DiagnosticsOut(BaseModel):
+    """The last run of each, the savings figures to start the form with, and
+    how many fresh runs are left this month."""
+
+    allocation: DiagnosticOut | None = None
+    invest: DiagnosticOut | None = None
+    savings_target: str
+    savings_now: str
+    runs_left: dict[str, int]

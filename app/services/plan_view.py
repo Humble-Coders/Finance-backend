@@ -9,7 +9,7 @@ its own.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 
 from sqlalchemy import select
@@ -71,6 +71,8 @@ class PlanView:
     schedule: plan.Schedule
     minimums_only: plan.Schedule
     other_strategy: plan.Schedule
+    # What each goal asks of this month, by priority (the buffer's left out).
+    asks: tuple[plan.GoalAsk, ...] = ()
 
 
 async def preference_row(
@@ -217,10 +219,16 @@ async def build(
     currency: str,
     month: date,
     today: date,
+    *,
+    buffer: tuple[int, int] | None = None,
 ) -> PlanView:
     """[month]'s plan. While the household is still learning there is no
     budget yet, so nothing is left over to split: the schedule shows the
-    debts at their minimums."""
+    debts at their minimums.
+
+    [buffer] — (target, saved) — puts the person's own savings figures in
+    place of the buffer's, for a diagnostic: the same split, their numbers.
+    """
     month = month.replace(day=1)
     learning = await learning_state(session, household_id, currency, today)
     view = await budget_for(
@@ -255,6 +263,11 @@ async def build(
             goal_share_bps=hint.goal_share_bps,
             rate_line_bps=hint.rate_line_bps,
             strategy=hint.strategy.value,
+        )
+
+    if buffer is not None:
+        preferences = replace(
+            preferences, buffer_target=buffer[0] or None, buffer_saved=buffer[1]
         )
 
     goals = [
@@ -310,4 +323,5 @@ async def build(
         schedule=plan.schedule(terms, divided.extra_debt, month, line, strategy),
         minimums_only=plan.schedule(terms, 0, month, line, strategy, rollover=False),
         other_strategy=plan.schedule(terms, divided.extra_debt, month, line, other),
+        asks=tuple(asks),
     )

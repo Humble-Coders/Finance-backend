@@ -21,7 +21,12 @@ from app.models.base import (
     money_currency,
 )
 
-__all__ = ["AiBudgetSuggestion", "HealthScoreSnapshot", "ChatConversation"]
+__all__ = [
+    "AiBudgetSuggestion",
+    "ChatConversation",
+    "HealthScoreSnapshot",
+    "PlanDiagnostic",
+]
 
 
 class HealthScoreSnapshot(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
@@ -96,3 +101,33 @@ class AiBudgetSuggestion(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     advice: Mapped[str | None] = mapped_column(Text, nullable=True)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class PlanDiagnostic(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
+    """One run of a Your-plan diagnostic: the figures the server worked out,
+    and what the AI said about them.
+
+    `kind` is `allocation` (pay debt, fund goals, or keep in savings?) or
+    `invest` (should I invest, and how much?). `fingerprint` hashes the
+    figures the AI was given: the same figures again return this run instead
+    of asking again, and a month allows `MAX_RUNS_A_MONTH` fresh runs.
+    `figures` holds minor units in `currency`; `advice` holds words only.
+    """
+
+    __tablename__ = "plan_diagnostic"
+    __table_args__ = (
+        Index(
+            "ix_plan_diagnostic_household_kind_month", "household_id", "kind", "month"
+        ),
+        currency_check(),
+    )
+
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    month: Mapped[date] = mapped_column(Date, nullable=False)
+    currency: Mapped[str] = money_currency()
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    # What the person typed: {"savings_target": int, "savings_now": int}.
+    inputs: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    figures: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    advice: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)

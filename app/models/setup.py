@@ -18,7 +18,16 @@ holds exactly what the wizard asks and is what the payoff optimizer reads.
 
 from __future__ import annotations
 
-from sqlalchemy import CheckConstraint, Integer, SmallInteger, String, UniqueConstraint
+import uuid
+
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    Integer,
+    SmallInteger,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -85,6 +94,14 @@ class Obligation(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     # said", never a guess — "Due 5 Oct" printed from a default is invented.
     # A 31 in a 30-day month means the month's last day.
     due_day: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+
+    # The budget line it belongs to — a shared spending category, so Rent
+    # sits in `rent` and the budget never allocates less than it. Null for a
+    # commitment saved before it was asked; `app/services/commitments.py`
+    # then falls back on the preset names.
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("category.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 class Investment(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):

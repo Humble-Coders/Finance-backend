@@ -66,6 +66,8 @@ class CommitmentOut(BaseModel):
     match: MatchOut | None = None
     # Day of the month it falls due, when the user said; null otherwise.
     due_day: int | None = None
+    # The spending category it belongs to (`rent`), or null when it has none.
+    category: str | None = None
 
 
 class MonthPointOut(BaseModel):

@@ -262,12 +262,13 @@ class TestTheBudgetComparison:
         )  # no date: $100
 
         body = (await api_client.get("/goals")).json()
-        savings = (await api_client.get("/budgets/2026-09")).json()["savings"]
+        # No target set: the goals are set against the room for one.
+        room = (await api_client.get("/budgets/2026-09")).json()["savings_room"]
 
         assert body["budget_reason"] is None
         assert body["budget"] == {
             "need": "433.34",
-            "set_aside": savings["allocated"],
+            "set_aside": room,
             "shortfall": None,
         }
 

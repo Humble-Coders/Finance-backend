@@ -112,7 +112,9 @@ class TestTheBudget:
         ], "same lines, same order"
         assert budget["lines"][0]["over"] == "50.01", "$150.01 against $100"
         for key in ("savings", "debt"):
-            assert budget[key]["allocated"] == served[key]["allocated"]
+            assert (budget[key] or {}).get("allocated") == (served[key] or {}).get(
+                "allocated"
+            )
         assert budget["total_allocated"] == served["total_allocated"]
         assert budget["total_spent"] == served["total_spent"]
         assert budget["debt"]["over"] == "0.00"

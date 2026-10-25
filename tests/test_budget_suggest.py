@@ -57,6 +57,37 @@ class TestTheMedian:
         assert median([]) == Decimal(0)
 
 
+class TestCommitmentsHoldALineUp:
+    """A category's line is at least the setup commitments in it."""
+
+    def test_a_commitment_above_the_median_wins(self):
+        suggestion = suggest(
+            {GROCERIES: [10_000] * 3}, 0, 0, "CAD", {GROCERIES.id: 15_000}
+        )
+        assert suggestion.spending == {GROCERIES.id: 15_000}
+
+    def test_a_median_above_the_commitment_wins(self):
+        suggestion = suggest(
+            {GROCERIES: [20_000] * 3}, 0, 0, "CAD", {GROCERIES.id: 15_000}
+        )
+        assert suggestion.spending == {GROCERIES.id: 20_000}
+
+    def test_a_commitment_with_no_history_still_gets_its_line(self):
+        rent = ref("rent")
+        suggestion = suggest({}, 500_000, 0, "CAD", {rent.id: 180_000})
+        assert suggestion.spending == {rent.id: 180_000}
+        assert suggestion.savings == 320_000
+
+    def test_a_commitment_rounds_up_like_any_line(self):
+        streaming = ref("subscriptions")
+        suggestion = suggest({}, 0, 0, "CAD", {streaming.id: 1_649})
+        assert suggestion.spending == {streaming.id: 1_700}
+
+    def test_a_one_off_in_a_committed_category_keeps_the_commitment(self):
+        suggestion = suggest({DINING: [0, 0, 90_000]}, 0, 0, "CAD", {DINING.id: 5_000})
+        assert suggestion.spending == {DINING.id: 5_000}
+
+
 class TestRounding:
     def test_an_exact_unit_is_left_alone(self):
         assert lines({GROCERIES: [12_000]}).spending[GROCERIES.id] == 12_000

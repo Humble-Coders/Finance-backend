@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 
 from app.api import (
     accounts,
+    ai_budget,
     budgets,
     capabilities,
     categories,
@@ -44,6 +45,8 @@ app.add_exception_handler(RequestValidationError, errors.validation_error)
 app.include_router(health.router)
 app.include_router(health_score.router)
 app.include_router(accounts.router)
+# Before `budgets`: its `/{month}` must not shadow `/ai/...`.
+app.include_router(ai_budget.router)
 app.include_router(budgets.router)
 app.include_router(capabilities.router)
 app.include_router(dashboard.router)

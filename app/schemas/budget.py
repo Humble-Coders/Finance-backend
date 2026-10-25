@@ -12,7 +12,7 @@ import uuid
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class LearningNeedsOut(BaseModel):
@@ -38,12 +38,52 @@ class BudgetLineOut(BaseModel):
     is_user_set: bool
     # This month's countable debits in the category, by the dashboard's rule.
     spent: str
+    # The AI's suggestion for the line this month, checked by the server, and
+    # why. Null without one. Advisory: nothing changes until the person uses it.
+    ai_suggested: str | None = None
+    ai_reason: str | None = None
 
 
 class UnbudgetedOut(BaseModel):
     category_id: uuid.UUID
     slug: str
     name: str
+    spent: str
+    ai_suggested: str | None = None
+    ai_reason: str | None = None
+
+
+class AiLineOut(BaseModel):
+    """An AI suggestion for a category with no line and no spending yet."""
+
+    category_id: uuid.UUID
+    slug: str
+    name: str
+    amount: str
+    reason: str | None = None
+
+
+class BudgetCommitmentOut(BaseModel):
+    """One setup commitment and whether its payment was seen this month.
+
+    `paid_on` null is **not seen**, not unpaid — as on Home, which matches
+    payments by the same rule. Clients must word it that way.
+    """
+
+    name: str
+    expected: str
+    due_day: int | None = None
+    # The category slug it belongs to; null when it has none.
+    category: str | None = None
+    paid_on: date | None = None
+    paid_amount: str | None = None
+
+
+class CategorySpendOut(BaseModel):
+    # Null for the one entry gathering every uncategorised row.
+    category_id: uuid.UUID | None = None
+    slug: str | None = None
+    name: str | None = None
     spent: str
 
 
@@ -79,6 +119,88 @@ class BudgetOut(BaseModel):
     month_income: str = "0.00"
     month_spending: str = "0.00"
     month_net: str = "0.00"
+    commitments: list[BudgetCommitmentOut] = []
+    # True once the month is over: nothing more is to come, and the four
+    # figures below are null.
+    month_ended: bool = False
+    # Where the month's money went, by category, largest first; sums to
+    # `month_spending`. Transfers and savings are not in it.
+    spending_by_category: list[CategorySpendOut] = []
+    # Setup's monthly income not yet seen this month (never below zero).
+    income_expected: str | None = None
+    # Commitments not seen paid yet.
+    commitments_due: str | None = None
+    # What the lines have left beyond the commitments still due in them.
+    budget_rest: str | None = None
+    # The savings target not yet moved to savings.
+    savings_due: str | None = None
+    # month_left + income_expected - commitments_due - budget_rest - savings_due:
+    # what will be free for goals or more savings.
+    projected_left: str | None = None
+    # Money moved to savings this month, less any taken back out.
+    month_saved: str = "0.00"
+    # month_net - month_saved: income less spending less savings.
+    month_left: str = "0.00"
+    # Expected income less every line but savings: the room for a target.
+    savings_room: str = "0.00"
+    # The category a savings target is set on (`PUT .../lines/{id}`).
+    savings_category_id: uuid.UUID | None = None
+    # The month's AI suggestions: "review" (monthly) or "setup" (the first
+    # budget), else null. The lines carry theirs; these are the rest.
+    ai_kind: str | None = None
+    ai_extra: list[AiLineOut] = []
+    ai_savings: str | None = None
+    # A few sentences, never a figure: what went over, what was saved, and
+    # where the money left over is best put next.
+    ai_advice: str | None = None
+    # The app may ask for this month's review (`POST .../ai/review`).
+    ai_review_due: bool = False
+
+
+class AiProposalLineOut(BaseModel):
+    category_id: uuid.UUID
+    slug: str
+    name: str
+    # need, want, or debt (the minimum payments, set by the budget's own rule).
+    kind: str
+    amount: str
+    # What the person's commitments in the category already hold.
+    committed: str
+    reason: str | None = None
+
+
+class AiProposalOut(BaseModel):
+    """The first budget the AI suggests, every figure checked by the server.
+
+    The lines, the Debt line and savings add up to `income` exactly.
+    """
+
+    month: date
+    currency: str
+    income: str
+    lines: list[AiProposalLineOut]
+    savings: str
+    needs: str
+    wants: str
+    # Shares of income, whole percentages, for the 50/30/20 picture.
+    needs_percent: int
+    wants_percent: int
+    savings_percent: int
+    note: str | None = None
+    attempts_left: int
+
+
+class AiAcceptLineIn(BaseModel):
+    category_id: uuid.UUID
+    amount: str
+
+
+class AiAcceptIn(BaseModel):
+    """The budget the person starts with: the AI's lines as they edited them."""
+
+    lines: list[AiAcceptLineIn] = Field(default_factory=list, max_length=40)
+    # The savings target; null or absent sets none.
+    savings: str | None = None
 
 
 class BudgetLineIn(BaseModel):

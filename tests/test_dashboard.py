@@ -265,6 +265,7 @@ class TestTheCommitmentChecklist:
         assert rent["expected"] == "1800.00"
         assert rent["match"]["occurred_on"] == "2026-08-02"
         assert rent["match"]["amount"] == "1800.00"
+        assert rent["category"] == "rent", "the preset's, as none was sent"
 
     async def test_a_commitment_with_no_payment_reports_nothing_seen(
         self, api_client, db_session

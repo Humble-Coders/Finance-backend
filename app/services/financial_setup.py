@@ -43,6 +43,7 @@ from app.schemas.financial_setup import (
     InvestmentOut,
     ObligationOut,
 )
+from app.services import commitments
 from app.services.capabilities import currency_for
 
 __all__ = [
@@ -168,6 +169,10 @@ async def _payload(
         .all()
     )
 
+    slug_by_id = {
+        id_: slug
+        for slug, id_ in (await commitments.shared_categories(session)).items()
+    }
     stored_currency = profile.currency if profile else currency
     income_units = profile.monthly_income_minor_units if profile else None
     expense_units = profile.monthly_expense_minor_units if profile else None
@@ -210,6 +215,7 @@ async def _payload(
                     o.monthly_amount_minor_units, o.currency
                 ),
                 due_day=o.due_day,
+                category=commitments.slug_for(o, slug_by_id),
             )
             for o in obligations
         ],
@@ -324,9 +330,11 @@ async def save_setup(
         )
         for i, v in enumerate(body.investments)
     ]
+    shared = await commitments.shared_categories(session)
     obligations = [
         Obligation(
             household_id=household.id,
+            category_id=shared.get(o.category) if o.category else None,
             name=o.name,
             monthly_amount_minor_units=_amount(
                 o.monthly_amount, currency, f"obligations.{i}.monthly_amount"

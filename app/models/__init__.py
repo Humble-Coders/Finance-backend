@@ -5,7 +5,7 @@ autogenerate sees nothing that has not been imported.
 """
 
 from app.models.categorization import Category, CategoryCorrection
-from app.models.derived import ChatConversation, HealthScoreSnapshot
+from app.models.derived import AiBudgetSuggestion, ChatConversation, HealthScoreSnapshot
 from app.models.enums import (
     AccountKind,
     AuthProvider,
@@ -65,6 +65,7 @@ __all__ = [
     "Obligation",
     "Investment",
     "HealthScoreSnapshot",
+    "AiBudgetSuggestion",
     "ChatConversation",
     "SubscriptionEntitlement",
     "CountryPack",

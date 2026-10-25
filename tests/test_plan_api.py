@@ -210,7 +210,8 @@ class TestThePlan:
         budget = (await api_client.get("/budgets/2026-09")).json()
 
         assert plan["status"] == "ready"
-        assert plan["leftover"] == (budget["savings"] or {}).get("allocated", "0.00")
+        # What income leaves after every line but savings.
+        assert plan["leftover"] == budget["savings_room"]
         split = plan["split"]
         parts = cents(split["buffer"]) + sum(cents(g["amount"]) for g in split["goals"])
         parts += cents(split["extra_debt"]) + cents(split["save_or_invest"])

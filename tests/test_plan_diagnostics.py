@@ -192,6 +192,7 @@ class TestTheGates:
         body = (await api_client.get("/plan/diagnostics")).json()
 
         assert body["allocation"] is None and body["invest"] is None
+        assert body["currency"] == "CAD"
         assert money(body["savings_target"]) > 0, "the plan's suggested buffer"
         assert body["savings_now"] == "0.00"
         assert body["runs_left"] == {"allocation": 4, "invest": 4}

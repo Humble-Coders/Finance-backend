@@ -178,6 +178,7 @@ class DiagnosticsOut(BaseModel):
 
     allocation: DiagnosticOut | None = None
     invest: DiagnosticOut | None = None
+    currency: str
     savings_target: str
     savings_now: str
     runs_left: dict[str, int]

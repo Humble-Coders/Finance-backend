@@ -358,6 +358,7 @@ async def read_diagnostics(
     return DiagnosticsOut(
         allocation=out[diagnostics.ALLOCATION],
         invest=out[diagnostics.INVEST],
+        currency=currency,
         savings_target=from_minor_units(target, currency),
         savings_now=from_minor_units(saved, currency),
         runs_left=left,

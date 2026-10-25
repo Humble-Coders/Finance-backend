@@ -18,6 +18,7 @@ from app.core.money import MoneyError, from_minor_units, to_minor_units
 from app.db import get_session
 from app.models.categorization import Category
 from app.schemas.budget import (
+    AiLineOut,
     BudgetCommitmentOut,
     BudgetLineIn,
     BudgetLineOut,
@@ -132,6 +133,8 @@ def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
             allocated=money(item.allocated),
             is_user_set=item.is_user_set,
             spent=money(item.spent),
+            ai_suggested=maybe(item.ai_suggested),
+            ai_reason=item.ai_reason,
         )
 
     return BudgetOut(
@@ -161,6 +164,8 @@ def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
                 slug=u.slug,
                 name=u.name,
                 spent=money(u.spent),
+                ai_suggested=maybe(u.ai_suggested),
+                ai_reason=u.ai_reason,
             )
             for u in view.unbudgeted
         ],
@@ -199,6 +204,20 @@ def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
         month_left=money(view.month_income - view.month_spending - view.month_saved),
         savings_room=money(view.savings_room),
         savings_category_id=view.savings_category_id,
+        ai_kind=view.ai_kind,
+        ai_extra=[
+            AiLineOut(
+                category_id=a.category_id,
+                slug=a.slug,
+                name=a.name,
+                amount=money(a.amount),
+                reason=a.reason,
+            )
+            for a in view.ai_extra
+        ],
+        ai_savings=maybe(view.ai_savings),
+        ai_advice=view.ai_advice,
+        ai_review_due=view.ai_review_due,
     )
 
 

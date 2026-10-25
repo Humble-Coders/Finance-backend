@@ -62,7 +62,7 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 
@@ -73,6 +73,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.money import round_up_to_whole_unit
 from app.models.categorization import Category
+from app.models.derived import AiBudgetSuggestion
 from app.models.enums import AccountKind, TransactionDirection
 from app.models.money import Account, Transaction
 from app.models.planning import Budget, BudgetLine, Debt
@@ -214,6 +215,10 @@ class LineView:
     allocated: int
     is_user_set: bool
     spent: int
+    # What the AI suggests for the line this month, checked by the server
+    # (`app/services/ai_budget.py`), and why; None without a suggestion.
+    ai_suggested: int | None = None
+    ai_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +229,19 @@ class UnbudgetedView:
     slug: str
     name: str
     spent: int
+    ai_suggested: int | None = None
+    ai_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class AiLineView:
+    """An AI suggestion for a category with no line and no spending yet."""
+
+    category_id: uuid.UUID
+    slug: str
+    name: str
+    amount: int
+    reason: str | None
 
 
 @dataclass(frozen=True)
@@ -269,6 +287,14 @@ class BudgetView:
     # Expected income less every line but savings: the room for a target.
     savings_room: int = 0
     savings_category_id: uuid.UUID | None = None
+    # The AI's suggestions for the month (the review, else the setup one).
+    ai_kind: str | None = None
+    ai_extra: list[AiLineView] = field(default_factory=list)
+    ai_savings: int | None = None
+    ai_advice: str | None = None
+    # True while the month runs, the household is ready, and no review has
+    # been made for it yet: the app may ask for one.
+    ai_review_due: bool = False
 
 
 class NotBudgetable(Exception):
@@ -453,6 +479,68 @@ async def _prepared(
     if ready and (last >= today or not budget.has_history):
         await _regenerate(session, budget, household_id, currency, month)
     return budget
+
+
+async def _ai_suggestion(
+    session: AsyncSession, household_id: uuid.UUID, month: date
+) -> AiBudgetSuggestion | None:
+    """The month's AI suggestion: its review if there is one, else setup's."""
+    rows = (
+        await session.scalars(
+            select(AiBudgetSuggestion).where(
+                AiBudgetSuggestion.household_id == household_id,
+                AiBudgetSuggestion.month == month,
+            )
+        )
+    ).all()
+    by_kind = {row.kind: row for row in rows}
+    return by_kind.get("review") or by_kind.get("setup")
+
+
+async def apply_lines(
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    currency: str,
+    month: date,
+    today: date,
+    items: Sequence[tuple[Category, int]],
+    savings: int | None,
+    *,
+    ready: bool,
+) -> BudgetView:
+    """Set several lines by hand at once — the budget the person started
+    from the AI's suggestion. Each becomes a hand-set line, so it carries into
+    the months after; a zero removes a hand-set line."""
+    budget = await _prepared(session, household_id, currency, month, today, ready)
+    system = await _system_ids(session)
+    wanted = list(items)
+    if savings is not None:
+        savings_category = await session.get(Category, system[SAVINGS_SLUG])
+        wanted.append((savings_category, savings))
+    for category, amount in wanted:
+        if category.slug in NOT_BUDGETABLE:
+            raise NotBudgetable(category.slug)
+        key = _line_key(category.id, category.slug, system)
+        line = _find(budget, key)
+        if amount <= 0:
+            if line is not None and line.is_user_set:
+                budget.lines.remove(line)
+            continue
+        if line is None:
+            budget.lines.append(
+                BudgetLine(
+                    category_id=key,
+                    allocated_minor_units=amount,
+                    suggested_minor_units=0,
+                    currency=currency,
+                    is_user_set=True,
+                )
+            )
+        else:
+            line.allocated_minor_units = amount
+            line.is_user_set = True
+    await _settle(session, budget, household_id, currency, system, ready)
+    return await _view(session, budget, household_id, currency, month, today, ready)
 
 
 async def _carried(
@@ -854,6 +942,17 @@ async def _view(
                 spent=spent.get(key, 0),
             )
         )
+    suggestion = await _ai_suggestion(session, household_id, first)
+    ai = {
+        uuid.UUID(row["category_id"]): (row["amount_minor_units"], row.get("reason"))
+        for row in (suggestion.lines if suggestion else [])
+    }
+    views = [
+        replace(v, ai_suggested=ai[v.category_id][0], ai_reason=ai[v.category_id][1])
+        if v.category_id in ai
+        else v
+        for v in views
+    ]
     savings = next((v for v in views if v.category_id == system[SAVINGS_SLUG]), None)
     debt = next((v for v in views if v.category_id == system[DEBT_PAYMENT_SLUG]), None)
     lines = sorted(
@@ -883,7 +982,7 @@ async def _view(
         if loose
         else {}
     )
-    unbudgeted = sorted(
+    unbudgeted_ai = sorted(
         (
             UnbudgetedView(
                 category_id=key,
@@ -898,7 +997,32 @@ async def _view(
         ),
         key=lambda u: (-u.spent, u.name),
     )
+    unbudgeted = [
+        replace(u, ai_suggested=ai[u.category_id][0], ai_reason=ai[u.category_id][1])
+        if u.category_id in ai
+        else u
+        for u in unbudgeted_ai
+    ]
     unbudgeted_spent = sum(u.spent for u in unbudgeted)
+    shown = {v.category_id for v in views} | {u.category_id for u in unbudgeted}
+    extra_ids = [
+        key for key in ai if key not in shown and key != system[DEBT_PAYMENT_SLUG]
+    ]
+    extra_names = (
+        {
+            c.id: c
+            for c in await session.scalars(
+                select(Category).where(Category.id.in_(extra_ids))
+            )
+        }
+        if extra_ids
+        else {}
+    )
+    ai_extra = [
+        AiLineView(key, extra_names[key].slug, extra_names[key].name, *ai[key])
+        for key in extra_ids
+        if key in extra_names
+    ]
     figures = (await figures_by_month(session, household_id, currency, [first])).get(
         first
     )
@@ -954,4 +1078,11 @@ async def _view(
         month_saved=saved,
         savings_room=max(income - others, 0),
         savings_category_id=system[SAVINGS_SLUG],
+        ai_kind=suggestion.kind if suggestion else None,
+        ai_extra=sorted(ai_extra, key=lambda a: (-a.amount, a.name)),
+        ai_savings=suggestion.savings_minor_units if suggestion else None,
+        ai_advice=suggestion.advice if suggestion else None,
+        ai_review_due=(
+            not ended and ready and (suggestion is None or suggestion.kind != "review")
+        ),
     )

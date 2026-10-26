@@ -303,8 +303,14 @@ Rules:
   commitment must be at least that commitment.
 - Your lines above their commitments must add up to no more than "flexible".
 - Keep wants within the wants share. If savings_short is true, keep wants lean.
-- Use the person's own past spending where it is given; otherwise their
-  estimated monthly expenses and sensible amounts for their income.
+- "usual_monthly_spending" is what the person actually spent in each
+  category: the middle of their last three months. When it is given, start
+  every one of those categories from its usual amount and move away from it
+  only for a reason — to keep wants within their share, to make room for
+  savings, or because the usual amount is clearly more than the category needs —
+  and say so in its reason. Never leave out a category they usually spend in.
+- With no usual spending (a new account), use their estimated monthly
+  expenses and sensible amounts for their income.
 - Leave out categories they are unlikely to spend in.
 - Reasons: one short sentence each, plain words, no amounts, no percentages,
   no digits at all. The note: two sentences at most, no digits.
@@ -368,9 +374,7 @@ def _prompt(inputs: Inputs, env: Envelope) -> str:
         "wants_share": _money(env.wants_cap, c),
         "goals": inputs.goals,
         "debts": inputs.debts,
-        "past_spending_monthly_median": {
-            s: _money(a, c) for s, a in inputs.history.items()
-        },
+        "usual_monthly_spending": {s: _money(a, c) for s, a in inputs.history.items()},
     }
     if inputs.last_month:
         body["last_month"] = inputs.last_month
@@ -388,7 +392,7 @@ def _prompt(inputs: Inputs, env: Envelope) -> str:
 async def _inputs(
     session: AsyncSession, household_id: uuid.UUID, currency: str, today: date
 ) -> Inputs:
-    from app.services.budget import _history, _minimums  # the budget's own rules
+    from app.services.budget import _history, _minimums, median  # its own rules
 
     profile = await session.scalar(
         select(FinancialProfile).where(FinancialProfile.household_id == household_id)
@@ -413,13 +417,21 @@ async def _inputs(
     month = today.replace(day=1)
     window, history = await _history(session, household_id, currency, month)
     minimums = await _minimums(session, household_id, currency, window)
-    medians: dict[str, int] = {}
+    # Each category's usual monthly spending: the median of the window, rounded
+    # up — the automatic budget's own rule (`budget.suggest`). A household's
+    # own category with a shared slug counts toward that slug's months.
+    months_by_slug: dict[str, list[int]] = {}
     for ref, totals in history.items():
         if ref.slug in SPENDING_SLUGS:
-            ordered = sorted(totals)
-            middle = ordered[len(ordered) // 2] if ordered else 0
-            if middle > 0:
-                medians[ref.slug] = medians.get(ref.slug, 0) + middle
+            running = months_by_slug.setdefault(ref.slug, [0] * len(totals))
+            months_by_slug[ref.slug] = [
+                a + b for a, b in zip(running, totals, strict=True)
+            ]
+    medians = {
+        slug: usual
+        for slug, totals in months_by_slug.items()
+        if (usual := round_up_to_whole_unit(median(totals), currency)) > 0
+    }
 
     goals = []
     need = 0
@@ -556,7 +568,20 @@ async def _ids(session: AsyncSession) -> dict[str, uuid.UUID]:
 DEBT_SLUG = "debt_payment"
 
 
-def _rows(result: Checked, env: Envelope, ids: Mapping[str, uuid.UUID]) -> list[dict]:
+def _keep_usual(amounts: dict[str, int], usual: Mapping[str, int]) -> None:
+    """A category the person usually spends in is never dropped: one the
+    model left out is put back at its usual amount, and `checked` still makes
+    it fit."""
+    for slug, amount in usual.items():
+        amounts.setdefault(slug, amount)
+
+
+def _rows(
+    result: Checked,
+    env: Envelope,
+    ids: Mapping[str, uuid.UUID],
+    usual: Mapping[str, int] | None = None,
+) -> list[dict]:
     """The stored lines: spending, then the Debt line (its minimums, which the
     budget's own rule sets — never written from here)."""
     rows = [
@@ -565,6 +590,8 @@ def _rows(result: Checked, env: Envelope, ids: Mapping[str, uuid.UUID]) -> list[
             "slug": line.slug,
             "amount_minor_units": line.amount,
             "committed_minor_units": env.floors.get(line.slug, 0),
+            # What the person usually spends here, when there is history.
+            "usual_minor_units": (usual or {}).get(line.slug),
             "reason": line.reason,
         }
         for line in result.lines
@@ -605,8 +632,9 @@ async def suggest_setup(
     )
     data = await _ask(client, _RULES, _prompt(inputs, env))
     amounts, reasons = _proposed(data, currency)
+    _keep_usual(amounts, inputs.history)
     result = checked(env, amounts, reasons, currency)
-    rows = _rows(result, env, await _ids(session))
+    rows = _rows(result, env, await _ids(session), inputs.history)
     note = figure_free(data.get("note"), ADVICE_MAX_CHARS)
     if row is None:
         row = AiBudgetSuggestion(
@@ -656,13 +684,14 @@ async def review(
     )
     data = await _ask(client, _REVIEW_RULES, _prompt(inputs, env))
     amounts, reasons = _proposed(data, currency)
+    _keep_usual(amounts, inputs.history)
     result = checked(env, amounts, reasons, currency)
     row = AiBudgetSuggestion(
         household_id=household_id,
         month=month,
         kind=REVIEW,
         currency=currency,
-        lines=_rows(result, env, await _ids(session)),
+        lines=_rows(result, env, await _ids(session), inputs.history),
         savings_minor_units=result.savings,
         advice=figure_free(data.get("advice"), ADVICE_MAX_CHARS),
         model=client.model,

@@ -131,6 +131,9 @@ async def _proposal(
                 else ai_budget.kind_of(r["slug"]),
                 amount=money(r["amount_minor_units"]),
                 committed=money(r.get("committed_minor_units", 0)),
+                usual=money(r["usual_minor_units"])
+                if r.get("usual_minor_units") is not None
+                else None,
                 reason=r.get("reason"),
             )
             for r in row.lines

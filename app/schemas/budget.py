@@ -166,6 +166,9 @@ class AiProposalLineOut(BaseModel):
     amount: str
     # What the person's commitments in the category already hold.
     committed: str
+    # What the person usually spends here a month — the median of their last
+    # three months — or null with no history (a new account).
+    usual: str | None = None
     reason: str | None = None
 
 

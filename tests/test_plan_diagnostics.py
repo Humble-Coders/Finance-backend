@@ -196,3 +196,66 @@ class TestTheGates:
         assert money(body["savings_target"]) > 0, "the plan's suggested buffer"
         assert body["savings_now"] == "0.00"
         assert body["runs_left"] == {"allocation": 4, "invest": 4}
+
+
+DEBT_FIRST_ANSWER = ALLOCATION_ANSWER | {
+    "recommend": "debt_first",
+    "recommend_why": "The card costs far more than the trip can wait.",
+}
+
+
+class TestDebtBeforeGoals:
+    async def test_the_other_order_is_worked_out_and_recommended(
+        self, api_client, db_session, monkeypatch
+    ):
+        await ready(api_client, db_session, "+14165579801")
+        created = await api_client.post(
+            "/goals",
+            json={
+                "name": "Trip to Lisbon",
+                "kind": "vacation",
+                "horizon": "short_term",
+                "target": "3000.00",
+                "target_date": "2027-06-30",
+            },
+        )
+        assert created.status_code == 201, created.text
+        model = FakeModel(DEBT_FIRST_ANSWER)
+        use_model(monkeypatch, model)
+
+        body = (
+            await api_client.post(
+                ALLOCATION, json={"savings_target": "1000", "savings_now": "1000"}
+            )
+        ).json()
+
+        assert money(body["to_goals"]) > 0, "the plan gives the goal its share"
+        assert body["alt_available"] is True
+        assert body["goal_share_percent"] == "20.00"
+        assert money(body["alt_to_debt"]) == money(body["to_debt"]) + money(
+            body["to_goals"]
+        ), "in the other order the goal's money goes to the debt"
+        assert body["goals_waiting"] == ["Trip to Lisbon"]
+        assert body["recommend"] == "debt_first"
+        assert (
+            body["recommend_why"] == "The card costs far more than the trip can wait."
+        )
+        sent = json.loads(model.calls[0][1])
+        assert sent["goals_by_priority"][0]["has_a_date"] is True
+        assert "Lisbon" not in model.calls[0][1]
+
+    async def test_with_no_goal_to_wait_there_is_nothing_to_recommend(
+        self, api_client, db_session, monkeypatch
+    ):
+        await ready(api_client, db_session, "+14165579802")
+        use_model(monkeypatch, FakeModel(DEBT_FIRST_ANSWER))
+
+        body = (
+            await api_client.post(
+                ALLOCATION, json={"savings_target": "1000", "savings_now": "1000"}
+            )
+        ).json()
+
+        assert body["alt_available"] is False
+        assert body["recommend"] is None, "whatever the model said"
+        assert body["goals_waiting"] == []

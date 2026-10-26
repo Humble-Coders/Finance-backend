@@ -28,5 +28,19 @@ def test_only_known_steps_with_words_and_no_figures_are_kept():
         "headline": "Savings first.",
         "steps": [{"to": "savings", "why": "A cushion first."}],
         "note": None,
+        "recommend": None,
+        "recommend_why": None,
     }
+
+
+def test_a_recommendation_is_one_of_the_two_orders_or_nothing():
+    kept = _advice(
+        "allocation", {"recommend": "debt_first", "recommend_why": "Clear it."}
+    )
+    assert kept["recommend"] == "debt_first"
+    assert kept["recommend_why"] == "Clear it."
+    dropped = _advice(
+        "allocation", {"recommend": "sell_the_car", "recommend_why": "No."}
+    )
+    assert dropped["recommend"] is None and dropped["recommend_why"] is None
     assert figure_free("Clear the card.", 100) == "Clear the card."

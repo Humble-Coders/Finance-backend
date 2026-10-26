@@ -221,6 +221,7 @@ async def build(
     today: date,
     *,
     buffer: tuple[int, int] | None = None,
+    goal_share_bps: int | None = None,
 ) -> PlanView:
     """[month]'s plan. While the household is still learning there is no
     budget yet, so nothing is left over to split: the schedule shows the
@@ -228,6 +229,7 @@ async def build(
 
     [buffer] — (target, saved) — puts the person's own savings figures in
     place of the buffer's, for a diagnostic: the same split, their numbers.
+    [goal_share_bps] does the same for the goal share — 0 is "debt first".
     """
     month = month.replace(day=1)
     learning = await learning_state(session, household_id, currency, today)
@@ -265,6 +267,8 @@ async def build(
             strategy=hint.strategy.value,
         )
 
+    if goal_share_bps is not None:
+        preferences = replace(preferences, goal_share_bps=goal_share_bps)
     if buffer is not None:
         preferences = replace(
             preferences, buffer_target=buffer[0] or None, buffer_saved=buffer[1]

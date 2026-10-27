@@ -82,6 +82,11 @@ class BudgetCommitmentOut(BaseModel):
     category: str | None = None
     paid_on: date | None = None
     paid_amount: str | None = None
+    # The obligation row, for ticking it off this month.
+    id: uuid.UUID | None = None
+    # The transaction that paid it, and whether the person named it by hand.
+    transaction_id: uuid.UUID | None = None
+    paid_by_hand: bool = False
 
 
 class CategorySpendOut(BaseModel):
@@ -258,3 +263,23 @@ class SpendingCheckOut(BaseModel):
     # Whether this answer came from storage rather than a fresh run.
     stored: bool = True
     runs_left: int
+
+
+class CommitmentMatchIn(BaseModel):
+    """Tick a commitment off with a transaction already recorded this month."""
+
+    transaction_id: uuid.UUID
+
+
+class CommitmentPaymentIn(BaseModel):
+    """Tick a commitment off with a payment typed in now — recorded as a
+    transaction under the commitment's name and category, so it is counted
+    once, as that payment."""
+
+    account_id: uuid.UUID
+    occurred_on: date
+    # A decimal string, like every amount the API accepts.
+    amount: str
+    # The same as `POST /transactions`: an exact copy is refused unless the
+    # person says it is a second one.
+    allow_duplicate: bool = False

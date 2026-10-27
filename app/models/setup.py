@@ -19,10 +19,13 @@ holds exactly what the wizard asks and is what the payoff optimizer reads.
 from __future__ import annotations
 
 import uuid
+from datetime import date
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     String,
@@ -40,7 +43,7 @@ from app.models.base import (
     money_currency,
 )
 
-__all__ = ["FinancialProfile", "Obligation", "Investment"]
+__all__ = ["FinancialProfile", "Obligation", "Investment", "CommitmentPayment"]
 
 
 class FinancialProfile(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
@@ -101,6 +104,36 @@ class Obligation(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     # then falls back on the preset names.
     category_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("category.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class CommitmentPayment(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
+    """A commitment ticked off by hand for a month: the transaction that paid it.
+
+    Keyed by the commitment's name, not its row: setup rewrites every
+    obligation on each save, so an id would not survive the person editing
+    their commitments. A transaction pays at most one commitment, so the same
+    money is never counted as two bills paid.
+    """
+
+    __tablename__ = "commitment_payment"
+    __table_args__ = (
+        Index(
+            "uq_commitment_payment_household_month_key",
+            "household_id",
+            "month",
+            "commitment_key",
+            unique=True,
+        ),
+        Index("uq_commitment_payment_transaction", "transaction_id", unique=True),
+    )
+
+    # The first day of the month it was paid for.
+    month: Mapped[date] = mapped_column(Date, nullable=False)
+    # The commitment's name, trimmed and lower-cased (`commitments.key_of`).
+    commitment_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("transaction.id", ondelete="CASCADE"), nullable=False
     )
 
 

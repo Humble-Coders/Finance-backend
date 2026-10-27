@@ -111,6 +111,16 @@ class BudgetLine(UUIDMixin, TimestampMixin, Base):
     is_user_set: Mapped[bool] = mapped_column(
         nullable=False, default=False, server_default="false"
     )
+    # Whether a hand-set line starts the months after it (`budget._carried`),
+    # and with what: `carry_minor_units`, or `allocated` when that is null. A
+    # line changed "for this month only" keeps the amount it carried before,
+    # or stops carrying when it carried nothing.
+    carries_forward: Mapped[bool] = mapped_column(
+        nullable=False, default=True, server_default="true"
+    )
+    carry_minor_units: Mapped[int | None] = money_amount(
+        "carry_minor_units", nullable=True
+    )
 
     budget: Mapped[Budget] = relationship(back_populates="lines")
 

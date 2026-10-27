@@ -51,7 +51,7 @@ from app.services.llm import LlmClient, LlmError
 
 log = structlog.get_logger()
 
-PROMPT_VERSION = "2026-10-25.1"
+PROMPT_VERSION = "2026-10-27.1"
 
 SETUP = "setup"
 REVIEW = "review"
@@ -328,7 +328,9 @@ _REVIEW_RULES = (
     )
     + """
 This is a monthly review. "last_month" shows what each line allowed and what
-was spent. Suggest next amounts that fit how the person actually spends —
+was spent; "one_off" is the part of that spending the person marked as a
+purchase that will not happen again — never raise a line because of it.
+Suggest next amounts that fit how the person actually spends —
 lower where they spend less, higher where they keep going over and it is a
 need — still within the rules above. The advice: two or three sentences, no
 digits, on what went over, what was saved, and where money left over is best
@@ -513,6 +515,7 @@ async def _last_month(
             "category": line.slug,
             "allowed": _money(line.allocated, currency),
             "spent": _money(line.spent, currency),
+            **({"one_off": _money(line.one_off, currency)} if line.one_off else {}),
         }
         for line in view.lines
         if line.slug in SPENDING_SLUGS
@@ -522,6 +525,7 @@ async def _last_month(
             "category": u.slug,
             "allowed": _money(0, currency),
             "spent": _money(u.spent, currency),
+            **({"one_off": _money(u.one_off, currency)} if u.one_off else {}),
         }
         for u in view.unbudgeted
         if u.slug in SPENDING_SLUGS

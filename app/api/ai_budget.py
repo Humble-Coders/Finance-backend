@@ -35,8 +35,10 @@ from app.schemas.budget import (
     AiProposalLineOut,
     AiProposalOut,
     BudgetOut,
+    CategoryTipOut,
+    SpendingCheckOut,
 )
-from app.services import ai_budget
+from app.services import ai_budget, spending_check
 from app.services import budget as budget_service
 from app.services.ai_consent import CONSENT_REQUIRED, current_policy, has_consented
 from app.services.capabilities import currency_for, require_feature
@@ -53,6 +55,7 @@ LIMIT_REACHED = "ai_budget_limit_reached"
 NO_INCOME = "setup_income_missing"
 STILL_LEARNING = "still_learning"
 NOT_THIS_MONTH = "not_current_month"
+SPENDING_LIMIT_REACHED = "spending_check_limit_reached"
 
 router = APIRouter(
     prefix="/budgets",
@@ -344,3 +347,134 @@ async def review(
     )
     await session.commit()
     return budget_api._out(view, learning)
+
+
+# --- The spending check -------------------------------------------------------
+
+
+async def _spending_figures(
+    session: AsyncSession, identity: ResolvedIdentity, month: str
+) -> spending_check.Figures:
+    when = budget_api._month(month)
+    today = budget_api._today()
+    household = identity.household
+    currency = await currency_for(session, household)
+    learning = await learning_state(session, household.id, currency, today)
+    try:
+        return await spending_check.figures(
+            session, household.id, currency, when, today, ready=learning.ready
+        )
+    except ai_budget.NoIncome as error:
+        log_conflict(
+            NO_INCOME, "spending_check_no_income", household_id=str(household.id)
+        )
+        raise _refused(
+            status.HTTP_409_CONFLICT,
+            NO_INCOME,
+            "Add your monthly income in setup first.",
+        ) from error
+
+
+async def _spending_out(
+    session: AsyncSession,
+    found: spending_check.Figures,
+    household_id: uuid.UUID,
+    row,
+    stored: bool,
+) -> SpendingCheckOut:
+    used = await spending_check.runs_for(session, household_id, found.month)
+    advice = row.advice if row is not None else {}
+
+    def money(minor: int) -> str:
+        return from_minor_units(minor, found.currency)
+
+    return SpendingCheckOut(
+        month=found.month,
+        currency=found.currency,
+        month_ended=found.month_ended,
+        income=money(found.income),
+        needs=money(found.needs),
+        wants=money(found.wants),
+        saved=money(found.saved),
+        unsorted=money(found.unsorted),
+        needs_percent=found.needs_percent,
+        wants_percent=found.wants_percent,
+        saved_percent=found.saved_percent,
+        needs_aim_percent=found.needs_aim_percent,
+        wants_aim_percent=found.wants_aim_percent,
+        savings_aim_percent=found.savings_aim_percent,
+        needs_over=found.needs_over,
+        wants_over=found.wants_over,
+        savings_short=found.savings_short,
+        headline=advice.get("headline"),
+        tips=advice.get("tips") or [],
+        categories=[
+            CategoryTipOut(
+                category_id=found.category_ids[item["category"]],
+                slug=item["category"],
+                tip=item["tip"],
+            )
+            for item in advice.get("categories") or []
+            if item.get("category") in found.category_ids
+        ],
+        made_at=row.created_at.isoformat() if row is not None else None,
+        stale=row is not None and row.fingerprint != found.fingerprint,
+        stored=stored,
+        runs_left=max(spending_check.MAX_RUNS_A_MONTH - used, 0),
+    )
+
+
+@router.get("/{month}/spending-check", response_model=SpendingCheckOut)
+async def read_spending_check(
+    month: str,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> SpendingCheckOut:
+    """The month's spending against income, and its last check. No AI call."""
+    found = await _spending_figures(session, identity, month)
+    row = await spending_check.latest(session, identity.household.id, found.month)
+    out = await _spending_out(session, found, identity.household.id, row, True)
+    # Reading a budget can generate it; keep what was generated.
+    await session.commit()
+    return out
+
+
+@router.post("/{month}/spending-check", response_model=SpendingCheckOut)
+async def run_spending_check(
+    month: str,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> SpendingCheckOut:
+    """Ask the AI about the month's spending. The same figures as its last
+    check return that check; otherwise a fresh one, up to four a month."""
+    found = await _spending_figures(session, identity, month)
+    household_id = identity.household.id
+    last = await spending_check.latest(session, household_id, found.month)
+    if last is None or last.fingerprint != found.fingerprint:
+        await _may_ask(session, identity.user)
+    settings = get_settings()
+    # Advice, like the plan's diagnostics: the advice model when one is set.
+    advice_settings = (
+        settings.model_copy(update={"llm_model": settings.llm_advice_model})
+        if settings.llm_advice_model
+        else settings
+    )
+    try:
+        row, stored = await spending_check.run(
+            session,
+            lambda: build_client(advice_settings),
+            found,
+            household_id,
+        )
+    except spending_check.LimitReached as error:
+        raise _refused(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            SPENDING_LIMIT_REACHED,
+            "That's all the fresh checks this month. The last one stays.",
+        ) from error
+    except LlmError as error:
+        log.warning("spending_check_failed", reason=str(error))
+        raise _unavailable() from error
+    out = await _spending_out(session, found, household_id, row, stored)
+    await session.commit()
+    return out

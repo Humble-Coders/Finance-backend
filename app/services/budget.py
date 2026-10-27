@@ -31,7 +31,14 @@ The rules (manager decisions, 2026-10-04, ticket #56):
 * **A line set by hand carries forward.** A month's budget, when first
   created, starts with the hand-set lines of the latest month before it —
   a category added to the budget, a changed amount, the savings target — so
-  planning something once plans it for every month after.
+  planning something once plans it for every month after. A line changed
+  **for this month only** does not: the months after start from what it
+  carried before, or from the suggestion when it carried nothing.
+* **A one-off purchase** (`Transaction.is_one_off`) counts in its own month
+  like any spending, but is left out of the history lines are suggested
+  from, so a laptop bought once never raises the months after — not even in a
+  household's first months, when the window is too short for the median to
+  leave it out.
 
 "Spent" is counted by `countable`, the dashboard's rule, so a line can never
 disagree with the dashboard figure beside it.
@@ -66,7 +73,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -215,6 +222,10 @@ class LineView:
     allocated: int
     is_user_set: bool
     spent: int
+    # The part of `spent` marked one-off.
+    one_off: int = 0
+    # Set by hand for this month alone: the months after start from something else.
+    this_month_only: bool = False
     # What the AI suggests for the line this month, checked by the server
     # (`app/services/ai_budget.py`), and why; None without a suggestion.
     ai_suggested: int | None = None
@@ -231,6 +242,7 @@ class UnbudgetedView:
     spent: int
     ai_suggested: int | None = None
     ai_reason: str | None = None
+    one_off: int = 0
 
 
 @dataclass(frozen=True)
@@ -334,12 +346,17 @@ async def set_line(
     amount: int,
     *,
     ready: bool,
+    this_month_only: bool = False,
 ) -> BudgetView:
     """Set [category]'s line by hand, creating it if there was none.
 
     Manual budgeting is always available, so a category the generator left
     out — or one with no history at all, or a household still learning — can
     still be given a line.
+
+    [this_month_only]: the months after keep starting from what this line
+    carried before the change — or, when it carried nothing, from the
+    suggestion.
     """
     if category.slug in NOT_BUDGETABLE:
         raise NotBudgetable(category.slug)
@@ -347,6 +364,7 @@ async def set_line(
     system = await _system_ids(session)
     key = _line_key(category.id, category.slug, system)
     line = _find(budget, key)
+    carried = _carry_of(line)
     if line is None:
         line = BudgetLine(
             category_id=key,
@@ -359,6 +377,12 @@ async def set_line(
     else:
         line.allocated_minor_units = amount
         line.is_user_set = True
+    if not this_month_only:
+        line.carries_forward, line.carry_minor_units = True, None
+    elif carried is None:
+        line.carries_forward, line.carry_minor_units = False, None
+    else:
+        line.carries_forward, line.carry_minor_units = True, carried
     await _settle(session, budget, household_id, currency, system, ready)
     return await _view(session, budget, household_id, currency, month, today, ready)
 
@@ -385,6 +409,7 @@ async def reset_line(
         return None
     if line.is_user_set:
         line.is_user_set = False
+        line.carries_forward, line.carry_minor_units = True, None
         if line.suggested_minor_units > 0:
             line.allocated_minor_units = line.suggested_minor_units
         else:
@@ -465,15 +490,8 @@ async def _prepared(
     assert budget is not None  # inserted above, or there already
     if created.rowcount:
         for line in await _carried(session, household_id, month):
-            budget.lines.append(
-                BudgetLine(
-                    category_id=line.category_id,
-                    allocated_minor_units=line.allocated_minor_units,
-                    suggested_minor_units=0,
-                    currency=currency,
-                    is_user_set=True,
-                )
-            )
+            line.currency = currency
+            budget.lines.append(line)
         if budget.lines:
             budget.is_user_modified = True
     if ready and (last >= today or not budget.has_history):
@@ -539,15 +557,36 @@ async def apply_lines(
         else:
             line.allocated_minor_units = amount
             line.is_user_set = True
+            line.carries_forward, line.carry_minor_units = True, None
     await _settle(session, budget, household_id, currency, system, ready)
     return await _view(session, budget, household_id, currency, month, today, ready)
+
+
+def _carry_of(line: BudgetLine | None) -> int | None:
+    """What [line] starts the months after with, or None for nothing."""
+    # `carries_forward` is None on a line not yet flushed: its default, True.
+    if line is None or not line.is_user_set or line.carries_forward is False:
+        return None
+    return (
+        line.carry_minor_units
+        if line.carry_minor_units is not None
+        else line.allocated_minor_units
+    )
+
+
+def _is_this_month_only(line: BudgetLine) -> bool:
+    if not line.is_user_set:
+        return False
+    carry = _carry_of(line)
+    return carry is None or carry != line.allocated_minor_units
 
 
 async def _carried(
     session: AsyncSession, household_id: uuid.UUID, month: date
 ) -> list[BudgetLine]:
     """The hand-set lines of the latest budget before [month]: what a new
-    month's budget starts with."""
+    month's budget starts with, each at the amount it carries (`_carry_of`).
+    New, unsaved lines — the caller adds them where they belong."""
     prior = await session.scalar(
         select(Budget)
         .where(
@@ -560,7 +599,17 @@ async def _carried(
     )
     if prior is None:
         return []
-    return [line for line in prior.lines if line.is_user_set]
+    return [
+        BudgetLine(
+            category_id=line.category_id,
+            allocated_minor_units=carry,
+            suggested_minor_units=0,
+            currency=line.currency,
+            is_user_set=True,
+        )
+        for line in prior.lines
+        if (carry := _carry_of(line)) is not None
+    ]
 
 
 async def _regenerate(
@@ -671,6 +720,8 @@ async def _history(
         .where(
             *countable(household_id, currency),
             Transaction.direction == TransactionDirection.debit,
+            # Spent once, never again: not what the months after will cost.
+            Transaction.is_one_off.is_(False),
             Transaction.occurred_on >= window[0],
             Transaction.occurred_on <= month_bounds(window[-1])[1],
         )
@@ -868,6 +919,12 @@ async def _view(
             Category.slug,
             func.sum(Transaction.amount_minor_units),
             func.count(Transaction.id),
+            func.sum(
+                case(
+                    (Transaction.is_one_off.is_(True), Transaction.amount_minor_units),
+                    else_=0,
+                )
+            ),
         )
         .outerjoin(Category, Category.id == Transaction.category_id)
         .where(
@@ -879,13 +936,16 @@ async def _view(
         .group_by(Transaction.category_id, Category.slug)
     )
     spent: dict[uuid.UUID, int] = defaultdict(int)
+    one_off: dict[uuid.UUID, int] = defaultdict(int)
     uncategorised_spent = uncategorised_count = 0
-    for category_id, slug, total, count in result:
+    for category_id, slug, total, count, once in result:
         if category_id is None:
             uncategorised_spent += int(total)
             uncategorised_count += int(count)
         else:
-            spent[_line_key(category_id, slug, system)] += int(total)
+            key = _line_key(category_id, slug, system)
+            spent[key] += int(total)
+            one_off[key] += int(once or 0)
 
     own = [
         line
@@ -924,6 +984,8 @@ async def _view(
             allocated=line.allocated_minor_units,
             is_user_set=line.is_user_set,
             spent=spent.get(line.category_id, 0),
+            one_off=one_off.get(line.category_id, 0),
+            this_month_only=_is_this_month_only(line),
         )
 
     views = [view(line) for line in own]
@@ -940,6 +1002,7 @@ async def _view(
                 allocated=amount,
                 is_user_set=False,
                 spent=spent.get(key, 0),
+                one_off=one_off.get(key, 0),
             )
         )
     suggestion = await _ai_suggestion(session, household_id, first)
@@ -989,6 +1052,7 @@ async def _view(
                 slug=named[key].slug,
                 name=named[key].name,
                 spent=amount,
+                one_off=one_off.get(key, 0),
             )
             for key, amount in loose.items()
             if key in named

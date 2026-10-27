@@ -236,6 +236,13 @@ class Transaction(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
         Integer, nullable=False, default=1, server_default="1"
     )
 
+    # A purchase that will not happen again — a laptop, a flight. It counts in
+    # its own month like any spending, but never in the history future budgets
+    # are suggested from (`budget._history`), so one month cannot move them.
+    is_one_off: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
+
     # Set by extraction; low-confidence rows go to the user review queue (F2).
     extraction_confidence: Mapped[int | None] = mapped_column(Integer, nullable=True)
     needs_review: Mapped[bool] = mapped_column(

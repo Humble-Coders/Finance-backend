@@ -29,6 +29,7 @@ from app.schemas.transactions import (
     DeleteOutcomeOut,
     DuplicateOfOut,
     ManualTransactionIn,
+    OneOffIn,
     PatchOutcomeOut,
     ReviewPageOut,
     ReviewRowOut,
@@ -284,6 +285,8 @@ def _as_row(row: Transaction, duplicate: Transaction | None) -> ReviewRowOut:
         needs_review=row.needs_review,
         review_reason=row.review_reason,
         extraction_confidence=row.extraction_confidence,
+        # None on a row not yet flushed: its default, False.
+        one_off=bool(row.is_one_off),
         duplicate_of=(
             DuplicateOfOut(
                 id=duplicate.id,
@@ -504,6 +507,9 @@ async def correct_transaction(
     row.amount_minor_units = minor
     if body.direction is not None:
         row.direction = body.direction
+        if body.direction != TransactionDirection.debit:
+            # Money in is never a one-off purchase.
+            row.is_one_off = False
     if body.description is not None:
         row.description = description
         row.normalized_description = key
@@ -622,6 +628,34 @@ async def confirm_transaction(
     finished = was_waiting and await _finish_import(session, import_id)
     await session.commit()
     return PatchOutcomeOut(transaction=_as_out(row), import_finished=finished)
+
+
+@router.put("/transactions/{transaction_id}/one-off", response_model=TransactionOut)
+async def set_one_off(
+    transaction_id: uuid.UUID,
+    body: OneOffIn,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> TransactionOut:
+    """Mark a purchase as one-off, or not. It still counts in its own month;
+    it is only left out of what the months after are budgeted from.
+
+    Not a correction: the row's review state is left as it is.
+    """
+    row = await _owned(session, identity.household.id, transaction_id)
+    if body.one_off and row.direction != TransactionDirection.debit:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "not_spending",
+                "field": "one_off",
+                "message": "Only money going out can be a one-off purchase.",
+            },
+        )
+    row.is_one_off = body.one_off
+    await session.flush()
+    await session.commit()
+    return _as_out(row)
 
 
 @router.delete("/transactions/{transaction_id}", response_model=DeleteOutcomeOut)

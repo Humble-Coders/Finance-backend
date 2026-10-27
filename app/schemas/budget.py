@@ -42,6 +42,10 @@ class BudgetLineOut(BaseModel):
     # why. Null without one. Advisory: nothing changes until the person uses it.
     ai_suggested: str | None = None
     ai_reason: str | None = None
+    # The part of `spent` marked one-off; null when none of it is.
+    one_off: str | None = None
+    # Set by hand for this month alone: the months after start elsewhere.
+    this_month_only: bool = False
 
 
 class UnbudgetedOut(BaseModel):
@@ -51,6 +55,7 @@ class UnbudgetedOut(BaseModel):
     spent: str
     ai_suggested: str | None = None
     ai_reason: str | None = None
+    one_off: str | None = None
 
 
 class AiLineOut(BaseModel):
@@ -210,3 +215,46 @@ class BudgetLineIn(BaseModel):
     # A decimal string, like every amount the API accepts. Parsed by
     # `app/core/money.py`, which refuses more precision than the currency has.
     amount: str
+    # True: this month only — the months after keep what they would have had.
+    this_month_only: bool = False
+
+
+class CategoryTipOut(BaseModel):
+    category_id: uuid.UUID
+    slug: str
+    tip: str
+
+
+class SpendingCheckOut(BaseModel):
+    """A month's spending against income under 50/30/20, adjusted, and the
+    AI's advice on it. Every figure is the server's; the advice is words."""
+
+    month: date
+    currency: str
+    month_ended: bool
+    income: str
+    needs: str
+    wants: str
+    saved: str
+    # Spending with no category yet, in neither share.
+    unsorted: str
+    # Whole percentages of income, and what the rule aims for.
+    needs_percent: int
+    wants_percent: int
+    saved_percent: int
+    needs_aim_percent: int
+    wants_aim_percent: int
+    savings_aim_percent: int
+    needs_over: bool
+    wants_over: bool
+    savings_short: bool
+    # The month's last check; all empty until one has been run.
+    headline: str | None = None
+    tips: list[str] = []
+    categories: list[CategoryTipOut] = []
+    made_at: str | None = None
+    # The figures have changed since that check: running again is worth it.
+    stale: bool = False
+    # Whether this answer came from storage rather than a fresh run.
+    stored: bool = True
+    runs_left: int

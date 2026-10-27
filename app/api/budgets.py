@@ -135,6 +135,8 @@ def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
             spent=money(item.spent),
             ai_suggested=maybe(item.ai_suggested),
             ai_reason=item.ai_reason,
+            one_off=money(item.one_off) if item.one_off else None,
+            this_month_only=item.this_month_only,
         )
 
     return BudgetOut(
@@ -166,6 +168,7 @@ def _out(view: service.BudgetView, learning: LearningState) -> BudgetOut:
                 spent=money(u.spent),
                 ai_suggested=maybe(u.ai_suggested),
                 ai_reason=u.ai_reason,
+                one_off=money(u.one_off) if u.one_off else None,
             )
             for u in view.unbudgeted
         ],
@@ -259,7 +262,8 @@ async def set_line(
     identity: ResolvedIdentity = Depends(current_identity),
     session: AsyncSession = Depends(get_session),
 ) -> BudgetOut:
-    """Set one line by hand. Regeneration will not move it again."""
+    """Set one line by hand. Regeneration will not move it again; it carries
+    into the months after unless `this_month_only`."""
     when = _month(month)
     today = _today()
     household = identity.household
@@ -285,6 +289,7 @@ async def set_line(
         category,
         amount,
         ready=learning.ready,
+        this_month_only=body.this_month_only,
     )
     await session.commit()
     return _out(view, learning)

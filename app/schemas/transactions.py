@@ -64,6 +64,9 @@ class ReviewRowOut(BaseModel):
     # 0-100 from extraction, or null for a row that was never modelled.
     extraction_confidence: int | None = None
     duplicate_of: DuplicateOfOut | None = None
+    # A purchase that will not happen again: counted in its month, left out of
+    # what future budgets are suggested from.
+    one_off: bool = False
 
 
 class ReviewPageOut(BaseModel):
@@ -127,6 +130,10 @@ class TransactionPatchIn(BaseModel):
         if not sent:
             raise ValueError("nothing to change — use confirm to accept a row as it is")
         return self
+
+
+class OneOffIn(BaseModel):
+    one_off: bool
 
 
 class TransactionOut(ReviewRowOut):

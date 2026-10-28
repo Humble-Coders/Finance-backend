@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import date
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -60,6 +61,8 @@ class Learned:
     rule_recorded: bool
     # Other rows in the queue that took the new category.
     recategorized: int
+    # Their dates, so the monthly totals of those months are rebuilt (#83).
+    recategorized_on: tuple[date, ...] = ()
 
 
 async def learn(
@@ -157,9 +160,11 @@ async def learn(
             Transaction.needs_review.is_(True),
         )
         .values(category_id=corrected_category_id)
+        .returning(Transaction.occurred_on)
         .execution_options(synchronize_session=False)
     )
-    return Learned(rule_recorded=True, recategorized=moved.rowcount or 0)
+    dates = tuple(moved.scalars().all())
+    return Learned(rule_recorded=True, recategorized=len(dates), recategorized_on=dates)
 
 
 async def rules_for(

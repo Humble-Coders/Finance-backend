@@ -116,6 +116,13 @@ jobs:
           PG_CONTAINER: ${{ job.services.postgres.id }}
         run: scripts/check_migrations.sh
 
+      - name: Monthly totals rebuild script runs
+        # The backfill run by hand in production after the #83 migration
+        # (`handoffs/ticket-83.md`); proven here to start, connect and finish.
+        # Its results are tested against the 10-year fixture in
+        # tests/test_rollups.py.
+        run: python -m app.scripts.rebuild_rollups
+
       - name: Database tests
         # Runs against the schema the previous step left at head.
         run: pytest -q -m integration

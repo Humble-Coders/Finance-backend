@@ -36,6 +36,7 @@ from app.schemas.statements import (
     StatementParseIn,
     StatementParseOut,
 )
+from app.services import rollups
 from app.services.ai_consent import CONSENT_REQUIRED, current_policy, has_consented
 from app.services.capabilities import currency_for, require_feature
 from app.services.conflicts import log_conflict
@@ -598,6 +599,7 @@ async def confirm_rows(
 
     paired = Paired()
     chosen: list[uuid.UUID] = []
+    learned_on: list[date] = []
     if outcome.saved_ids:
         if body.categorised:
             # Categorised when it was read, and checked by the person: only a
@@ -613,7 +615,9 @@ async def confirm_rows(
                 await file_rows(
                     session, settings, household.id, unfiled, may_ask_model=False
                 )
-            chosen = await _learn_chosen(session, household, body, outcome.saved_at)
+            chosen, learned_on = await _learn_chosen(
+                session, household, body, outcome.saved_at
+            )
         else:
             # An app that does not show categories before saving: every row is
             # categorised here, as before. The parse endpoint already required
@@ -628,6 +632,17 @@ async def confirm_rows(
         )
 
     await session.flush()
+    # The months the statement's rows landed in, and any an earlier row was
+    # re-filed in by pairing or by a rule learned here (#83).
+    await rollups.refresh(
+        session,
+        household.id,
+        [
+            *(body.rows[i].occurred_on for i in outcome.saved_at),
+            *paired.refiled_on,
+            *learned_on,
+        ],
+    )
     debts_updated = 0
     if closing is not None:
         record.closing_balance_minor_units, record.currency, record.closing_date = (
@@ -736,9 +751,9 @@ async def _learn_chosen(
     household: Household,
     body: ConfirmRowsIn,
     saved_at: dict[int, uuid.UUID],
-) -> list[uuid.UUID]:
-    """Rules from the categories the person changed while checking, and the
-    rows they changed.
+) -> tuple[list[uuid.UUID], list[date]]:
+    """Rules from the categories the person changed while checking, the
+    rows they changed, and the dates of earlier rows the rules re-filed.
 
     A category different from the one suggested is a correction, exactly as
     fixing a saved row is (`PATCH /transactions/{id}`): it teaches a rule for
@@ -753,18 +768,20 @@ async def _learn_chosen(
         and row.category_id is not None
         and row.category_id != row.suggested_category_id
     ]
+    refiled_on: list[date] = []
     for transaction_id, row in changed:
         saved = await session.get(Transaction, transaction_id)
         if saved is None:
             continue
-        await learn(
+        learned = await learn(
             session,
             household_id=household.id,
             row=saved,
             predicted_category_id=row.suggested_category_id,
             corrected_category_id=row.category_id,
         )
-    return [transaction_id for transaction_id, _ in changed]
+        refiled_on.extend(learned.recategorized_on)
+    return [transaction_id for transaction_id, _ in changed], refiled_on
 
 
 @router.get("/statements", response_model=StatementImportsOut)

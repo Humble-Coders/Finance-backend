@@ -9,6 +9,8 @@ from app.models.derived import (
     AiBudgetSuggestion,
     ChatConversation,
     HealthScoreSnapshot,
+    LedgerState,
+    MonthlyCategoryTotal,
     PlanDiagnostic,
 )
 from app.models.enums import (
@@ -70,6 +72,8 @@ __all__ = [
     "Obligation",
     "Investment",
     "HealthScoreSnapshot",
+    "LedgerState",
+    "MonthlyCategoryTotal",
     "PlanDiagnostic",
     "AiBudgetSuggestion",
     "ChatConversation",

@@ -7,10 +7,8 @@ import uuid
 from datetime import date
 
 import pytest
-from sqlalchemy import select
 
-from app.models.enums import GoalKind
-from app.models.planning import Debt, Goal
+from app.models.planning import Debt
 from app.services import budget as budget_service
 from app.services.debts import covered_minimums
 from tests.conftest import requires_db
@@ -66,57 +64,41 @@ class TestPreferences:
         assert suggested["buffer"] is not None and suggested["buffer"].endswith(
             ".00"
         ), "one month of spending, rounded up to a whole dollar"
-        assert body["buffer"] == suggested["buffer"]
+        assert body["buffer"] is None, "the plan has no buffer step"
 
-    async def test_a_buffer_is_an_emergency_fund_goal(self, api_client, db_session):
-        household, _, _ = await a_ready_household(
-            api_client, db_session, "+14165579102"
+    async def test_a_buffer_from_an_older_app_is_ignored(self, api_client, db_session):
+        """Your plan has no buffer step (2026-10-28): a buffer sent by an app
+        from before is kept nowhere, and no Emergency fund goal is made."""
+        await a_ready_household(api_client, db_session, "+14165579102")
+
+        saved = await api_client.put(
+            PREFS,
+            json={
+                "buffer": "1500.00",
+                "goal_share_percent": "25",
+                "rate_line_percent": "7",
+                "strategy": "snowball",
+            },
         )
-        choice = {
-            "buffer": "1500.00",
-            "goal_share_percent": "25",
-            "rate_line_percent": "7",
-            "strategy": "snowball",
-        }
-
-        saved = await api_client.put(PREFS, json=choice)
 
         assert saved.status_code == 200, saved.text
         body = saved.json()
-        assert (
-            body["saved"],
-            body["buffer"],
-            body["goal_share_percent"],
-            body["rate_line_percent"],
-        ) == (
+        assert (body["saved"], body["buffer"], body["buffer_goal_id"]) == (
             True,
-            "1500.00",
+            None,
+            None,
+        )
+        assert (body["goal_share_percent"], body["rate_line_percent"]) == (
             "25.00",
             "7.00",
         )
-        goal = await db_session.get(Goal, uuid.UUID(body["buffer_goal_id"]))
-        assert (goal.kind, goal.target_minor_units) == (
-            GoalKind.emergency_fund,
-            150_000,
-        )
+        goals = (await api_client.get("/goals")).json()["goals"]
+        assert goals == []
 
-        again = await api_client.put(PREFS, json={**choice, "buffer": "2000.00"})
-        assert (
-            again.json()["buffer_goal_id"] == body["buffer_goal_id"]
-        ), "the same goal, updated"
-
-        none = await api_client.put(PREFS, json={**choice, "buffer": None})
-        assert none.json()["buffer"] is None
-        assert none.json()["buffer_goal_id"] is None
-        kept = await db_session.scalar(
-            select(Goal.id).where(Goal.household_id == household)
-        )
-        assert kept is not None, "no buffer stops using the goal; it does not delete it"
-
-    async def test_an_existing_emergency_fund_goal_is_used(
+    async def test_an_emergency_fund_goal_is_a_goal_like_any_other(
         self, api_client, db_session
     ):
-        await a_household(api_client, "+14165579103")
+        await a_ready_household(api_client, db_session, "+14165579103")
         made = await api_client.post(
             "/goals",
             json={
@@ -128,17 +110,10 @@ class TestPreferences:
         )
         assert made.status_code == 201, made.text
 
-        saved = await api_client.put(
-            PREFS,
-            json={
-                "buffer": "1000.00",
-                "goal_share_percent": "20",
-                "rate_line_percent": "6",
-                "strategy": "avalanche",
-            },
-        )
+        plan = (await api_client.get("/plan")).json()
 
-        assert saved.json()["buffer_goal_id"] == made.json()["id"]
+        assert plan["split"]["buffer"] in (None, "0.00")
+        assert made.json()["id"] in {g["goal_id"] for g in plan["split"]["goals"]}
 
     @pytest.mark.parametrize(
         ("phone", "change", "field"),
@@ -164,39 +139,6 @@ class TestPreferences:
 
         assert response.status_code == 422, response.text
         assert response.json()["detail"]["field"] == field
-
-    async def test_a_buffer_goal_past_the_goal_limit_is_a_409(
-        self, api_client, db_session
-    ):
-        household, _ = await a_household(api_client, "+14165579115")
-        db_session.add_all(
-            [
-                Goal(
-                    household_id=household,
-                    name=f"Goal {n}",
-                    horizon="short_term",
-                    target_minor_units=10_000,
-                    saved_minor_units=0,
-                    currency="CAD",
-                    priority=n,
-                )
-                for n in range(20)
-            ]
-        )
-        await db_session.commit()
-
-        response = await api_client.put(
-            PREFS,
-            json={
-                "buffer": "1000.00",
-                "goal_share_percent": "20",
-                "rate_line_percent": "6",
-                "strategy": "avalanche",
-            },
-        )
-
-        assert response.status_code == 409
-        assert response.json()["detail"]["code"] == "goal_limit_reached"
 
 
 class TestThePlan:

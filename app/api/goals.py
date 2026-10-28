@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import current_identity
 from app.core.money import MoneyError, from_minor_units, to_minor_units
 from app.db import get_session
-from app.models.enums import GoalHorizon
+from app.models.enums import GoalHorizon, GoalKind
 from app.models.planning import Goal
 from app.schemas.goals import (
     NAME_MAX,
@@ -29,6 +29,7 @@ from app.schemas.goals import (
     GoalsOut,
 )
 from app.services import goals as service
+from app.services import plan_view
 from app.services.capabilities import currency_for, require_feature
 from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
@@ -194,7 +195,15 @@ async def list_goals(
         disclaimer = found.version if found else None
     # The comparison may have settled this month's budget, as /budgets would.
     await session.commit()
+    emergency = any(goal.kind == GoalKind.emergency_fund for goal in goals)
+    target = (
+        None
+        if emergency
+        else (await plan_view.suggested(session, household.id, currency, today)).buffer
+    )
     return GoalsOut(
+        suggests_emergency_fund=not emergency,
+        emergency_fund_target=from_minor_units(target, currency) if target else None,
         goals=[_goal_out(goal, projection) for goal, projection in projected],
         budget=None
         if comparison is None

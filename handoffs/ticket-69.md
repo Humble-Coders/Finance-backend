@@ -12,6 +12,12 @@ OpenAI-compatible transport and for Anthropic. The `run_tools(...)` helper drive
 - it stops at 3 rounds, a 45-second deadline, or a per-question token budget;
 - it returns malformed arguments to the model once before giving up.
 
+After review on #85, a few rules changed:
+- the token budget never throws away a finished answer;
+- logged tool names are only names the server offered;
+- truncation is fast on long lists;
+- chat always runs with thinking off.
+
 Cost controls are built in:
 - **Caching:** the system prompt and tools always lead each request, and Anthropic gets `cache_control`.
 - **Small results:** `tool_result(...)` sends minified JSON capped at 4 KB, with a `truncated` flag.
@@ -35,7 +41,7 @@ Cost controls are built in:
 - `.env.example`: documents `LLM_CHAT_TOKEN_BUDGET` and `LLM_PRICES`.
 
 **Tests**
-- `tests/test_llm_tools.py` (32 tests): fake HTTP via `httpx.MockTransport`, so no key and no model.
+- `tests/test_llm_tools.py` (47 tests, 15 of them regressions from the #85 review): fake HTTP via `httpx.MockTransport`, so no key and no model.
   - They run against both transports and the recorded request bodies.
   - They cover every acceptance criterion below.
 
@@ -45,9 +51,9 @@ Cost controls are built in:
 cd Finance-backend
 export DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres
 export MIGRATION_DATABASE_URL=$DATABASE_URL
-.venv/bin/pytest -q tests/test_llm_tools.py            # 32 passed
+.venv/bin/pytest -q tests/test_llm_tools.py            # 47 passed
 .venv/bin/pytest -q tests/test_llm_client.py tests/test_statement_parsing.py tests/test_categorization_batches.py
-.venv/bin/pytest -q -m "not integration"                # 487 passed
+.venv/bin/pytest -q -m "not integration"                # 502 passed
 .venv/bin/pytest -q -m integration                      # 676 passed (needs local Postgres)
 .venv/bin/ruff check app tests && .venv/bin/ruff format --check app tests
 ```
@@ -60,12 +66,12 @@ Optional real round trip: use the dev key from the team password manager, with s
 |---|---|---|
 | Both transports: tool requested, run exactly once with parsed args, then final text | Met | `TestTheLoop::test_a_tool_runs_once_and_its_result_shapes_the_answer` (gemini + anthropic) |
 | Two calls in one turn both run; results in the provider's shape (`tool` + `tool_call_id`; `tool_result` blocks) | Met | `test_two_calls_in_one_turn_both_run_and_both_go_back` |
-| Stops at `max_rounds`, deadline and token budget with `LlmError`; never runs an unregistered tool | Met | `test_it_stops_at_the_round_limit`, `…_at_the_deadline`, `…_when_the_token_budget_is_spent`, `test_an_unregistered_tool_is_never_run` |
+| Stops at `max_rounds`, deadline and token budget with `LlmError`; never runs an unregistered tool | Met | `test_it_stops_at_the_round_limit`, `…_at_the_deadline`, `…_when_the_token_budget_is_spent`, `test_an_unregistered_tool_is_never_run`, `test_a_turn_naming_an_unregistered_tool_runs_nothing`, `test_a_slow_handler_is_stopped_at_the_deadline` |
 | Malformed args back once as a tool error; second raises `LlmError` | Met | `test_malformed_arguments_go_back_once_then_end_the_run`; non-JSON in `TestOpenAiShapes` |
 | Caching: prefix byte-identical and first; Anthropic `cache_control`; cached tokens reach `Usage` | Met | `TestPromptCaching`, `test_anthropic_marks_the_stable_prefix_for_caching` |
-| Over-cap result truncated with `truncated: true`; results minified | Met | `TestToolResult` |
-| `complete(...)` unchanged; existing LLM, statement and categorization tests pass; thinking off | Met | 66 existing tests pass unchanged; `converse` uses the same `_thinking()` fields as `complete` |
-| Log capture: no tool argument or result text in any log line | Met | `test_no_tool_argument_or_result_is_ever_logged` |
+| Over-cap result truncated with `truncated: true`; results minified | Met | `TestToolResult`, `test_truncating_ten_years_of_rows_is_fast_and_keeps_as_many_as_fit` |
+| `complete(...)` unchanged; existing LLM, statement and categorization tests pass; thinking off | Met | 66 existing tests pass unchanged; `converse` always sends thinking off, whatever `LLM_THINKING_BUDGET` is (`test_chat_never_thinks_whatever_imports_are_set_to`) |
+| Log capture: no tool argument or result text in any log line | Met | `test_no_tool_argument_or_result_is_ever_logged`, `test_a_tool_name_the_model_invented_is_never_logged` |
 | `ruff check`, `ruff format --check`, `pytest` pass | Met | Commands above |
 
 ## Deviations / decisions
@@ -78,6 +84,18 @@ Optional real round trip: use the dev key from the team password manager, with s
   - nested properties and items.
 - **Errors raised by a handler:** a `ToolError` goes back to the model as a tool error. Anything else the handler raises propagates and is not hidden from the caller.
 - `run_tools` refuses (`ValueError`) handlers that have no matching `ToolSpec`, so nothing can be run that the model was not told about.
+
+### Changes from the #85 review
+
+- **Token budget:** a final answer is returned even when it goes past the budget, because it is already paid for. The budget only refuses to start another round.
+- **Tool names in logs and errors:** names the model wrote are logged only if the server offered that tool; anything else is logged as `<unregistered>`. The `LlmError` message no longer quotes the name.
+- **Unregistered tools:** a turn that names an unregistered tool now runs none of its calls, including the valid ones.
+- **Malformed arguments:** the model gets one *turn* to correct them, so two malformed calls in the same turn both go back as errors. A later turn with malformed arguments ends the run.
+- **Deadline:** handlers are bound by the deadline as well as the model.
+- **Truncation:** `tool_result` binary-searches how many rows fit. 36,000 rows now take milliseconds instead of minutes, and it still keeps as many rows as fit.
+- **Thinking:** `converse` always sends thinking off, so raising `LLM_THINKING_BUDGET` for imports never reaches chat.
+- **Cost:** `Usage.uncosted_calls` counts calls with neither a reported cost nor a price, so a partial total is visible.
+- **Housekeeping:** `estimate_cost` is now in `__all__`, and the Anthropic cache-order comment is corrected (Anthropic caches tools, then system, then messages).
 
 ## Open questions / follow-ups
 

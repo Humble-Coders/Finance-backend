@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from structlog.testing import capture_logs
 
 from app.config import Settings
 from app.services.llm import (
+    TOOL_RESULT_MAX_BYTES,
     LlmError,
     Message,
     ToolError,
@@ -512,3 +514,149 @@ def test_handlers_without_a_spec_are_refused():
                 handlers={"spending_summary": nothing, "secret": nothing},
             )
         )
+
+
+# --- Regressions from review (#85) -----------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", PROVIDERS)
+class TestReviewRegressions:
+    async def test_a_final_answer_past_the_budget_is_still_returned(self, provider):
+        heavy = (
+            {"input_tokens": 5_000, "output_tokens": 2_000}
+            if provider == "anthropic"
+            else {"prompt_tokens": 5_000, "completion_tokens": 2_000}
+        )
+        client, _ = wired(provider, [text_for(provider)("Paid for.", usage=heavy)])
+
+        result = await ask(client, Recorder(), token_budget=6_000)
+
+        assert result.text == "Paid for."
+
+    async def test_a_tool_name_the_model_invented_is_never_logged(self, provider):
+        invented = "balance_is_48201.15_at_LOBLAWS"
+        client, _ = wired(provider, [calls_for(provider)(("c1", invented, {}))])
+
+        with capture_logs() as logs, pytest.raises(LlmError) as raised:
+            await ask(client, Recorder())
+
+        assert invented not in json.dumps(logs, default=str)
+        assert invented not in str(raised.value)
+        calls = [entry for entry in logs if entry["event"] == "llm_call"]
+        assert calls[0]["tools"] == ["<unregistered>"]
+
+    async def test_a_turn_naming_an_unregistered_tool_runs_nothing(self, provider):
+        client, _ = wired(
+            provider,
+            [
+                calls_for(provider)(
+                    ("c1", "spending_summary", GOOD_ARGS), ("c2", "drop_tables", {})
+                )
+            ],
+        )
+        recorder = Recorder()
+
+        with pytest.raises(LlmError):
+            await ask(client, recorder)
+        assert recorder.runs == []
+
+    async def test_two_malformed_calls_in_one_turn_still_get_a_correction(
+        self, provider
+    ):
+        bad = {"from_month": "2016-01"}
+        client, sent = wired(
+            provider,
+            [
+                calls_for(provider)(
+                    ("c1", "spending_summary", bad), ("c2", "spending_summary", bad)
+                ),
+                calls_for(provider)(("c3", "spending_summary", GOOD_ARGS)),
+                text_for(provider)("Fixed."),
+            ],
+        )
+        recorder = Recorder()
+
+        result = await ask(client, recorder)
+
+        assert result.text == "Fixed."
+        assert recorder.runs == [("spending_summary", GOOD_ARGS)]
+        # Both errors went back in the second request.
+        assert json.dumps(sent[1]["messages"]).count("is required") == 2
+
+    async def test_a_slow_handler_is_stopped_at_the_deadline(self, provider):
+        client, _ = wired(provider, [calls_for(provider)(("c1", "goals", {}))])
+
+        async def slow(args: dict) -> dict:
+            await asyncio.sleep(5)
+            return {}
+
+        with pytest.raises(LlmError, match="deadline"):
+            await run_tools(
+                client,
+                system="s",
+                messages=[Message.user("q")],
+                tools=[GOALS],
+                handlers={"goals": slow},
+                deadline_seconds=0.05,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["gemini", "openrouter"])
+async def test_chat_never_thinks_whatever_imports_are_set_to(provider):
+    client, sent = wired(provider, [openai_text("Hi.")], llm_thinking_budget=8_192)
+
+    await ask(client, Recorder(), max_output_tokens=400)
+
+    body = sent[0]
+    if provider == "openrouter":
+        assert body["reasoning"] == {"effort": "none"}
+    else:
+        assert body["reasoning_effort"] == "none"
+    assert body["max_tokens"] == 400, "nothing reserved for thinking"
+
+
+@pytest.mark.asyncio
+async def test_calls_with_no_cost_are_counted_so_a_partial_total_is_visible():
+    client, _ = wired(
+        "openrouter",
+        [
+            openai_text(
+                "Hi.", usage={"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.01}
+            ),
+            openai_text("Hi.", usage={"prompt_tokens": 1, "completion_tokens": 1}),
+        ],
+    )
+
+    await ask(client, Recorder())
+    await ask(client, Recorder())
+
+    assert client.usage.cost == pytest.approx(0.01)
+    assert client.usage.uncosted_calls == 1
+
+
+def test_truncating_ten_years_of_rows_is_fast_and_keeps_as_many_as_fit():
+    rows = [
+        {"merchant": "Amazon Marketplace", "amount": "12.99", "on": "2021-03-04"}
+        for _ in range(36_000)
+    ]
+
+    started = time.perf_counter()
+    text = tool_result({"rows": rows})
+    elapsed = time.perf_counter() - started
+
+    body = json.loads(text)
+    assert elapsed < 0.5
+    assert body["truncated"] is True and body["row_count"] == 36_000
+    assert len(text.encode()) <= TOOL_RESULT_MAX_BYTES
+    one_more = {**body, "rows": rows[: len(body["rows"]) + 1]}
+    assert len(json.dumps(one_more, separators=(",", ":")).encode()) > (
+        TOOL_RESULT_MAX_BYTES
+    ), "the most rows that fit, not fewer"
+
+
+def test_a_single_row_too_big_for_the_cap_says_so():
+    body = json.loads(tool_result({"rows": [{"note": "x" * 5_000}]}, max_bytes=200))
+
+    assert body == {"truncated": True, "row_count": 1, "error": "too large"}

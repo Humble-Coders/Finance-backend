@@ -51,6 +51,7 @@ __all__ = [
     "Usage",
     "build_client",
     "close_client",
+    "estimate_cost",
     "register_adapter",
     "run_tools",
     "tool_result",
@@ -98,6 +99,9 @@ class Usage:
     # `cost_estimated` says so; otherwise None, never a silent guess.
     cost: float | None = None
     cost_estimated: bool = False
+    # Calls with neither a reported cost nor a price: when non-zero, `cost`
+    # covers only part of the calls and is a floor, not a total.
+    uncosted_calls: int = 0
 
     def add(
         self,
@@ -117,6 +121,8 @@ class Usage:
         if cost is not None:
             self.cost = (self.cost or 0.0) + cost
             self.cost_estimated = self.cost_estimated or estimated
+        else:
+            self.uncosted_calls += 1
 
 
 # --- Conversations with tools (#69) ---------------------------------------------
@@ -247,7 +253,7 @@ class _OpenAICompatibleClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    def _thinking(self) -> tuple[dict, int]:
+    def _thinking(self, budget: int | None = None) -> tuple[dict, int]:
         """The request fields that bound a model's thinking, and the tokens to
         reserve for it on top of the answer.
 
@@ -260,8 +266,10 @@ class _OpenAICompatibleClient:
 
         Sent only to providers whose field we know. Anyone else gets nothing, as
         before — an unrecognised field is a 400 on some of them.
+
+        [budget] overrides the setting; `converse` passes 0.
         """
-        budget = self._thinking_budget
+        budget = self._thinking_budget if budget is None else budget
         if self._provider == "openrouter":
             if budget == 0:
                 return {"reasoning": {"effort": "none"}}, 0
@@ -339,7 +347,11 @@ class _OpenAICompatibleClient:
         tools: Sequence[ToolSpec],
         max_output_tokens: int,
     ) -> AssistantTurn:
-        thinking, reserved = self._thinking()
+        # Thinking always off here, whatever LLM_THINKING_BUDGET says for
+        # imports: it costs output tokens on every round, and Gemini's thinking
+        # models want signatures echoed back across tool turns that we do not
+        # keep. Raising the budget to debug an import must not reach chat.
+        thinking, reserved = self._thinking(budget=0)
         payload: dict[str, Any] = {
             "model": self._model,
             # System first, tools next, and both identical every call: the
@@ -383,7 +395,7 @@ class _OpenAICompatibleClient:
             )
             for i, raw in enumerate(message.get("tool_calls") or [])
         )
-        self._record_usage(data, choice, payload["max_tokens"], [c.name for c in calls])
+        self._record_usage(data, choice, payload["max_tokens"], _loggable(calls, tools))
         if choice.get("finish_reason") == "length":
             raise _cut_off(self._model, payload["max_tokens"])
         text = message.get("content")
@@ -480,11 +492,14 @@ class _AnthropicClient:
             for t in tools
         ]
         if specs:
-            # The cache breakpoint on the last tool covers the system prompt and
-            # every tool before it: the whole stable prefix.
+            # Anthropic orders the cached prefix tools, then system, then
+            # messages. This breakpoint caches the tools alone, so a change to
+            # the system prompt still reuses them; the one on the system block
+            # below covers both.
             specs[-1] = {**specs[-1], "cache_control": {"type": "ephemeral"}}
         payload: dict[str, Any] = {
             "model": self._model,
+            # The breakpoint here ends the stable prefix: tools and system.
             "system": [
                 {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
             ],
@@ -513,13 +528,27 @@ class _AnthropicClient:
             for i, b in enumerate(blocks)
             if b.get("type") == "tool_use"
         )
-        self._record_usage(data, max_output_tokens, [c.name for c in calls])
+        self._record_usage(data, max_output_tokens, _loggable(calls, tools))
         if data.get("stop_reason") == "max_tokens":
             raise _cut_off(self._model, max_output_tokens)
         text = "".join(texts).strip()
         if not calls and not text:
             raise LlmError("the model returned neither text nor a tool call")
         return AssistantTurn(text=text or None, tool_calls=calls)
+
+
+UNREGISTERED_TOOL = "<unregistered>"
+
+
+def _loggable(calls: Sequence[ToolCall], tools: Sequence[ToolSpec]) -> list[str]:
+    """The names of [calls] fit for a log line.
+
+    A tool name in a response is text the model wrote, and a confused or
+    prompt-injected model can write a household's figures into it. Only names
+    we offered are logged as they are; anything else is a placeholder.
+    """
+    offered = {tool.name for tool in tools}
+    return [call.name if call.name in offered else UNREGISTERED_TOOL for call in calls]
 
 
 def _record(
@@ -801,16 +830,30 @@ def tool_result(obj: object, max_bytes: int = TOOL_RESULT_MAX_BYTES) -> str:
         return text
     body = dict(obj) if isinstance(obj, Mapping) else {"rows": obj}
     rows = body.get("rows")
-    if isinstance(rows, list):
+    if isinstance(rows, list) and rows:
         body.setdefault("row_count", len(rows))
         body["truncated"] = True
-        kept = list(rows)
-        while kept:
-            kept.pop()
-            body["rows"] = kept
+
+        def fits(n: int) -> str | None:
+            body["rows"] = rows[:n]
             text = dump(body)
-            if len(text.encode()) <= max_bytes:
-                return text
+            return text if len(text.encode()) <= max_bytes else None
+
+        # The most rows that fit, by binary search: a handful of dumps, each
+        # no bigger than the cap allows plus one row's overshoot — never one
+        # dump per dropped row, which on a long list blocked the event loop for
+        # seconds. Searched only up to the rows the cap could hold at all.
+        best: str | None = None
+        low, high = 1, min(len(rows), max_bytes)
+        while low <= high:
+            middle = (low + high) // 2
+            text = fits(middle)
+            if text is not None:
+                best, low = text, middle + 1
+            else:
+                high = middle - 1
+        if best is not None:
+            return best
     return dump(
         {"truncated": True, "row_count": body.get("row_count"), "error": "too large"}
     )
@@ -893,9 +936,14 @@ async def run_tools(
 
     Stops with `LlmError` at [max_rounds], at the deadline, once [token_budget]
     (input plus output, all rounds) is spent, or when the model asks for a tool
-    that is not in [handlers] — which are never bypassed. Arguments that are
-    not a JSON object, or do not fit the tool's schema, go back to the model
-    once as a tool error; a second malformed call ends the run. A handler's
+    that is not in [handlers] — which are never bypassed. The budget never
+    discards an answer: a final answer is returned whatever it cost, and the
+    budget only refuses to start another round. The deadline covers the
+    handlers as well as the model.
+
+    Arguments that are not a JSON object, or do not fit the tool's schema, go
+    back to the model as tool errors; the model gets one turn to correct them,
+    and a later turn with malformed arguments ends the run. A handler's
     `ToolError` goes back as a tool error too; anything else it raises
     propagates.
     """
@@ -908,12 +956,16 @@ async def run_tools(
     usage = getattr(client, "usage", None)
     spent_before = (usage.input_tokens + usage.output_tokens) if usage else 0
     started = clock()
-    malformed = 0
+    corrected = False
 
-    for round_number in range(1, max_rounds + 1):
+    def time_left() -> float:
         remaining = deadline_seconds - (clock() - started)
         if remaining <= 0:
             raise LlmError("no answer before the deadline")
+        return remaining
+
+    for round_number in range(1, max_rounds + 1):
+        remaining = time_left()
         try:
             turn = await asyncio.wait_for(
                 client.converse(
@@ -926,42 +978,53 @@ async def run_tools(
             )
         except TimeoutError as exc:
             raise LlmError("no answer before the deadline") from exc
-        if usage is not None and token_budget is not None:
-            spent = usage.input_tokens + usage.output_tokens - spent_before
-            if spent > token_budget:
-                log.warning("llm_token_budget_spent", spent=spent, budget=token_budget)
-                raise LlmError("the question's token budget is spent")
         if turn.is_final:
+            # Returned even past the budget: it is already paid for.
             return RunResult(
                 text=turn.text or "",
                 messages=transcript + [Message("assistant", text=turn.text)],
                 rounds=round_number,
                 tool_results=results,
             )
+        if usage is not None and token_budget is not None:
+            spent = usage.input_tokens + usage.output_tokens - spent_before
+            if spent > token_budget:
+                log.warning("llm_token_budget_spent", spent=spent, budget=token_budget)
+                raise LlmError("the question's token budget is spent")
+
+        # Every call is checked before any runs: a turn naming a tool we did
+        # not register runs nothing at all. Its name stays out of the error —
+        # it is the model's text (see `_loggable`).
+        if any(call.name not in handlers for call in turn.tool_calls):
+            raise LlmError("the model asked for an unregistered tool")
+        problems = [
+            "arguments must be a JSON object"
+            if call.arguments is None
+            else _schema_problem(call.arguments, specs[call.name].parameters)
+            for call in turn.tool_calls
+        ]
+        if any(problems):
+            if corrected:
+                raise LlmError("the model sent malformed tool arguments twice")
+            corrected = True
 
         transcript.append(
             Message("assistant", text=turn.text, tool_calls=turn.tool_calls)
         )
-        for call in turn.tool_calls:
-            if call.name not in handlers:
-                raise LlmError(
-                    f"the model asked for an unregistered tool {call.name!r}"
-                )
-            problem = (
-                "arguments must be a JSON object"
-                if call.arguments is None
-                else _schema_problem(call.arguments, specs[call.name].parameters)
-            )
+        for call, problem in zip(turn.tool_calls, problems, strict=True):
             if problem is not None:
-                malformed += 1
-                if malformed > 1:
-                    raise LlmError("the model sent malformed tool arguments twice")
                 transcript.append(
                     Message("tool", text=problem, tool_call_id=call.id, is_error=True)
                 )
                 continue
             try:
-                result = tool_result(await handlers[call.name](call.arguments))
+                result = tool_result(
+                    await asyncio.wait_for(
+                        handlers[call.name](call.arguments), timeout=time_left()
+                    )
+                )
+            except TimeoutError as exc:
+                raise LlmError("no answer before the deadline") from exc
             except ToolError as error:
                 transcript.append(
                     Message(

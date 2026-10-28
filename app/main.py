@@ -13,6 +13,7 @@ from app.api import (
     budgets,
     capabilities,
     categories,
+    chat_suggestions,
     dashboard,
     debts,
     errors,
@@ -53,6 +54,7 @@ app.include_router(dashboard.router)
 app.include_router(debts.router)
 app.include_router(plan.router)
 app.include_router(categories.router)
+app.include_router(chat_suggestions.router)
 app.include_router(me.router)
 app.include_router(legal.router)
 app.include_router(financial_setup.router)

@@ -151,6 +151,9 @@ class BudgetOut(BaseModel):
     month_saved: str = "0.00"
     # month_net - month_saved: income less spending less savings.
     month_left: str = "0.00"
+    # Every line but savings, less everything spent so far; negative once
+    # over, null once the month has ended. The Budget tab's "left to spend".
+    left_to_spend: str | None = None
     # Expected income less every line but savings: the room for a target.
     savings_room: str = "0.00"
     # The category a savings target is set on (`PUT .../lines/{id}`).

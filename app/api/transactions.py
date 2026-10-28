@@ -36,6 +36,7 @@ from app.schemas.transactions import (
     TransactionOut,
     TransactionPatchIn,
 )
+from app.services import rollups
 from app.services.ai_consent import current_policy, has_consented
 from app.services.conflicts import log_conflict
 from app.services.corrections import learn
@@ -384,7 +385,7 @@ async def add_transaction(
             may_ask_model=await _may_ask_model(session, identity, get_settings()),
         )
     # A card payment typed in can be the other half of one imported (#73).
-    await pair_transfers(
+    paired = await pair_transfers(
         session,
         household_id,
         [row.id],
@@ -392,6 +393,7 @@ async def add_transaction(
     )
 
     await session.flush()
+    await rollups.refresh(session, household_id, [row.occurred_on, *paired.refiled_on])
     await session.commit()
     await session.refresh(row)
     return _as_out(row)
@@ -453,6 +455,9 @@ async def correct_transaction(
     """
     household_id = identity.household.id
     row = await _owned(session, household_id, transaction_id)
+    # Both months move when the date does: the one it leaves and the one it
+    # joins (#83).
+    was_on = row.occurred_on
 
     occurred_on = body.occurred_on or row.occurred_on
     description = body.description if body.description is not None else row.description
@@ -536,7 +541,7 @@ async def correct_transaction(
 
     # After the row is written, so the rule learns the merchant the user just
     # confirmed rather than the one they were correcting.
-    recategorized, rule_recorded = 0, False
+    recategorized, rule_recorded, refiled_on = 0, False, ()
     if recategorize:
         learned = await learn(
             session,
@@ -546,7 +551,9 @@ async def correct_transaction(
             corrected_category_id=body.category_id,
         )
         recategorized, rule_recorded = learned.recategorized, learned.rule_recorded
+        refiled_on = learned.recategorized_on
 
+    await rollups.refresh(session, household_id, [was_on, row.occurred_on, *refiled_on])
     finished = await _finish_import(session, import_id)
     await session.commit()
     return PatchOutcomeOut(
@@ -601,6 +608,8 @@ async def confirm_transactions(
     # one (see `_resolve`).
     left = [row for row in waiting if _resolve(row)]
     await session.flush()
+    # A suspected duplicate answered "not a duplicate" starts counting.
+    await rollups.refresh(session, household_id, [row.occurred_on for row in waiting])
 
     finished = []
     for import_id in {row.statement_import_id for row in waiting} - {None}:
@@ -624,6 +633,8 @@ async def confirm_transaction(
 
     _resolve(row)
     await session.flush()
+    if was_waiting:
+        await rollups.refresh(session, household_id, [row.occurred_on])
 
     finished = was_waiting and await _finish_import(session, import_id)
     await session.commit()
@@ -642,7 +653,8 @@ async def set_one_off(
 
     Not a correction: the row's review state is left as it is.
     """
-    row = await _owned(session, identity.household.id, transaction_id)
+    household_id = identity.household.id
+    row = await _owned(session, household_id, transaction_id)
     if body.one_off and row.direction != TransactionDirection.debit:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -654,6 +666,7 @@ async def set_one_off(
         )
     row.is_one_off = body.one_off
     await session.flush()
+    await rollups.refresh(session, household_id, [row.occurred_on])
     await session.commit()
     return _as_out(row)
 
@@ -682,9 +695,11 @@ async def delete_transaction(
     household_id = identity.household.id
     row = await _owned(session, household_id, transaction_id)
     import_id, was_waiting = row.statement_import_id, row.needs_review
+    occurred_on = row.occurred_on
 
     await session.delete(row)
     await session.flush()
+    await rollups.refresh(session, household_id, [occurred_on])
 
     # Deleting a row still waiting is one way of answering it, so it can be the
     # answer that finishes an import. Deleting one already confirmed changes

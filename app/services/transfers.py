@@ -38,7 +38,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 
 import structlog
 from sqlalchemy import and_, or_, select
@@ -103,6 +103,9 @@ class Paired:
     # pair. The save's own `needs_review` counts only its own import, so
     # without this the person is not told that an older row is waiting too.
     refiled_earlier: int = 0
+    # The dates of every re-filed row. A partner can sit in the month next to
+    # the saved row's, so the monthly totals of both are rebuilt (#83).
+    refiled_on: tuple[date, ...] = ()
 
 
 @dataclass
@@ -299,6 +302,7 @@ async def pair_transfers(
         pairs=len(best),
         refiled=len(to_file),
         refiled_earlier=sum(1 for side in to_file if side.row.id not in new),
+        refiled_on=tuple(side.row.occurred_on for side in to_file),
     )
     if outcome.pairs or outcome.refiled:
         # Counts only: which rows, and for how much, is the household's.

@@ -6,10 +6,12 @@ recompute them (PRD §4.1).
 
 from __future__ import annotations
 
+import uuid
 from datetime import date
 
-from sqlalchemy import BigInteger, Date, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Date, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -18,6 +20,7 @@ from app.models.base import (
     TimestampMixin,
     UUIDMixin,
     currency_check,
+    money_amount,
     money_currency,
 )
 
@@ -25,6 +28,8 @@ __all__ = [
     "AiBudgetSuggestion",
     "ChatConversation",
     "HealthScoreSnapshot",
+    "LedgerState",
+    "MonthlyCategoryTotal",
     "PlanDiagnostic",
 ]
 
@@ -131,3 +136,71 @@ class PlanDiagnostic(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     figures: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     advice: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class MonthlyCategoryTotal(UUIDMixin, HouseholdScopedMixin, Base):
+    """A household's money for one month, category and direction, summed.
+
+    What the AI coach reads for any period question: ten years is about a
+    thousand of these rows instead of tens of thousands of transactions
+    (#83). Derived, never edited — `app/services/rollups.py` deletes and
+    rebuilds a month's rows whenever the ledger under it changes.
+
+    Kept for **every** currency a household holds; a reader filters to the
+    household's own, as `countable` does, so a change of country needs no
+    rebuild. Unresolved suspected duplicates are never in it. One-offs are in
+    `total_minor_units`, and also in `one_off_minor_units` so an answer can say
+    "including a $1,200 one-off".
+    """
+
+    __tablename__ = "monthly_category_total"
+    __table_args__ = (
+        # Unfiled rows (no category) are one row a month too: NULL is folded
+        # to the zero UUID, which works on any Postgres (NULLS NOT DISTINCT
+        # needs 15).
+        Index(
+            "uq_monthly_category_total_key",
+            "household_id",
+            "currency",
+            "month",
+            text("coalesce(category_id, '00000000-0000-0000-0000-000000000000')"),
+            "direction",
+            unique=True,
+        ),
+        currency_check(),
+    )
+
+    currency: Mapped[str] = money_currency()
+    # The first day of the month.
+    month: Mapped[date] = mapped_column(Date, nullable=False)
+    # NULL: not filed yet. RESTRICT, not SET NULL: a category deleted from
+    # under these rows would leave them filed wrongly; a future delete must
+    # rebuild the household's totals first.
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("category.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    # Copied so a read needs no join; NULL with `category_id`.
+    category_slug: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # `debit` or `credit`, as on the transaction.
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    total_minor_units: Mapped[int] = money_amount("total_minor_units", nullable=False)
+    one_off_minor_units: Mapped[int] = money_amount(
+        "one_off_minor_units", nullable=False
+    )
+    transaction_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class LedgerState(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
+    """One row per household: a number that goes up whenever its ledger does.
+
+    Anything cached from the ledger — a suggested answer (6.2), a chat answer
+    (6.4) — is keyed by `ledger_version`, so a write invalidates it without
+    anyone having to remember to.
+    """
+
+    __tablename__ = "ledger_state"
+    __table_args__ = (Index("uq_ledger_state_household", "household_id", unique=True),)
+
+    ledger_version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)

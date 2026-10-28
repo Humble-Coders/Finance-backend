@@ -34,7 +34,7 @@ from app.schemas.budget import (
     UnbudgetedOut,
 )
 from app.services import budget as service
-from app.services import commitments
+from app.services import commitments, rollups
 from app.services.capabilities import currency_for, require_feature
 from app.services.conflicts import log_conflict
 from app.services.dashboard import month_bounds, parse_month
@@ -547,6 +547,7 @@ async def tick_off_with_new_payment(
             },
         ) from duplicate
     await session.flush()
+    await rollups.refresh(session, household_id, [row.occurred_on])
     await _link(session, household_id, when, obligation, row)
     return await _answer(session, identity, when)
 

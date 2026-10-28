@@ -286,11 +286,21 @@ def countable(household_id: uuid.UUID, currency: str) -> list:
     return [
         Transaction.household_id == household_id,
         Transaction.currency == currency,
-        ~and_(
-            Transaction.needs_review.is_(True),
-            Transaction.review_reason == ReviewReason.suspected_duplicate,
-        ),
+        not_an_unresolved_duplicate(),
     ]
+
+
+def not_an_unresolved_duplicate():
+    """The duplicate half of `countable`, apart from the currency half.
+
+    The monthly totals (`rollups`) keep every currency and leave the currency
+    choice to whoever reads them; the duplicate rule they apply at write
+    time, through this, so it cannot drift from the dashboard's.
+    """
+    return ~and_(
+        Transaction.needs_review.is_(True),
+        Transaction.review_reason == ReviewReason.suspected_duplicate,
+    )
 
 
 def is_flow():

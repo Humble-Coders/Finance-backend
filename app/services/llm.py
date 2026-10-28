@@ -869,24 +869,38 @@ _JSON_TYPES: dict[str, tuple[type, ...]] = {
 }
 
 
+def _is_type(value: object, kind: object) -> bool:
+    """Whether [value] is JSON type [kind]. A type we do not know passes:
+    the checker is a subset, and the handler validates the rest."""
+    if kind == "null":
+        return value is None
+    allowed = _JSON_TYPES.get(kind) if isinstance(kind, str) else None
+    if allowed is None:
+        return True
+    if kind in ("integer", "number") and isinstance(value, bool):
+        return False
+    return isinstance(value, allowed)
+
+
 def _schema_problem(
     value: object, schema: Mapping[str, Any], path: str = ""
 ) -> str | None:
     """Why [value] does not fit [schema], or None.
 
-    The subset tool schemas use: `type`, `properties`, `required`,
+    The subset tool schemas use: `type` (one, or a list such as
+    `["string", "null"]`), `properties`, `required`,
     `additionalProperties: false`, `enum`, `items`, `minimum` / `maximum`.
     Enough to send a malformed call back to the model with a reason, without a
-    dependency for it.
+    dependency for it. Anything else — `pattern`, `format`, `anyOf` — is not
+    checked here: a handler validates it and raises `ToolError`.
     """
     where = path or "arguments"
     kind = schema.get("type")
-    if kind in _JSON_TYPES:
-        allowed = _JSON_TYPES[kind]
-        if not isinstance(value, allowed) or (
-            kind in ("integer", "number") and isinstance(value, bool)
-        ):
-            return f"{where} must be a {kind}"
+    # One type, or a list of them — `["string", "null"]` is how a schema (and
+    # OpenAI's strict mode) writes an optional field.
+    kinds = kind if isinstance(kind, list) else [kind] if kind is not None else []
+    if kinds and not any(_is_type(value, k) for k in kinds):
+        return f"{where} must be a {' or '.join(map(str, kinds))}"
     if "enum" in schema and value not in schema["enum"]:
         return f"{where} must be one of {schema['enum']}"
     if isinstance(value, int | float) and not isinstance(value, bool):
@@ -967,21 +981,31 @@ async def run_tools(
             raise LlmError("no answer before the deadline")
         return remaining
 
-    for round_number in range(1, max_rounds + 1):
-        remaining = time_left()
-        input_before = usage.input_tokens if usage else 0
+    async def before_deadline(start: Callable[[], Awaitable[Any]]) -> Any:
+        # The time left is read before [start] makes its coroutine, so a run
+        # already past the deadline creates nothing it then fails to await.
+        scope = asyncio.timeout(time_left())
         try:
-            turn = await asyncio.wait_for(
-                client.converse(
-                    system=system,
-                    messages=transcript,
-                    tools=tools,
-                    max_output_tokens=max_output_tokens,
-                ),
-                timeout=remaining,
-            )
+            async with scope:
+                return await start()
         except TimeoutError as exc:
-            raise LlmError("no answer before the deadline") from exc
+            # Only our own deadline becomes "no answer before the deadline". A
+            # TimeoutError the work raised itself — a database pool, say — is
+            # a different failure and propagates as itself.
+            if scope.expired():
+                raise LlmError("no answer before the deadline") from exc
+            raise
+
+    for round_number in range(1, max_rounds + 1):
+        input_before = usage.input_tokens if usage else 0
+        turn: AssistantTurn = await before_deadline(
+            lambda: client.converse(
+                system=system,
+                messages=transcript,
+                tools=tools,
+                max_output_tokens=max_output_tokens,
+            )
+        )
         if turn.is_final:
             # Returned even past the budget: it is already paid for.
             return RunResult(
@@ -1031,14 +1055,10 @@ async def run_tools(
                     Message("tool", text=problem, tool_call_id=call.id, is_error=True)
                 )
                 continue
+            handler = handlers[call.name]
+            arguments = call.arguments
             try:
-                result = tool_result(
-                    await asyncio.wait_for(
-                        handlers[call.name](call.arguments), timeout=time_left()
-                    )
-                )
-            except TimeoutError as exc:
-                raise LlmError("no answer before the deadline") from exc
+                result = tool_result(await before_deadline(lambda: handler(arguments)))
             except ToolError as error:
                 transcript.append(
                     Message(

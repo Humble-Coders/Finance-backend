@@ -38,10 +38,11 @@ Cost controls are built in:
 - `app/config.py`:
   - `llm_chat_token_budget` (6,000), the per-question budget 6.4 will pass in;
   - `llm_prices`, the per-model price table (USD per million tokens) used for estimates.
+- `app/services/statements.py`: the import's cost line now carries `cost_estimated` and `uncosted_calls`, because `Usage.cost` can now be an estimate.
 - `.env.example`: documents `LLM_CHAT_TOKEN_BUDGET` and `LLM_PRICES`.
 
 **Tests**
-- `tests/test_llm_tools.py` (51 tests, 19 of them regressions from the two #85 reviews): fake HTTP via `httpx.MockTransport`, so no key and no model.
+- `tests/test_llm_tools.py` (58 tests, 26 of them regressions from the three #85 reviews): fake HTTP via `httpx.MockTransport`, so no key and no model.
   - They run against both transports and the recorded request bodies.
   - They cover every acceptance criterion below.
 
@@ -51,9 +52,9 @@ Cost controls are built in:
 cd Finance-backend
 export DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres
 export MIGRATION_DATABASE_URL=$DATABASE_URL
-.venv/bin/pytest -q tests/test_llm_tools.py            # 51 passed
+.venv/bin/pytest -q tests/test_llm_tools.py            # 58 passed
 .venv/bin/pytest -q tests/test_llm_client.py tests/test_statement_parsing.py tests/test_categorization_batches.py
-.venv/bin/pytest -q -m "not integration"                # 506 passed
+.venv/bin/pytest -q -m "not integration"                # 513 passed
 .venv/bin/pytest -q -m integration                      # 676 passed (needs local Postgres)
 .venv/bin/ruff check app tests && .venv/bin/ruff format --check app tests
 ```
@@ -102,6 +103,19 @@ Optional real round trip: use the dev key from the team password manager, with s
 - **Last round:** tools the model asks for on the final round are no longer run. Nothing could read their results, so they were wasted queries; the model now gets `max_rounds - 1` tool rounds and the last round must answer.
 - **Token budget:** the budget refuses a round that would not fit, instead of noticing after it has overshot. The next round's input is at least this round's, because the transcript only grows, plus its output allowance. A final answer is still always returned.
 - **Truncation:** the comment is corrected, and the timing test allows 2 s for slow CI runners.
+
+### Changes from the third #85 review
+
+- **Nullable types:** `_schema_problem` accepts a list of types such as `["string", "null"]`. Before, it crashed with `TypeError` on any tool schema with an optional field, and that error escaped `run_tools` as a non-`LlmError`.
+- **Deadline:** the model call and every handler run inside one `asyncio.timeout` scope.
+  - The time left is read before a handler's coroutine is created, so nothing is left unawaited past the deadline.
+  - `scope.expired()` tells our deadline apart from a `TimeoutError` the handler raised itself (a database pool, say). That one now propagates as itself instead of being labelled "no answer before the deadline".
+- **Import cost line:** statement imports log `cost_estimated` and `uncosted_calls` next to `cost`.
+
+### Accepted limits
+
+- **Token usage:** the token budget relies on the provider reporting usage. A response without usage figures, or a client without `usage`, cannot trip it.
+- **Unchecked schema keywords:** `pattern`, `format` and `anyOf` are not checked by `_schema_problem`. 6.1's handlers validate them and raise `ToolError`.
 
 ## Open questions / follow-ups
 

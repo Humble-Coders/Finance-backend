@@ -22,11 +22,13 @@ from app.services.llm import (
     Message,
     ToolError,
     ToolSpec,
+    _schema_problem,
     build_client,
     estimate_cost,
     run_tools,
     tool_result,
 )
+from app.services.statements import _usage_fields
 
 SECRET = "LOBLAWS-4412"
 
@@ -705,3 +707,129 @@ class TestBudgetRefusesARoundThatWouldNotFit:
         result = await ask(client, Recorder(), token_budget=12_100)
 
         assert result.text == "Answered."
+
+
+# --- Regressions from the third review (#85) ---------------------------------------
+
+
+class TestNullableTypes:
+    schema = {
+        "type": "object",
+        "properties": {"merchant": {"type": ["string", "null"]}},
+    }
+
+    def test_null_and_the_named_type_both_pass(self):
+        assert _schema_problem({"merchant": None}, self.schema) is None
+        assert _schema_problem({"merchant": "Costco"}, self.schema) is None
+
+    def test_any_other_type_is_named_in_the_problem(self):
+        problem = _schema_problem({"merchant": 12}, self.schema)
+
+        assert problem == "arguments.merchant must be a string or null"
+
+    def test_a_bool_is_not_a_number_in_a_list_either(self):
+        schema = {"type": ["integer", "null"]}
+
+        assert _schema_problem(True, schema) is not None
+
+
+@pytest.mark.asyncio
+async def test_an_optional_field_in_a_tool_schema_reaches_the_handler():
+    spec = ToolSpec(
+        name="transaction_search",
+        description="Find transactions.",
+        parameters={
+            "type": "object",
+            "properties": {"merchant": {"type": ["string", "null"]}},
+            "required": ["merchant"],
+        },
+    )
+    client, _ = wired(
+        "gemini",
+        [
+            openai_calls(("c1", "transaction_search", {"merchant": None})),
+            openai_text("None."),
+        ],
+    )
+    seen: list[dict] = []
+
+    async def search(args: dict) -> dict:
+        seen.append(args)
+        return {"rows": [], "row_count": 0}
+
+    result = await run_tools(
+        client,
+        system="s",
+        messages=[Message.user("q")],
+        tools=[spec],
+        handlers={"transaction_search": search},
+    )
+
+    assert result.text == "None."
+    assert seen == [{"merchant": None}]
+
+
+@pytest.mark.asyncio
+async def test_past_the_deadline_no_handler_coroutine_is_left_unawaited():
+    client, _ = wired("gemini", [openai_calls(("c1", "goals", {}))])
+    created: list[str] = []
+
+    async def goals(args: dict) -> dict:
+        return {}
+
+    def counting(args: dict):
+        created.append("goals")
+        return goals(args)
+
+    # Starts at 0, the model call is in time, then the clock jumps past 45 s.
+    ticks = iter([0.0, 1.0, 100.0])
+
+    with pytest.raises(LlmError, match="deadline"):
+        await run_tools(
+            client,
+            system="s",
+            messages=[Message.user("q")],
+            tools=[GOALS],
+            handlers={"goals": counting},
+            clock=lambda: next(ticks),
+        )
+    assert created == [], "the handler was never even called"
+
+
+@pytest.mark.asyncio
+async def test_a_handlers_own_timeout_is_not_reported_as_the_deadline():
+    client, _ = wired("gemini", [openai_calls(("c1", "goals", {}))])
+
+    async def pool_exhausted(args: dict) -> dict:
+        raise TimeoutError("connection pool exhausted")
+
+    with pytest.raises(TimeoutError, match="pool exhausted"):
+        await run_tools(
+            client,
+            system="s",
+            messages=[Message.user("q")],
+            tools=[GOALS],
+            handlers={"goals": pool_exhausted},
+        )
+
+
+def test_an_imports_cost_line_says_when_the_cost_is_an_estimate():
+    client, _ = wired(
+        "gemini",
+        [],
+        llm_prices={"m": {"input": 1.0, "output": 1.0}},
+    )
+    client.usage.add(
+        input_tokens=1_000_000,
+        output_tokens=0,
+        reasoning_tokens=0,
+        cost=1.0,
+        estimated=True,
+    )
+    client.usage.add(input_tokens=1, output_tokens=1, reasoning_tokens=0, cost=None)
+
+    fields = _usage_fields(client)
+
+    assert fields["cost"] == pytest.approx(1.0)
+    assert fields["cost_estimated"] is True
+    assert fields["uncosted_calls"] == 1

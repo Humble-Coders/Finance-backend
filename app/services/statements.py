@@ -462,6 +462,10 @@ def _usage_fields(client: LlmClient) -> dict[str, object]:
         "output_tokens": usage.output_tokens,
         "reasoning_tokens": usage.reasoning_tokens,
         "cost": usage.cost,
+        # `cost` may be an estimate from LLM_PRICES, or cover only some calls;
+        # the line says which rather than passing either off as the bill.
+        "cost_estimated": usage.cost_estimated,
+        "uncosted_calls": usage.uncosted_calls,
     }
 
 

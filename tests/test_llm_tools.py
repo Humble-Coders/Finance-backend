@@ -234,10 +234,14 @@ class TestTheLoop:
 
     async def test_it_stops_at_the_round_limit(self, provider):
         again = calls_for(provider)(("c1", "goals", {}))
-        client, _ = wired(provider, [again, again, again])
+        client, sent = wired(provider, [again, again, again])
+        recorder = Recorder()
 
         with pytest.raises(LlmError, match="within 3 rounds"):
-            await ask(client, Recorder(), max_rounds=3)
+            await ask(client, recorder, max_rounds=3)
+        assert len(sent) == 3
+        # The third round's tools are not run: no round is left to read them.
+        assert len(recorder.runs) == 2
 
     async def test_it_stops_at_the_deadline(self, provider):
         client, _ = wired(provider, [calls_for(provider)(("c1", "goals", {}))])
@@ -647,7 +651,8 @@ def test_truncating_ten_years_of_rows_is_fast_and_keeps_as_many_as_fit():
     elapsed = time.perf_counter() - started
 
     body = json.loads(text)
-    assert elapsed < 0.5
+    # Generous for a slow CI runner; the old row-by-row cut took minutes here.
+    assert elapsed < 2.0
     assert body["truncated"] is True and body["row_count"] == 36_000
     assert len(text.encode()) <= TOOL_RESULT_MAX_BYTES
     one_more = {**body, "rows": rows[: len(body["rows"]) + 1]}
@@ -660,3 +665,43 @@ def test_a_single_row_too_big_for_the_cap_says_so():
     body = json.loads(tool_result({"rows": [{"note": "x" * 5_000}]}, max_bytes=200))
 
     assert body == {"truncated": True, "row_count": 1, "error": "too large"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", PROVIDERS)
+class TestBudgetRefusesARoundThatWouldNotFit:
+    def heavy(self, provider: str) -> dict:
+        return (
+            {"input_tokens": 5_800, "output_tokens": 100}
+            if provider == "anthropic"
+            else {"prompt_tokens": 5_800, "completion_tokens": 100}
+        )
+
+    async def test_a_round_that_would_overshoot_is_never_started(self, provider):
+        client, sent = wired(
+            provider,
+            [
+                calls_for(provider)(("c1", "goals", {}), usage=self.heavy(provider)),
+                text_for(provider)("Never asked."),
+            ],
+        )
+        recorder = Recorder()
+
+        with pytest.raises(LlmError, match="token budget"):
+            await ask(client, recorder, token_budget=6_000)
+        assert len(sent) == 1, "the second round was not started"
+        assert recorder.runs == [], "nor its tools run"
+
+    async def test_a_round_that_fits_goes_ahead(self, provider):
+        client, _ = wired(
+            provider,
+            [
+                calls_for(provider)(("c1", "goals", {}), usage=self.heavy(provider)),
+                text_for(provider)("Answered."),
+            ],
+        )
+
+        # 5,900 spent + at least 5,800 in + 400 out = 12,100.
+        result = await ask(client, Recorder(), token_budget=12_100)
+
+        assert result.text == "Answered."

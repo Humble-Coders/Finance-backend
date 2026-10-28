@@ -839,10 +839,10 @@ def tool_result(obj: object, max_bytes: int = TOOL_RESULT_MAX_BYTES) -> str:
             text = dump(body)
             return text if len(text.encode()) <= max_bytes else None
 
-        # The most rows that fit, by binary search: a handful of dumps, each
-        # no bigger than the cap allows plus one row's overshoot — never one
-        # dump per dropped row, which on a long list blocked the event loop for
-        # seconds. Searched only up to the rows the cap could hold at all.
+        # The most rows that fit, by binary search: about a dozen dumps of at
+        # most `max_bytes` rows each (no row serialises smaller than a byte) —
+        # never one dump per dropped row, which on a long list blocked the
+        # event loop for seconds.
         best: str | None = None
         low, high = 1, min(len(rows), max_bytes)
         while low <= high:
@@ -937,9 +937,12 @@ async def run_tools(
     Stops with `LlmError` at [max_rounds], at the deadline, once [token_budget]
     (input plus output, all rounds) is spent, or when the model asks for a tool
     that is not in [handlers] — which are never bypassed. The budget never
-    discards an answer: a final answer is returned whatever it cost, and the
-    budget only refuses to start another round. The deadline covers the
-    handlers as well as the model.
+    discards an answer: a final answer is returned whatever it cost. Instead it
+    refuses a round that would not fit — the next round's input is at least
+    this round's (the transcript only grows), plus its output allowance — so a
+    run cannot overshoot by a whole round. On the last round, tools the model
+    asks for are not run: nothing would read their results. The deadline
+    covers the handlers as well as the model.
 
     Arguments that are not a JSON object, or do not fit the tool's schema, go
     back to the model as tool errors; the model gets one turn to correct them,
@@ -966,6 +969,7 @@ async def run_tools(
 
     for round_number in range(1, max_rounds + 1):
         remaining = time_left()
+        input_before = usage.input_tokens if usage else 0
         try:
             turn = await asyncio.wait_for(
                 client.converse(
@@ -986,10 +990,20 @@ async def run_tools(
                 rounds=round_number,
                 tool_results=results,
             )
+        if round_number == max_rounds:
+            # Checked before any tool runs: their results could only go to a
+            # round that will not happen, so running them is a wasted query.
+            raise LlmError(f"no answer within {max_rounds} rounds")
         if usage is not None and token_budget is not None:
             spent = usage.input_tokens + usage.output_tokens - spent_before
-            if spent > token_budget:
-                log.warning("llm_token_budget_spent", spent=spent, budget=token_budget)
+            next_round = (usage.input_tokens - input_before) + max_output_tokens
+            if spent + next_round > token_budget:
+                log.warning(
+                    "llm_token_budget_spent",
+                    spent=spent,
+                    next_round=next_round,
+                    budget=token_budget,
+                )
                 raise LlmError("the question's token budget is spent")
 
         # Every call is checked before any runs: a turn naming a tool we did
@@ -1035,4 +1049,5 @@ async def run_tools(
             results.append((call.name, result))
             transcript.append(Message("tool", text=result, tool_call_id=call.id))
 
+    # Only when max_rounds < 1; every other path returns or raises above.
     raise LlmError(f"no answer within {max_rounds} rounds")

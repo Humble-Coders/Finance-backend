@@ -41,7 +41,7 @@ Cost controls are built in:
 - `.env.example`: documents `LLM_CHAT_TOKEN_BUDGET` and `LLM_PRICES`.
 
 **Tests**
-- `tests/test_llm_tools.py` (47 tests, 15 of them regressions from the #85 review): fake HTTP via `httpx.MockTransport`, so no key and no model.
+- `tests/test_llm_tools.py` (51 tests, 19 of them regressions from the two #85 reviews): fake HTTP via `httpx.MockTransport`, so no key and no model.
   - They run against both transports and the recorded request bodies.
   - They cover every acceptance criterion below.
 
@@ -51,9 +51,9 @@ Cost controls are built in:
 cd Finance-backend
 export DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres
 export MIGRATION_DATABASE_URL=$DATABASE_URL
-.venv/bin/pytest -q tests/test_llm_tools.py            # 47 passed
+.venv/bin/pytest -q tests/test_llm_tools.py            # 51 passed
 .venv/bin/pytest -q tests/test_llm_client.py tests/test_statement_parsing.py tests/test_categorization_batches.py
-.venv/bin/pytest -q -m "not integration"                # 502 passed
+.venv/bin/pytest -q -m "not integration"                # 506 passed
 .venv/bin/pytest -q -m integration                      # 676 passed (needs local Postgres)
 .venv/bin/ruff check app tests && .venv/bin/ruff format --check app tests
 ```
@@ -97,9 +97,18 @@ Optional real round trip: use the dev key from the team password manager, with s
 - **Cost:** `Usage.uncosted_calls` counts calls with neither a reported cost nor a price, so a partial total is visible.
 - **Housekeeping:** `estimate_cost` is now in `__all__`, and the Anthropic cache-order comment is corrected (Anthropic caches tools, then system, then messages).
 
+### Changes from the second #85 review
+
+- **Last round:** tools the model asks for on the final round are no longer run. Nothing could read their results, so they were wasted queries; the model now gets `max_rounds - 1` tool rounds and the last round must answer.
+- **Token budget:** the budget refuses a round that would not fit, instead of noticing after it has overshot. The next round's input is at least this round's, because the transcript only grows, plus its output allowance. A final answer is still always returned.
+- **Truncation:** the comment is corrected, and the timing test allows 2 s for slow CI runners.
+
 ## Open questions / follow-ups
 
 - **Prices:** fill `LLM_PRICES` in Render for the production model (`google/gemini-2.5-flash` via OpenRouter reports its own cost, so this matters mainly after a provider switch).
 - **Gemini implicit caching** only applies above a minimum prefix size. 6.4's system prompt plus tool definitions should be checked against it once written.
 - **Stale comment:** the `.env.example` line "Statement parsing is the only thing that calls a model" becomes untrue when 6.4 lands; update it there.
+- **For 6.4:**
+  - a handler stopped by the deadline is cancelled mid-query, so roll back the session before reusing it;
+  - run one synthetic round trip through Gemini's OpenAI-compatible endpoint with the dev key, to confirm it accepts `content: null` on assistant turns that only call tools.
 - **Untracked ticket docs:** the M4–M6 ticket docs under `docs/tickets/` are still untracked in this repo and are not part of this branch.

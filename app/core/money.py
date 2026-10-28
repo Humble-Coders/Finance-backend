@@ -24,6 +24,7 @@ __all__ = [
     "from_minor_units",
     "normalize",
     "round_up_to_whole_unit",
+    "display",
 ]
 
 # ISO 4217 minor-unit exponents. Extend as markets are added (PRD §4.6).
@@ -36,6 +37,10 @@ _EXPONENTS: dict[str, int] = {
 }
 
 _DEFAULT_EXPONENT = 2
+
+# Symbols for sentences a person reads. A currency without one is shown by its
+# code after the amount ("1,200 JPY"), which is never wrong, only plainer.
+_SYMBOLS: dict[str, str] = {"CAD": "$", "USD": "$", "EUR": "€", "GBP": "£"}
 
 
 class MoneyError(ValueError):
@@ -134,3 +139,30 @@ def round_up_to_whole_unit(minor_units: int | Decimal, currency: str) -> int:
     unit = Decimal(1).scaleb(exponent_for(currency))
     whole = (Decimal(minor_units) / unit).to_integral_value(rounding=ROUND_CEILING)
     return int(whole * unit)
+
+
+def display(amount: str, currency: str) -> str:
+    """A decimal string as a person reads it: "$1,234.50", "-$12.00".
+
+    Formatting only — digits grouped and a symbol added; the value is the
+    string's own, to the minor unit, never rounded. For sentences the server
+    writes (the AI coach's suggested answers, #84); the API itself keeps
+    returning plain decimal strings.
+
+    >>> display("1234.5", "CAD")
+    '$1,234.50'
+    >>> display("-12", "CAD")
+    '-$12.00'
+    >>> display("1200", "JPY")
+    '1,200 JPY'
+    """
+    exponent = exponent_for(currency)
+    value = _parse(amount).quantize(Decimal(1).scaleb(-exponent))
+    if value != _parse(amount):
+        raise MoneyError(
+            f"{amount!r} has more precision than {currency.upper()} allows"
+        )
+    sign = "-" if value < 0 else ""
+    digits = f"{abs(value):,.{exponent}f}"
+    symbol = _SYMBOLS.get(currency.upper())
+    return f"{sign}{symbol}{digits}" if symbol else f"{sign}{digits} {currency.upper()}"

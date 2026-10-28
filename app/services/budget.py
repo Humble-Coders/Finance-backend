@@ -308,6 +308,20 @@ class BudgetView:
     # been made for it yet: the app may ask for one.
     ai_review_due: bool = False
 
+    @property
+    def left_to_spend(self) -> int | None:
+        """What the month's budget has left: every line but savings, less
+        everything spent so far, in or out of the lines — negative once over.
+        None once the month has ended (`month_left` says what was left over).
+
+        The Budget tab's "left to spend", worked out here once so the app and
+        the AI coach's suggested answer (#84) cannot disagree about it.
+        """
+        if self.month_ended:
+            return None
+        savings = self.savings.allocated if self.savings is not None else 0
+        return self.total_allocated - savings - self.spent_overall
+
 
 class NotBudgetable(Exception):
     """`income` or `transfers`: money that moves, not money spent."""

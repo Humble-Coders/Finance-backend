@@ -6,6 +6,7 @@ import pytest
 
 from app.core.money import (
     MoneyError,
+    display,
     exponent_for,
     from_minor_units,
     normalize,
@@ -113,3 +114,23 @@ class TestRoundUpToWholeUnit:
     def test_anything_but_an_integer_or_decimal_is_refused(self, bad):
         with pytest.raises(MoneyError):
             round_up_to_whole_unit(bad, "CAD")
+
+
+class TestDisplay:
+    """Amounts in sentences a person reads (#84): formatting only, never a
+    different value."""
+
+    def test_digits_are_grouped_and_a_symbol_added(self):
+        assert display("1234.5", "CAD") == "$1,234.50"
+        assert display("1234567.89", "USD") == "$1,234,567.89"
+        assert display("0", "GBP") == "£0.00"
+
+    def test_a_negative_amount_keeps_its_sign_before_the_symbol(self):
+        assert display("-12", "CAD") == "-$12.00"
+
+    def test_a_currency_without_a_symbol_is_named_by_its_code(self):
+        assert display("1200", "JPY") == "1,200 JPY"
+
+    def test_it_never_rounds(self):
+        with pytest.raises(MoneyError):
+            display("1.005", "CAD")

@@ -56,6 +56,10 @@ ASSUMED_RETURN_BPS = 500
 MAX_OUTPUT_TOKENS = 1_200
 TEXT_MAX_CHARS = 500
 STEP_KEYS = ("savings", "goals", "debt", "invest")
+# Which order the AI recommends when there is a choice.
+PLAN_ORDER = "plan"
+DEBT_FIRST = "debt_first"
+RECOMMENDATIONS = (PLAN_ORDER, DEBT_FIRST)
 
 
 class LimitReached(Exception):
@@ -145,6 +149,31 @@ async def facts(
             else None
         )
         per_100 = 100 * 10 ** exponent_for(currency)
+        # The other order: goals wait until no debt is above the rate line.
+        alt = await plan_view.build(
+            session,
+            household.id,
+            currency,
+            today.replace(day=1),
+            today,
+            buffer=(savings_target, savings_now),
+            goal_share_bps=0,
+        )
+        alt_saved = (
+            alt.minimums_only.total_interest - alt.schedule.total_interest
+            if alt.minimums_only.total_interest is not None
+            and alt.schedule.total_interest is not None
+            else None
+        )
+        # Only a real choice when the plan gives goals money while a debt
+        # costs more than the rate line; otherwise both orders are the same.
+        alt_available = bool(expensive) and split.goals != alt.split.goals
+        asks = {ask.id: ask for ask in view.asks}
+        waiting = [
+            g
+            for g in goals
+            if g["amount"] > 0 and dict(alt.split.goals).get(uuid.UUID(g["id"]), 0) == 0
+        ]
         figures = common | {
             "goals": goals,
             "debt_first": focus.name if focus else None,
@@ -164,11 +193,37 @@ async def facts(
             else None,
             "invest_per_100": first_year_gain(per_100, ASSUMED_RETURN_BPS),
             "assumed_return_percent": _rate_percent(ASSUMED_RETURN_BPS),
+            "goal_share_percent": _rate_percent(view.preferences.goal_share_bps),
+            "alt_available": alt_available,
+            "alt_to_debt": alt.split.extra_debt if alt_available else None,
+            "alt_interest_saved": alt_saved if alt_available else None,
+            "alt_debt_free": (
+                alt.schedule.debt_free.isoformat()
+                if alt_available and alt.schedule.debt_free
+                else None
+            ),
+            "goals_waiting": [g["name"] for g in waiting] if alt_available else [],
         }
         sent = {
-            k: v for k, v in figures.items() if k not in {"goals", "debt_first"}
+            k: v
+            for k, v in figures.items()
+            if k not in {"goals", "debt_first", "goals_waiting"}
         } | {
-            "goals_by_priority": [{"amount": g["amount"]} for g in goals],
+            "goals_by_priority": [
+                {
+                    "amount": g["amount"],
+                    "has_a_date": asks.get(uuid.UUID(g["id"])) is not None
+                    and asks[uuid.UUID(g["id"])].need > 0,
+                    "monthly_need": asks[uuid.UUID(g["id"])].need
+                    if uuid.UUID(g["id"]) in asks
+                    else 0,
+                    "still_needed": asks[uuid.UUID(g["id"])].remaining
+                    if uuid.UUID(g["id"]) in asks
+                    else 0,
+                    "would_wait": g in waiting,
+                }
+                for g in goals
+            ],
             "debts": [
                 {
                     "kind": d.kind.value,
@@ -204,6 +259,10 @@ async def facts(
 
 
 _MONEY_KEYS = {
+    "alt_to_debt",
+    "alt_interest_saved",
+    "monthly_need",
+    "still_needed",
     "leftover",
     "savings_target",
     "savings_now",
@@ -257,9 +316,19 @@ more than the rate line, then invests what is left. Explain why this order
 fits their figures — compare what paying the debt saves with what investing
 might earn ("debt_per_100" against "invest_per_100") — and say plainly if
 their savings amount looks low or high for their spending.
+When "alt_available" is true there is a second order to weigh: goals wait
+until no debt is above the rate line, and that money goes to the debt
+("alt_to_debt", "alt_interest_saved", "alt_debt_free"). Recommend one —
+"plan" (keep giving goals their share) or "debt_first" — weighing the debt's
+rate and size against each goal: a goal with a date coming soon, or one that
+protects the person, can be worth keeping; a goal with no date, or far off,
+can usually wait while a high-rate debt costs them every month. When
+"alt_available" is false, leave "recommend" null.
 {"headline": "<one sentence>",
  "steps": [{"to": "savings|goals|debt|invest", "why": "<one sentence>"}],
- "note": "<one or two sentences>"}"""
+ "note": "<one or two sentences>",
+ "recommend": "plan|debt_first|null",
+ "recommend_why": "<one or two sentences>"}"""
 )
 
 _INVEST = (
@@ -286,10 +355,15 @@ def _advice(kind: str, data: dict) -> dict:
                 why = figure_free(item.get("why"), TEXT_MAX_CHARS)
                 if why:
                     steps.append({"to": item["to"], "why": why})
+        recommend = data.get("recommend")
         return {
             "headline": figure_free(data.get("headline"), TEXT_MAX_CHARS),
             "steps": steps,
             "note": figure_free(data.get("note"), TEXT_MAX_CHARS),
+            "recommend": recommend if recommend in RECOMMENDATIONS else None,
+            "recommend_why": figure_free(data.get("recommend_why"), TEXT_MAX_CHARS)
+            if recommend in RECOMMENDATIONS
+            else None,
         }
     return {
         key: figure_free(data.get(key), TEXT_MAX_CHARS)
@@ -369,6 +443,9 @@ async def run(
         if aclose is not None:
             await aclose()
     advice = _advice(kind, _answer(raw))
+    if kind == ALLOCATION and not found.figures.get("alt_available"):
+        # No second order to choose: whatever it said, there is nothing to pick.
+        advice["recommend"] = advice["recommend_why"] = None
     row = PlanDiagnostic(
         household_id=household.id,
         kind=kind,

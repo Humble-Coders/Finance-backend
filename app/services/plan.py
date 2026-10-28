@@ -8,8 +8,10 @@ are basis points (20.99% is 2099); `Decimal` wherever a fraction appears.
 **The split** of a month's money left over (the budget's Savings line), in
 order:
 
-1. **The buffer**, until its emergency-fund goal reaches the target the person
-   chose. No buffer if they chose none.
+1. **The buffer**, only when one is passed in: a diagnostic's own savings
+   figures (`plan_diagnostics`). Your plan itself has no buffer step since
+   2026-10-28 — an Emergency fund is a goal like any other, and the Goals
+   screen suggests one (`GoalsOut.suggests_emergency_fund`).
 2. **Goals.** While any debt is above the person's rate line, only their goal
    share of what remains; otherwise all of it. Goals with a date ahead take
    what they need to stay on pace (`goals.monthly_need`), by priority; goals

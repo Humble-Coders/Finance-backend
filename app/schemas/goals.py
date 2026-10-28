@@ -95,3 +95,8 @@ class GoalsOut(BaseModel):
     projection_version: str
     # False in v1: projections count only what is put in, no growth.
     assumes_growth: bool
+    # True while the household has no Emergency fund goal: the screen offers
+    # one, at [emergency_fund_target] — about a month of their own spending —
+    # or with no amount when there is nothing yet to work it out from.
+    suggests_emergency_fund: bool = False
+    emergency_fund_target: str | None = None

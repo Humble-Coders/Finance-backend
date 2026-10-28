@@ -157,6 +157,14 @@ class DiagnosticOut(BaseModel):
     per_100: str | None = None
     debt_per_100: str | None = None
     invest_per_100: str | None = None
+    # The other order — goals wait until no debt is above the rate line —
+    # when it differs from the plan; and the plan's goal share now.
+    goal_share_percent: str | None = None
+    alt_available: bool = False
+    alt_to_debt: str | None = None
+    alt_interest_saved: str | None = None
+    alt_debt_free: str | None = None
+    goals_waiting: list[str] = []
     # invest
     buffer_full: bool | None = None
     expensive_debts: list[str] = []
@@ -170,6 +178,10 @@ class DiagnosticOut(BaseModel):
     why: str | None = None
     where: str | None = None
     next: str | None = None
+    # allocation: which order the AI recommends — "plan" or "debt_first" —
+    # and why; null when there is no choice to make.
+    recommend: str | None = None
+    recommend_why: str | None = None
 
 
 class DiagnosticsOut(BaseModel):

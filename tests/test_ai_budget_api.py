@@ -289,3 +289,42 @@ class TestTheMonthlyReview:
         assert response.status_code == 409
         assert response.json()["detail"]["code"] == "still_learning"
         assert model.calls == []
+
+
+class TestUsualSpending:
+    async def test_the_last_three_months_are_the_reference(
+        self, api_client, db_session, monkeypatch
+    ):
+        # Groceries $400 / $500 / $450 in June–August: usually $450.
+        # Dining once ($90): a one-off, no usual amount.
+        await a_ready_household(api_client, db_session, "+14165578201")
+        await consent_to_ai(api_client)
+        model = FakeModel(
+            {
+                "lines": [
+                    {"category": "dining", "amount": "60", "reason": "A little room."}
+                ],
+                "note": "Built from your usual spending.",
+            }
+        )
+        use_model(monkeypatch, model)
+
+        body = (await api_client.post(SETUP)).json()
+
+        payload = json.loads(model.calls[0][1])
+        assert payload["usual_monthly_spending"] == {"groceries": "450.00"}
+        lines = {line["slug"]: line for line in body["lines"]}
+        # The model left groceries out; it usually is spent, so it stays.
+        assert lines["groceries"]["amount"] == "450.00"
+        assert lines["groceries"]["usual"] == "450.00"
+        assert lines["dining"]["usual"] is None, "a one-off is no usual amount"
+
+    async def test_a_new_account_has_no_usual_spending(self, api_client, monkeypatch):
+        await a_set_up_household(api_client, "+14165578202")
+        model = FakeModel(ANSWER)
+        use_model(monkeypatch, model)
+
+        body = (await api_client.post(SETUP)).json()
+
+        assert json.loads(model.calls[0][1])["usual_monthly_spending"] == {}
+        assert all(line["usual"] is None for line in body["lines"])

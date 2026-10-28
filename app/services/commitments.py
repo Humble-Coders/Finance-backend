@@ -9,6 +9,12 @@ must match payments the same way — a commitment Home calls paid cannot be
 wizard; for a row saved before the wizard asked, the preset names below stand
 in, and anything else has none — it is still listed and still counted, it
 just holds no line up.
+
+**Ticked off by hand.** A payment the matching cannot find — paid in cash, or
+under a name the statement writes differently — can be named by the person
+(`CommitmentPayment`): one already imported, or one typed in there and then.
+That link wins over the matching, and its transaction is out of the matching
+for every other commitment, so one payment never settles two.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.categorization import Category
 from app.models.enums import TransactionDirection
 from app.models.money import Transaction
-from app.models.setup import Obligation
+from app.models.setup import CommitmentPayment, Obligation
 
 # The shared categories a commitment can belong to: spending ones. Not income
 # or transfers (not spending), not savings (the budget's remainder), and not
@@ -93,6 +99,15 @@ class Commitment:
     # The shared category it belongs to; None when it has none.
     category_id: uuid.UUID | None = None
     category_slug: str | None = None
+    # The obligation row, for ticking it off; and whether [match] was named by hand.
+    obligation_id: uuid.UUID | None = None
+    by_hand: bool = False
+
+
+def key_of(name: str) -> str:
+    """How a commitment is known across setup's rewrites: its name, trimmed
+    and lower-cased."""
+    return " ".join(name.split()).lower()[:255]
 
 
 async def shared_categories(session: AsyncSession) -> dict[str, uuid.UUID]:
@@ -163,16 +178,35 @@ async def for_month(
     shared = await shared_categories(session)
     slug_by_id = {id_: slug for slug, id_ in shared.items()}
 
+    # Ticked off by hand, first: those links win, and their transactions are
+    # no one else's to match.
+    by_id = {row.id: row for row in debits}
+    named = {
+        payment.commitment_key: by_id[payment.transaction_id]
+        for payment in (
+            await session.scalars(
+                select(CommitmentPayment).where(
+                    CommitmentPayment.household_id == household_id,
+                    CommitmentPayment.month == first,
+                )
+            )
+        )
+        if payment.transaction_id in by_id
+    }
+
     # A transaction settles at most one commitment. Without this, two
     # commitments of a similar size both claim the same payment and the
     # checklist says two things were paid when one was.
-    claimed: set[uuid.UUID] = set()
+    claimed: set[uuid.UUID] = {row.id for row in named.values()}
     out: list[Commitment] = []
     for obligation in rows:
-        available = [row for row in debits if row.id not in claimed]
-        found = match_commitment(
-            obligation.name, obligation.monthly_amount_minor_units, available
-        )
+        found = named.get(key_of(obligation.name))
+        by_hand = found is not None
+        if found is None:
+            available = [row for row in debits if row.id not in claimed]
+            found = match_commitment(
+                obligation.name, obligation.monthly_amount_minor_units, available
+            )
         if found is not None:
             claimed.add(found.id)
         slug = slug_for(obligation, slug_by_id)
@@ -183,6 +217,8 @@ async def for_month(
                 due_day=obligation.due_day,
                 category_id=shared.get(slug) if slug else None,
                 category_slug=slug,
+                obligation_id=obligation.id,
+                by_hand=by_hand,
                 match=(
                     Match(
                         transaction_id=found.id,

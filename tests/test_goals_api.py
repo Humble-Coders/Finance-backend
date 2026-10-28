@@ -582,3 +582,24 @@ class TestTheDisclaimer:
 
         assert response.status_code == 404
         assert response.json()["detail"]["code"] == "no_disclaimer"
+
+
+class TestTheEmergencyFundSuggestion:
+    async def test_it_is_offered_until_there_is_one(self, api_client):
+        await a_household(api_client, "+14165579851")
+
+        before = (await api_client.get("/goals")).json()
+        await api_client.post(
+            "/goals",
+            json={
+                "name": "Rainy day",
+                "kind": "emergency_fund",
+                "horizon": "short_term",
+                "target": "800.00",
+            },
+        )
+        after = (await api_client.get("/goals")).json()
+
+        assert before["suggests_emergency_fund"] is True
+        assert after["suggests_emergency_fund"] is False
+        assert after["emergency_fund_target"] is None

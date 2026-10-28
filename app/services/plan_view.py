@@ -15,7 +15,7 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import GoalHorizon, GoalKind, PlanStrategy
+from app.models.enums import GoalKind, PlanStrategy
 from app.models.planning import Debt, Goal, PlanPreference
 from app.models.setup import FinancialProfile
 from app.services import goals as goal_service
@@ -133,42 +133,16 @@ async def save_preferences(
     strategy: PlanStrategy,
     today: date,
 ) -> PlanPreference:
-    """Keep the person's choices. A buffer is their emergency-fund goal: the
-    one the plan already uses, else one they already have, else a new one —
-    its target set to the buffer. No buffer unlinks the goal and keeps it.
+    """Keep the person's choices.
 
-    May raise `goals.GoalLimitReached` when a new goal would be one too many.
+    [buffer] is accepted from apps released before 2026-10-28 and ignored:
+    Your plan has no buffer step now, and an Emergency fund is a goal the
+    person adds themselves (the Goals screen suggests one). Nothing is
+    created behind their back.
     """
-    # The goal first, the row after: a row added before its values are set
-    # would be flushed half-filled by the goal lookups below.
+    del buffer, currency, today
     row = await preference_row(session, household_id)
-
     goal_id: uuid.UUID | None = None
-    if buffer is not None:
-        goal = (
-            await goal_service.owned(session, household_id, row.buffer_goal_id)
-            if row is not None and row.buffer_goal_id is not None
-            else None
-        ) or await _emergency_goal(session, household_id)
-        if goal is None:
-            goal = await goal_service.create(
-                session,
-                household_id,
-                currency,
-                name=BUFFER_GOAL_NAME,
-                kind=GoalKind.emergency_fund,
-                horizon=GoalHorizon.short_term,
-                target=buffer,
-                saved=0,
-                target_date=None,
-                monthly_contribution=None,
-                today=today,
-            )
-        elif goal.target_minor_units != buffer:
-            goal = await goal_service.edit(
-                session, goal, {"target_minor_units": buffer}, today
-            )
-        goal_id = goal.id
 
     if row is None:
         row = PlanPreference(household_id=household_id)
@@ -221,6 +195,7 @@ async def build(
     today: date,
     *,
     buffer: tuple[int, int] | None = None,
+    goal_share_bps: int | None = None,
 ) -> PlanView:
     """[month]'s plan. While the household is still learning there is no
     budget yet, so nothing is left over to split: the schedule shows the
@@ -228,6 +203,7 @@ async def build(
 
     [buffer] — (target, saved) — puts the person's own savings figures in
     place of the buffer's, for a diagnostic: the same split, their numbers.
+    [goal_share_bps] does the same for the goal share — 0 is "debt first".
     """
     month = month.replace(day=1)
     learning = await learning_state(session, household_id, currency, today)
@@ -240,31 +216,20 @@ async def build(
 
     row = await preference_row(session, household_id)
     hint = await suggested(session, household_id, currency, today)
-    if row is not None:
-        buffer_goal = (
-            await goal_service.owned(session, household_id, row.buffer_goal_id)
-            if row.buffer_goal_id is not None
-            else None
-        )
-        preferences = plan.Preferences(
-            buffer_target=buffer_goal.target_minor_units if buffer_goal else None,
-            buffer_saved=buffer_goal.saved_minor_units if buffer_goal else 0,
-            goal_share_bps=row.goal_share_bps,
-            rate_line_bps=row.rate_line_bps,
-            strategy=row.strategy.value,
-        )
-    else:
-        buffer_goal = await _emergency_goal(session, household_id)
-        preferences = plan.Preferences(
-            buffer_target=(
-                buffer_goal.target_minor_units if buffer_goal else hint.buffer
-            ),
-            buffer_saved=buffer_goal.saved_minor_units if buffer_goal else 0,
-            goal_share_bps=hint.goal_share_bps,
-            rate_line_bps=hint.rate_line_bps,
-            strategy=hint.strategy.value,
-        )
+    # No buffer step (product decision, 2026-10-28): an Emergency fund is a
+    # goal like the others, given its share by priority. Only a diagnostic
+    # passes savings figures of its own ([buffer], below).
+    buffer_goal = None
+    preferences = plan.Preferences(
+        buffer_target=None,
+        buffer_saved=0,
+        goal_share_bps=row.goal_share_bps if row is not None else hint.goal_share_bps,
+        rate_line_bps=row.rate_line_bps if row is not None else hint.rate_line_bps,
+        strategy=row.strategy.value if row is not None else hint.strategy.value,
+    )
 
+    if goal_share_bps is not None:
+        preferences = replace(preferences, goal_share_bps=goal_share_bps)
     if buffer is not None:
         preferences = replace(
             preferences, buffer_target=buffer[0] or None, buffer_saved=buffer[1]

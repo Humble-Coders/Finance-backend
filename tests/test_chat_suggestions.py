@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import text
 
 from app.api import chat_suggestions
+from app.models.identity import Household
 from app.services import chat_templates, chat_tools, rollups
 from tests.conftest import requires_db
 from tests.test_budgets_api import SEPTEMBER, TODAY, a_ready_household
@@ -314,6 +315,21 @@ class TestTheCache:
         monkeypatch.setattr(chat_tools, "spending_summary", broken)
 
         await answered(api_client, "spent_this_year")
+
+    async def test_a_cached_answer_cannot_be_changed_by_its_caller(
+        self, api_client, db_session
+    ):
+        household, _, _ = await a_household_with_months(
+            api_client, db_session, "+14165578543"
+        )
+        home = await db_session.get(Household, household)
+        first = await chat_templates.answer(db_session, home, "spent_last_month", TODAY)
+
+        assert isinstance(first.figures, tuple)
+        with pytest.raises(AttributeError):
+            first.figures.append("1.00")
+        again = await chat_templates.answer(db_session, home, "spent_last_month", TODAY)
+        assert again.figures == ("840.00",)
 
 
 class TestBoundaries:

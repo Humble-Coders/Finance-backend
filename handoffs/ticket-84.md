@@ -37,7 +37,7 @@ No migration is needed.
 - `app/core/money.py`: `display(amount, currency)` formats amounts for sentences, e.g. "$1,234.50", "-$12.00", "1,200 JPY". It only formats and never rounds; it raises on more precision than the currency allows.
 
 **Tests**
-- `tests/test_chat_suggestions.py`: 22 tests, all `integration`.
+- `tests/test_chat_suggestions.py`: 23 tests, all `integration`.
 
 ## How to test
 
@@ -48,11 +48,11 @@ These steps use the local Docker database only, never `.env`.
    export DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres
    export MIGRATION_DATABASE_URL=$DATABASE_URL
    ```
-2. Run the new tests. Expect 22 passed:
+2. Run the new tests. Expect 23 passed:
    ```bash
    .venv/bin/pytest -q tests/test_chat_suggestions.py
    ```
-3. Run both suites. Expect 521 without the database and 733 with it (711 before this ticket):
+3. Run both suites. Expect 521 without the database and 734 with it (711 before this ticket):
    ```bash
    .venv/bin/pytest -q -m "not integration"
    .venv/bin/pytest -q -m integration
@@ -87,7 +87,7 @@ For the test household (today pinned to 2026-09-15), the answers are:
 | A suggestion with no data is absent from `GET /chat/suggestions` | Met | `test_one_with_no_data_is_left_out`, `test_a_household_with_nothing_is_offered_nothing` |
 | A ledger write changes the next answer | Met | `test_a_ledger_write_changes_the_next_answer`: `PATCH` changes August from 840.00 to 850.00. `test_the_same_version_is_served_from_the_cache` proves the cache is used |
 | `ai_chat` off returns 403; another household's data never appears | Met | `test_chat_off_is_403` (`ai_chat` is seeded off), `test_another_households_data_never_appears` |
-| `ruff`, `pytest` green; `database` count grew | Met locally | 711 → 733; CI still to run on the PR |
+| `ruff`, `pytest` green; `database` count grew | Met locally | 711 → 734; CI still to run on the PR |
 
 ## Deviations and decisions
 
@@ -104,7 +104,14 @@ For the test household (today pinned to 2026-09-15), the answers are:
 - **`money.display`** was added for readable sentences. The API keeps returning plain decimal strings everywhere else, and `figures` holds the plain strings.
 - **409 for a suggestion with no data** (for example, a row deleted after the list was fetched), logged with `log_conflict` as the guard test requires. An unknown id gets a 404.
 
+### Changes from review (#87)
+
+- **`Answer.figures` is a tuple.** Answers are cached and shared, so a caller appending to a list would have changed the answer every later caller is given. The API converts it to a list.
+- A regression test (`test_a_cached_answer_cannot_be_changed_by_its_caller`) covers it.
+
 ## Open questions and follow-ups
+
+- **Before `ai_chat` is enabled in production,** run #83's backfill (`python -m app.scripts.rebuild_rollups`). Without it, existing households' older months are missing from the totals these answers read.
 
 - **Product Owner:** the six suggestions and their wording (the ticket's open question). Category names appear as stored, e.g. "Debt payment".
 - **6.4:**

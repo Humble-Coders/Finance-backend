@@ -26,7 +26,7 @@ from __future__ import annotations
 import calendar
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 
 from sqlalchemy import or_, select
@@ -60,8 +60,13 @@ class Suggestion:
 class Answer:
     text: str
     # Every amount in [text], as the tool returned it (a decimal string), in
-    # the order the text states them.
-    figures: list[str] = field(default_factory=list)
+    # the order the text states them. A tuple, because answers are cached and
+    # shared: a caller that could append to a list would change the answer
+    # every later caller is given.
+    figures: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "figures", tuple(self.figures))
 
 
 class UnknownSuggestion(LookupError):

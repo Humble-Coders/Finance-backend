@@ -79,4 +79,4 @@ async def answer_suggestion(
                 "message": "There's nothing to answer that with yet.",
             },
         )
-    return SuggestionAnswerOut(text=answer.text, figures=answer.figures)
+    return SuggestionAnswerOut(text=answer.text, figures=list(answer.figures))

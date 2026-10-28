@@ -76,6 +76,16 @@ class Settings(BaseSettings):
     # on for a model or a document that needs it, and read the logs after.
     llm_thinking_budget: int = 0
 
+    # The AI coach's tool loop (#69): input plus output tokens one question may
+    # spend across all its rounds before the loop stops.
+    llm_chat_token_budget: int = 6_000
+    # Dollars per million tokens, by model: {"model": {"input": …,
+    # "cached_input": …, "output": …}}. Used only to estimate a call's cost
+    # when the provider does not report one (OpenRouter does); a model with no
+    # entry is logged without a cost rather than with a guess. JSON in the
+    # environment (`LLM_PRICES`).
+    llm_prices: dict[str, dict[str, float]] = {}
+
     # Free tier: one import a month (PRD F2). A setting rather than a constant
     # so development is not rationed by the production plan; 7.1 moves this into
     # entitlements, where per-plan limits belong.

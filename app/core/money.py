@@ -17,6 +17,8 @@ Rules:
 
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal, InvalidOperation
 
+from sqlalchemy import Numeric, cast, literal
+
 __all__ = [
     "MoneyError",
     "exponent_for",
@@ -25,6 +27,7 @@ __all__ = [
     "normalize",
     "round_up_to_whole_unit",
     "display",
+    "sql_major_units",
 ]
 
 # ISO 4217 minor-unit exponents. Extend as markets are added (PRD §4.6).
@@ -166,3 +169,19 @@ def display(amount: str, currency: str) -> str:
     digits = f"{abs(value):,.{exponent}f}"
     symbol = _SYMBOLS.get(currency.upper())
     return f"{sign}{symbol}{digits}" if symbol else f"{sign}{digits} {currency.upper()}"
+
+
+def sql_major_units(column, currency: str):
+    """A SQL expression: [column]'s minor units as an exact decimal amount
+    ("12.34" for 1234 CAD), for a query that hands amounts to someone who
+    must not have to know about minor units.
+
+    For the AI coach's SQL sandbox (#70): its tables hold amounts, so a model's
+    `sum(amount)` is dollars whatever it names the column. Numeric throughout
+    — no float — and scaled to the currency's exponent, exactly.
+    """
+    exponent = exponent_for(currency)
+    return cast(
+        cast(column, Numeric) / literal(10**exponent, Numeric),
+        Numeric(20, exponent),
+    )

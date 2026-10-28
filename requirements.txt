@@ -9,3 +9,5 @@ pyjwt[crypto]==2.10.1
 phonenumbers==9.0.39
 httpx==0.28.1
 structlog==24.4.0
+# PostgreSQL's own parser, for validating the AI coach's SQL (#70).
+pglast==7.21

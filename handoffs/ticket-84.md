@@ -37,7 +37,7 @@ No migration is needed.
 - `app/core/money.py`: `display(amount, currency)` formats amounts for sentences, e.g. "$1,234.50", "-$12.00", "1,200 JPY". It only formats and never rounds; it raises on more precision than the currency allows.
 
 **Tests**
-- `tests/test_chat_suggestions.py`: 23 tests, all `integration`.
+- `tests/test_chat_suggestions.py`: 22 tests; `tests/test_money.py`: 4 tests for `money.display`, in the fast suite, all `integration`.
 
 ## How to test
 
@@ -48,11 +48,11 @@ These steps use the local Docker database only, never `.env`.
    export DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres
    export MIGRATION_DATABASE_URL=$DATABASE_URL
    ```
-2. Run the new tests. Expect 23 passed:
+2. Run the new tests. Expect 22 passed:
    ```bash
    .venv/bin/pytest -q tests/test_chat_suggestions.py
    ```
-3. Run both suites. Expect 521 without the database and 734 with it (711 before this ticket):
+3. Run both suites. Expect 525 without the database (521 before) and 733 with it (711 before):
    ```bash
    .venv/bin/pytest -q -m "not integration"
    .venv/bin/pytest -q -m integration
@@ -87,7 +87,7 @@ For the test household (today pinned to 2026-09-15), the answers are:
 | A suggestion with no data is absent from `GET /chat/suggestions` | Met | `test_one_with_no_data_is_left_out`, `test_a_household_with_nothing_is_offered_nothing` |
 | A ledger write changes the next answer | Met | `test_a_ledger_write_changes_the_next_answer`: `PATCH` changes August from 840.00 to 850.00. `test_the_same_version_is_served_from_the_cache` proves the cache is used |
 | `ai_chat` off returns 403; another household's data never appears | Met | `test_chat_off_is_403` (`ai_chat` is seeded off), `test_another_households_data_never_appears` |
-| `ruff`, `pytest` green; `database` count grew | Met locally | 711 → 734; CI still to run on the PR |
+| `ruff`, `pytest` green; `database` count grew | Met locally | 711 → 733; CI still to run on the PR |
 
 ## Deviations and decisions
 
@@ -108,6 +108,7 @@ For the test household (today pinned to 2026-09-15), the answers are:
 
 - **`Answer.figures` is a tuple.** Answers are cached and shared, so a caller appending to a list would have changed the answer every later caller is given. The API converts it to a list.
 - A regression test (`test_a_cached_answer_cannot_be_changed_by_its_caller`) covers it.
+- **The `money.display` tests moved to `tests/test_money.py`,** so the fast `test` job covers this pure function too. Before, it was tested only inside the database-marked file.
 
 ## Open questions and follow-ups
 

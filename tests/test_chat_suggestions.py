@@ -385,11 +385,3 @@ async def test_months_roll_over_the_year():
 
     assert ctx.last_month == date(2025, 12, 1)
     assert ctx.this_month == date(2026, 1, 1)
-
-
-async def test_amounts_read_like_money():
-    from app.core.money import display
-
-    assert display("1234.5", "CAD") == "$1,234.50"
-    assert display("-12", "CAD") == "-$12.00"
-    assert display("1200", "JPY") == "1,200 JPY"

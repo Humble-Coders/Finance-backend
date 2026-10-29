@@ -66,9 +66,9 @@ People can now hold a conversation with the AI coach at `/chat/conversations`: l
 
 **Tests**
 - `tests/chat_support.py`: the scripted model `Scripted`, the `call`, `say` and `say_from` steps, and the household and request helpers. The `model` and `no_model` fixtures are registered in `tests/conftest.py`.
-- `tests/test_chat_grounding.py`: 45 cases, no database.
-- `tests/test_chat_api.py`: 24 tests, `integration`.
-- `tests/test_chat_cost.py`: 6 tests, `integration`.
+- `tests/test_chat_grounding.py`: 51 cases, no database.
+- `tests/test_chat_api.py`: 26 tests, `integration`.
+- `tests/test_chat_cost.py`: 7 tests, `integration`.
 
 ## How to test
 
@@ -78,11 +78,11 @@ These steps use the local Docker database only, never `.env`.
    ```bash
    DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres .venv/bin/python -m alembic upgrade head
    ```
-2. Run the new tests with the same two variables. Expect 75 passed:
+2. Run the new tests with the same two variables. Expect 84 passed:
    ```bash
    .venv/bin/pytest -q tests/test_chat_grounding.py tests/test_chat_api.py tests/test_chat_cost.py
    ```
-3. Run both suites. Expect 578 without the database (525 before) and 829 with it (799 before).
+3. Run both suites. Expect 584 without the database (525 before) and 832 with it (799 before).
 4. Run the migration round trip, which needs an empty throwaway container. It passed locally.
 5. Lint:
    ```bash
@@ -105,7 +105,7 @@ No LLM key is needed; every test uses the scripted model.
 | One household can never read, post to or delete another's conversation (404) | Met | `test_another_households_conversation_is_404` |
 | Conversations untouched for 12 months are removed; account deletion removes conversations and cached answers | Met | `test_a_year_untouched_and_it_is_gone`. No account-deletion endpoint exists yet, so `test_deleting_the_household_deletes_conversations_and_cache` deletes the household row and checks all three chat tables cascade |
 | No message text, SQL or results in logs; `chat_turn` carries tokens and cost | Met | `test_it_carries_tokens_and_never_the_text` |
-| Migration applies, reverses and re-applies; ruff and pytest green; `database` count grew | Met locally | `check_migrations.sh` passed; 799 → 829. CI still to run on the PR |
+| Migration applies, reverses and re-applies; ruff and pytest green; `database` count grew | Met locally | `check_migrations.sh` passed; 799 → 832. CI still to run on the PR |
 
 ## Deviations and decisions
 
@@ -123,6 +123,20 @@ No LLM key is needed; every test uses the scripted model.
 - **A model failure** (`LlmError`) returns an honest "couldn't answer just now" as a normal reply, stored and counted, rather than an HTTP error.
 - **The order of the gates** follows the ticket: consent, then tier, then cap. Statement import checks the tier first.
 - **`updated_at` uses `clock_timestamp()`,** not `now()`, so conversations touched in one transaction don't tie when sorting newest first.
+
+### Changes from review (#89)
+
+- **The guardrails no longer refuse ordinary questions.** "Fund" and "share" alone were treated as instruments, and "accounts" as someone else's data. So these were refused or declined:
+  - "What is left in my emergency fund?"
+  - "What share of my spending is groceries?"
+  - "What funds do I have left this month?"
+  - "How much is in my other accounts?"
+  - "What is the balance of all accounts?"
+
+  The instrument list now holds only words that name one, and accounts are the household's own to ask about. All five are must-pass tests.
+- **The cache key includes the day.** "This month" on 30 September and on 1 October are different questions over the same ledger, and the prompt tells the model today's date.
+- **A concurrent turn is kept.** The conversation is re-read under `FOR UPDATE` right before storing, and the new turns are appended to what's there then. Before, a second message sent while the model answered was overwritten.
+- **No connection is held across a model call.** The session commits before the model runs and after each tool read, so on the transaction pooler a database connection isn't pinned while the model thinks. The cost is that each tool read opens its own short transaction.
 
 ## Open questions and follow-ups
 

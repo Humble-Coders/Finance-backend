@@ -19,6 +19,7 @@ from structlog.testing import capture_logs
 from app.config import get_settings
 from app.models.derived import ChatAnswerCache, ChatConversation, ChatDailyUsage
 from app.models.identity import Household
+from app.services import chat as chat_service
 from app.services.chat_guardrails import DECLINE, FALLBACK, REFUSAL, TRUNCATION_NOTE
 from tests.chat_support import (
     AUGUST,
@@ -475,6 +476,75 @@ class TestBoundaries:
                 == 0
             )
         assert await db_session.get(Household, household) is None
+
+
+class TestConcurrency:
+    async def test_a_turn_stored_while_the_model_answered_is_kept(
+        self, api_client, db_session, monkeypatch
+    ):
+        """A second message to the same conversation (a double tap, another
+        device) is stored while this one waits on the model: appending to the
+        list read at the start would erase it."""
+        await a_chat_household(api_client, db_session, "+14165578781")
+        conversation = await a_conversation(api_client)
+        stamp = "2026-09-15T10:00:00Z"
+
+        async def meanwhile(session, *args, **kwargs):
+            await session.execute(
+                update(ChatConversation)
+                .where(ChatConversation.id == uuid.UUID(conversation))
+                .values(
+                    messages=[
+                        {"role": "user", "text": "the other one", "at": stamp},
+                        {"role": "assistant", "text": "its answer", "at": stamp},
+                    ]
+                )
+            )
+            return chat_service.Reply("Here you go.", False, "model")
+
+        monkeypatch.setattr(chat_service, "_ask_model", meanwhile)
+
+        await ask(api_client, conversation, "Mine")
+
+        body = (await api_client.get(f"{CONVERSATIONS}/{conversation}")).json()
+        assert [m["text"] for m in body["messages"]] == [
+            "the other one",
+            "its answer",
+            "Mine",
+            "Here you go.",
+        ]
+
+    async def test_no_transaction_is_held_while_the_model_thinks(
+        self, api_client, db_session, model, monkeypatch
+    ):
+        """The session commits before the model and after each tool read, so
+        on the pooler no connection is pinned across a model call."""
+        await a_chat_household(api_client, db_session, "+14165578782")
+        conversation = await a_conversation(api_client)
+        scripted = model(
+            call("spending_summary", **AUGUST),
+            say_from(lambda r: f"You spent ${float(r['total']):,.2f} in August."),
+        )
+        commits = {"n": 0}
+        seen_at_each_call = []
+        real_commit, real_converse = db_session.commit, scripted.converse
+
+        async def counting_commit():
+            commits["n"] += 1
+            await real_commit()
+
+        async def recording_converse(**kwargs):
+            seen_at_each_call.append(commits["n"])
+            return await real_converse(**kwargs)
+
+        monkeypatch.setattr(db_session, "commit", counting_commit)
+        monkeypatch.setattr(scripted, "converse", recording_converse)
+
+        await ask(api_client, conversation, "What did I spend in August?")
+
+        first, second = seen_at_each_call
+        assert first >= 1, "committed before the first model call"
+        assert second > first, "and again after the tool read, before the next"
 
 
 class TestTheLogLine:

@@ -113,6 +113,12 @@ class TestGuardrails:
             "What did I pay Rogers in 2019?",
             "Did I spend more on fees this year?",
             "Can I afford a $400 trip?",
+            # Ordinary money words, not instruments or other people (#89):
+            "What is left in my emergency fund?",
+            "What share of my spending is groceries?",
+            "What funds do I have left this month?",
+            "How much is in my other accounts?",
+            "What is the balance of all accounts?",
         ],
     )
     def test_money_questions_are_not(self, question):
@@ -157,8 +163,16 @@ class TestGuardrails:
         assert guard.stands_alone(question) is alone
 
     def test_questions_are_normalized_for_the_cache(self):
-        assert guard.normalized_hash("How much did I spend?") == guard.normalized_hash(
-            "  how much  did i SPEND "
+        day = date(2026, 9, 30)
+        assert guard.normalized_hash("How much did I spend?", day) == (
+            guard.normalized_hash("  how much  did i SPEND ", day)
+        )
+
+    def test_the_same_question_on_another_day_is_another_key(self):
+        """'This month' on 30 September and on 1 October are different."""
+        question = "What did I spend this month?"
+        assert guard.normalized_hash(question, date(2026, 9, 30)) != (
+            guard.normalized_hash(question, date(2026, 10, 1))
         )
 
     def test_the_prompt_is_stable_and_states_the_rules(self):

@@ -162,20 +162,30 @@ async def post_message(
         cacheable = first or stands_alone(text)
         version = await rollups.ledger_version(session, household.id)
         reply = (
-            await _cached(session, household.id, text, version, now)
-            if (cacheable)
+            await _cached(session, household.id, text, today, version, now)
+            if cacheable
             else None
         )
         if reply is None:
             await _gates(session, identity, settings, today)
+            # End the transaction before the model: on the transaction
+            # pooler an open one pins a database connection, and the model
+            # may take seconds. Each tool read below commits as it finishes.
+            await session.commit()
             reply = await _ask_model(
                 session, identity, history, text, currency, settings, today, run
             )
             await _count(session, household.id, today)
             if cacheable and reply.text not in (FALLBACK, UNAVAILABLE):
-                await _remember(session, household.id, text, version, reply, now)
+                await _remember(session, household.id, text, today, version, reply, now)
 
-    _store(conversation, history, text, reply, now)
+    # Re-read under a row lock, and append to what is there *now*: a second
+    # message sent to this conversation while the model was answering (a
+    # double tap, a second device) has been stored meanwhile, and writing
+    # back the list read at the start would erase it. The lock is held only
+    # from here to the commit — never across the model call.
+    await session.refresh(conversation, with_for_update=True)
+    _store(conversation, list(conversation.messages or []), text, reply, now)
     _log(household.id, reply, run)
     return reply
 
@@ -194,11 +204,11 @@ async def _templated(session, household, suggestion_id, today) -> tuple[Reply, s
     return Reply(answer.text, False, "template", figures=list(answer.figures)), question
 
 
-async def _cached(session, household_id, text, version, now) -> Reply | None:
+async def _cached(session, household_id, text, today, version, now) -> Reply | None:
     row = await session.scalar(
         select(ChatAnswerCache).where(
             ChatAnswerCache.household_id == household_id,
-            ChatAnswerCache.question_hash == normalized_hash(text),
+            ChatAnswerCache.question_hash == normalized_hash(text, today),
             ChatAnswerCache.ledger_version == version,
             ChatAnswerCache.expires_at > now,
         )
@@ -215,13 +225,15 @@ async def _cached(session, household_id, text, version, now) -> Reply | None:
     )
 
 
-async def _remember(session, household_id, text, version, reply: Reply, now) -> None:
+async def _remember(
+    session, household_id, text, today, version, reply: Reply, now
+) -> None:
     await session.execute(
         pg_insert(ChatAnswerCache)
         .values(
             id=uuid.uuid4(),
             household_id=household_id,
-            question_hash=normalized_hash(text),
+            question_hash=normalized_hash(text, today),
             ledger_version=version,
             answer={
                 "text": reply.text,
@@ -301,6 +313,7 @@ async def _ask_model(
     handlers |= screen_handlers
     specs.append(chat_sql.RUN_SQL)
     handlers["run_sql"] = chat_sql.handler_for(household_id, currency)
+    handlers = {name: _releasing(session, h) for name, h in handlers.items()}
 
     held = await chat_tools.data_range(session, household_id, currency)
     system = system_prompt(
@@ -401,6 +414,20 @@ async def _run(client, system, messages, specs, handlers, run: _Run):
     run.rounds += result.rounds
     run.tools += [name for name, _ in result.tool_results]
     return result
+
+
+def _releasing(session: AsyncSession, handler):
+    """[handler], then commit: a tool's reads end their transaction when the
+    tool does, so no connection is held while the model thinks about the
+    result."""
+
+    async def handler_then_commit(arguments: dict) -> object:
+        try:
+            return await handler(arguments)
+        finally:
+            await session.commit()
+
+    return handler_then_commit
 
 
 def _record(named: list[tuple[str, object]]) -> list[dict]:

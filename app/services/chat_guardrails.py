@@ -52,10 +52,13 @@ TRUNCATION_NOTE = (
     "This is a summary of a longer list; the Transactions screen has every row."
 )
 
-# A request for a security pick: an asking word near an instrument.
+# A request for a security pick: an asking word near an instrument. Only words
+# that name an instrument — not "fund" or "share" alone, which a household
+# uses for its own money ("my emergency fund", "what share of my spending").
 _INSTRUMENT = (
-    r"(stocks?|shares?|etfs?|mutual funds?|index funds?|funds?|bonds?|crypto|"
-    r"bitcoin|btc|ethereum|eth|dogecoin|altcoins?|tickers?|reits?|gics)"
+    r"(stocks?|stock market|etfs?|mutual funds?|index funds?|hedge funds?|"
+    r"bonds?|crypto|cryptocurrenc(y|ies)|bitcoin|btc|ethereum|eth|dogecoin|"
+    r"altcoins?|tickers?|reits?|equities)"
 )
 _ASKS = (
     r"(should i|which|what|recommend|best|good|buy|sell|pick|invest in|put .{0,30} in)"
@@ -79,8 +82,9 @@ _INJECTION = re.compile(
     r"|\b(system|developer) prompt\b"
     r"|\bjailbreak\b|\bdeveloper mode\b|\bpretend (you are|to be)\b"
     r"|\b(another|other|someone else'?s?|other people'?s?) "
-    r"(user|users|household|households|person|people|account|accounts)\b"
-    r"|\ball (users|households|accounts)\b",
+    # Not "accounts": a household's own accounts are its to ask about.
+    r"(user|users|household|households|person|people)\b"
+    r"|\ball (users|households)\b",
     re.IGNORECASE,
 )
 
@@ -136,12 +140,16 @@ def stands_alone(question: str) -> bool:
     return not _POINTS_BACK.search(question)
 
 
-def normalized_hash(question: str) -> str:
-    """The cache key for [question]: lower case, whitespace collapsed,
-    trailing punctuation dropped — "How much did I spend?" and
-    "how much  did i spend" are one question."""
+def normalized_hash(question: str, on: date) -> str:
+    """The cache key for [question] asked [on] a day: lower case, whitespace
+    collapsed, trailing punctuation dropped — "How much did I spend?" and
+    "how much  did i spend" are one question.
+
+    The day is part of it: "this month" on 30 September and on 1 October are
+    different questions over the same ledger, and the prompt tells the model
+    today's date, so its answer depends on it."""
     text = " ".join(question.lower().split()).rstrip(" ?!.,;:")
-    return hashlib.sha256(text.encode()).hexdigest()
+    return hashlib.sha256(f"{on.isoformat()}|{text}".encode()).hexdigest()
 
 
 def system_prompt(

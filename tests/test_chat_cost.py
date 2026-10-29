@@ -78,6 +78,25 @@ class TestNoModelCall:
         assert len(scripted.calls) == 2, "the model ran once, for the first"
         assert await model_answers(db_session, household) == 1, "the hit is free"
 
+    async def test_the_same_question_tomorrow_misses_the_cache(
+        self, api_client, db_session, model, monkeypatch
+    ):
+        """'This month' on the 30th and on the 1st are different questions
+        over the same ledger."""
+        await a_chat_household(api_client, db_session, "+14165578805")
+        scripted = model(*AUGUST_ANSWER, *AUGUST_ANSWER)
+        conversation = await a_conversation(api_client)
+        await ask(api_client, conversation, "What did I spend in August?")
+        monkeypatch.setattr(
+            "app.api.chat._today", lambda: TODAY.replace(day=TODAY.day + 1)
+        )
+
+        later = await a_conversation(api_client)
+        response = await ask(api_client, later, "What did I spend in August?")
+
+        assert response.json()["answered_by"] == "model"
+        assert len(scripted.calls) == 4
+
     async def test_a_ledger_write_misses_the_cache(self, api_client, db_session, model):
         household = await a_chat_household(api_client, db_session, "+14165578803")
         scripted = model(*AUGUST_ANSWER, *AUGUST_ANSWER)

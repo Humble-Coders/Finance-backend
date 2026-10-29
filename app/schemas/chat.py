@@ -7,6 +7,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.schemas.budget import LearningOut
+
 
 class SuggestionOut(BaseModel):
     """A question the coach can answer now, offered as a chip (#84)."""
@@ -85,5 +87,6 @@ class ReplyOut(BaseModel):
     disclaimer: bool
     # template | cache | model — how it was answered.
     answered_by: str
-    # The learning phase's progress while advice is held back (6.5); null here.
-    learning: dict | None = None
+    # While the household is still learning (#72), its progress — the same
+    # shape the budget and the score return; null once it is ready.
+    learning: LearningOut | None = None

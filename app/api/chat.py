@@ -157,7 +157,10 @@ async def post_message(
         ) from None
     await session.commit()
     return ReplyOut(
-        text=reply.text, disclaimer=reply.disclaimer, answered_by=reply.answered_by
+        text=reply.text,
+        disclaimer=reply.disclaimer,
+        answered_by=reply.answered_by,
+        learning=reply.learning,
     )
 
 

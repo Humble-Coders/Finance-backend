@@ -60,8 +60,17 @@ from app.services.chat_guardrails import (
     stands_alone,
     system_prompt,
 )
+from app.services.chat_learning import (
+    ADVICE,
+    LEARNING_INSTRUCTION,
+    classify,
+    learning_payload,
+    learning_reply,
+    prescriptive,
+)
 from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
+from app.services.learning import learning_state
 from app.services.llm import LlmError, Message, build_client, close_client, run_tools
 
 __all__ = [
@@ -102,6 +111,9 @@ class Reply:
     answered_by: str  # template | cache | model
     tools: list[dict] = field(default_factory=list)
     figures: list[str] = field(default_factory=list)
+    # While the household is still learning (#72): its progress, in the
+    # budget's `LearningOut` shape. None once it is ready.
+    learning: dict | None = None
 
 
 @dataclass
@@ -148,6 +160,9 @@ async def post_message(
     currency = await currency_for(session, household)
     history = list(conversation.messages or [])
     run = _Run()
+    # The one threshold the budget, the score and the dashboard use (#72).
+    state = await learning_state(session, household.id, currency, today)
+    learning = None if state.ready else learning_payload(state)
 
     if suggestion_id is not None:
         reply, question = await _templated(session, household, suggestion_id, today)
@@ -156,6 +171,10 @@ async def post_message(
         reply, run.outcome = Reply(REFUSAL, False, "template"), "refused"
     elif declined(text):
         reply, run.outcome = Reply(DECLINE, False, "template"), "declined"
+    elif learning and classify(text) == ADVICE:
+        # Advice while still learning: the server says so, and no model is
+        # asked — so no consent, no tier and nothing off the daily cap.
+        reply, run.outcome = Reply(learning_reply(state), False, "template"), "learning"
     else:
         first = not any(m.get("role") == "user" for m in history)
         cacheable = first or stands_alone(text)
@@ -165,14 +184,30 @@ async def post_message(
             if cacheable
             else None
         )
+        if reply is not None and learning and prescriptive(reply.text):
+            reply = Reply(learning_reply(state), False, "template")
         if reply is None:
             await _gates(session, identity, settings, today)
             reply = await _ask_model(
-                session, identity, history, text, currency, settings, today, run
+                session,
+                identity,
+                history,
+                text,
+                currency,
+                settings,
+                today,
+                run,
+                learning=bool(learning),
             )
             await _count(session, household.id, today)
-            if cacheable and reply.text not in (FALLBACK, UNAVAILABLE):
+            if learning and prescriptive(reply.text):
+                # A model that ignored "facts only": its advice is not shown.
+                run.outcome = "learning_replaced"
+                reply = Reply(learning_reply(state), False, "model")
+            elif cacheable and reply.text not in (FALLBACK, UNAVAILABLE):
                 await _remember(session, household.id, text, today, version, reply, now)
+
+    reply.learning = learning
 
     # Re-read under a row lock, and append to what is there *now*: a second
     # message sent to this conversation while the model was answering (a
@@ -305,7 +340,16 @@ async def _count(session, household_id, today) -> None:
 
 
 async def _ask_model(
-    session, identity, history, text, currency, settings: Settings, today, run: _Run
+    session,
+    identity,
+    history,
+    text,
+    currency,
+    settings: Settings,
+    today,
+    run: _Run,
+    *,
+    learning: bool = False,
 ) -> Reply:
     household_id = identity.household.id
     specs = list(chat_tools.TOOLS)
@@ -327,6 +371,9 @@ async def _ask_model(
         tools=[spec.name for spec in specs],
         today=today,
     )
+    if learning:
+        # At the end, after the stable prefix the provider caches.
+        system = f"{system}\n\n{LEARNING_INSTRUCTION}"
     messages = [
         Message(m["role"], text=m.get("text") or "")
         for m in history[-HISTORY_MESSAGES:]

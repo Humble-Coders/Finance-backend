@@ -724,6 +724,23 @@ class TestTheTool:
             await conn.invalidate()
             del transaction
 
+    async def test_the_reader_may_use_pg_trgms_schema_by_name(self, db_session):
+        """Explicitly, not through PUBLIC: on Supabase pg_trgm lives in
+        `extensions`, which PUBLIC may not use, and without this grant
+        similarity() would not be found in production."""
+        conn = await db_session.connection()
+        acl = (
+            await conn.execute(
+                text(
+                    "SELECT n.nspacl::text FROM pg_extension e "
+                    "JOIN pg_namespace n ON n.oid = e.extnamespace "
+                    "WHERE e.extname = 'pg_trgm'"
+                )
+            )
+        ).scalar_one()
+
+        assert f"{chat_sql.READER_ROLE}=U/" in acl
+
     async def test_the_reader_role_can_read_nothing_real(self, db_session):
         conn = await db_session.connection()
         privileges = (

@@ -11,7 +11,7 @@ The AI coach can now run **one SELECT it wrote itself**, for questions no fixed 
 3. **`SET LOCAL ROLE finai_chat_reader`**, a new role with SELECT on those temporary tables only.
 4. **Read-only and bounded:** `SET TRANSACTION READ ONLY`, a 2-second `statement_timeout`, and at most 50 rows with the true count.
 
-Everything runs as one prepared statement inside a savepoint that is always rolled back. A `run_sql` tool spec, a handler and a schema paragraph are ready for 6.4 to register. 65 tests attack the sandbox, including each wall on its own.
+Everything runs as one prepared statement inside a savepoint that is always rolled back. A `run_sql` tool spec, a handler and a schema paragraph are ready for 6.4 to register. 66 tests attack the sandbox, including each wall on its own.
 
 ## Files changed
 
@@ -19,7 +19,8 @@ Everything runs as one prepared statement inside a savepoint that is always roll
 - `alembic/versions/d7b3f9a1c426_chat_sql_reader_role.py`:
   - creates the `finai_chat_reader` role (NOLOGIN), guarded because roles are cluster-wide;
   - `GRANT finai_chat_reader TO CURRENT_USER WITH SET TRUE, INHERIT FALSE`, so the app's user can switch to it but never inherits what it is granted;
-  - `CREATE EXTENSION IF NOT EXISTS pg_trgm`, for `similarity()`.
+  - `CREATE EXTENSION IF NOT EXISTS pg_trgm`, for `similarity()`;
+  - `GRANT USAGE` on whichever schema `pg_trgm` is installed in to the reader, because on Supabase that's `extensions`, which `PUBLIC` may not use.
 
   The downgrade drops the extension (RESTRICT), revokes the grant and drops the role.
 - `requirements.txt`: pins `pglast==7.21`.
@@ -53,7 +54,7 @@ Everything runs as one prepared statement inside a savepoint that is always roll
 - **For 6.4:** `RUN_SQL`, the tool spec; `handler_for(household_id, currency)`, which runs on a connection of its own and rolls back; `SCHEMA_PROMPT`, the paragraph for the cached system prompt.
 
 **Tests**
-- `tests/test_chat_sql.py`: 28 test functions, which expand to 65 test cases (the validator test is parametrized over 38 attacks). All are `integration`.
+- `tests/test_chat_sql.py`: 29 test functions, which expand to 66 test cases (the validator test is parametrized over 38 attacks). All are `integration`.
 
 ## How to test
 
@@ -63,11 +64,11 @@ These steps use the local Docker database only, never `.env`.
    ```bash
    cd ~/AndroidStudioProjects/Finance-backend && DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres .venv/bin/python -m alembic upgrade head
    ```
-2. Run the sandbox tests. Expect 65 passed:
+2. Run the sandbox tests. Expect 66 passed:
    ```bash
    DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres .venv/bin/pytest -q tests/test_chat_sql.py
    ```
-3. Run both suites. Expect 525 without the database and 798 with it (733 before this ticket).
+3. Run both suites. Expect 525 without the database and 799 with it (733 before this ticket).
 4. Run the migration round trip. It needs an **empty** throwaway container on port 55432:
    ```bash
    DATABASE_URL=postgresql://postgres:postgres@localhost:55432/postgres PG_CONTAINER=<container> PYTHON=.venv/bin/python scripts/check_migrations.sh
@@ -92,7 +93,7 @@ These steps use the local Docker database only, never `.env`.
 | Totals from `transactions` and `monthly_totals` equal `/dashboard`'s | Met | `test_totals_agree_with_the_dashboard` (March 2020) |
 | Amounts reach the model as decimal strings via `money.py`; no float | Met | `test_amounts_are_decimal_strings_never_floats`; `money.sql_major_units` |
 | No query text or result in logs | Met | `test_no_query_text_or_result_is_logged` |
-| Migration applies, reverses and re-applies; ruff and pytest green; `database` count grew | Met locally | `check_migrations.sh` passed; 733 → 798. CI still to run on the PR |
+| Migration applies, reverses and re-applies; ruff and pytest green; `database` count grew | Met locally | `check_migrations.sh` passed; 733 → 799. CI still to run on the PR |
 
 ## Deviations and decisions
 
@@ -126,13 +127,17 @@ These steps use the local Docker database only, never `.env`.
   - **Functions resolve only in `pg_catalog` and pg_trgm's schema.** The query's search path is set, local to the transaction, so a function added to `public` later can't be picked over a built-in. Relations still resolve to the temporary tables first.
   - **A timeout says which limit it hit:** the 10-second copy or the 2-second query.
   - **A cancelled call stays a cancellation.** If 6.4's deadline cancels a run and the cleanup then fails, the result is `CancelledError`, never a tool error.
+- **Third review: `similarity()` needed a schema grant.**
+  - The reader role needs `USAGE` on the schema `pg_trgm` is installed in. Locally and in CI that's `public`, which everyone may use; on Supabase it's `extensions`, which isn't granted to `PUBLIC`.
+  - A scratch-database simulation showed the reader gets "function similarity(…) does not exist" without the grant, and 0.625 with the migration's grant block.
+  - The migration now grants it, and the downgrade revokes it before the role is dropped. A test checks the explicit grant is in the schema's privileges.
 - **Not changed: row order through the wrapper.** It relies on Postgres keeping a subquery's `ORDER BY` under `count(*) OVER ()` and `LIMIT`. That holds in practice, but SQL doesn't guarantee it, and no simple fix avoids the same assumption.
 
 ## Open questions and follow-ups
 
 - **Before the production migration:**
   - confirm Render's `DATABASE_URL` user is `postgres.aldnrwcfcgesvyrmmhze`. The grant is to the migration's user, which must also be the app's;
-  - after migrating, check by hand that the app's user can `SET ROLE finai_chat_reader` inside a rolled-back transaction.
+  - after migrating, check by hand in a rolled-back transaction: `BEGIN; SET LOCAL ROLE finai_chat_reader; SELECT similarity('coffee', 'coffe'); ROLLBACK;`. Both the role switch and the function must work.
 - **Second reviewer:** the ticket asks for one beyond `/manager-review`, for the riskiest surface in the backend.
 - **For 6.4:**
   - register `RUN_SQL` with `handler_for(...)` after the fixed tools;

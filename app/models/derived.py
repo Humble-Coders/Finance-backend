@@ -7,9 +7,19 @@ recompute them (PRD §4.1).
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Date, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import (
+    BigInteger,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -26,7 +36,9 @@ from app.models.base import (
 
 __all__ = [
     "AiBudgetSuggestion",
+    "ChatAnswerCache",
     "ChatConversation",
+    "ChatDailyUsage",
     "HealthScoreSnapshot",
     "LedgerState",
     "MonthlyCategoryTotal",
@@ -204,3 +216,50 @@ class LedgerState(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     __table_args__ = (Index("uq_ledger_state_household", "household_id", unique=True),)
 
     ledger_version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+
+class ChatAnswerCache(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
+    """A chat answer the model gave, kept for the same question over the same
+    ledger (#71).
+
+    Keyed by the question's normalized hash and `ledger_version` (#83): any
+    write to the ledger moves the version, so a stale answer is never served —
+    it simply stops being found, and expires after 30 days. Only used where
+    the question stands alone (no "it" or "that" pointing back).
+    """
+
+    __tablename__ = "chat_answer_cache"
+    __table_args__ = (
+        Index(
+            "uq_chat_answer_cache_key",
+            "household_id",
+            "question_hash",
+            "ledger_version",
+            unique=True,
+        ),
+    )
+
+    question_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    ledger_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # {"text", "disclaimer", "tools"}: what the reply was, never a tool result.
+    answer: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class ChatDailyUsage(UUIDMixin, HouseholdScopedMixin, Base):
+    """How many chat questions a model answered for a household on a day.
+
+    The daily cap (`CHAT_DAILY_MESSAGE_LIMIT`) counts these. Kept apart from
+    the conversations so deleting one cannot give the questions back.
+    Templated and cached answers are not counted: they cost nothing.
+    """
+
+    __tablename__ = "chat_daily_usage"
+    __table_args__ = (
+        Index("uq_chat_daily_usage_day", "household_id", "day", unique=True),
+    )
+
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    model_answers: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

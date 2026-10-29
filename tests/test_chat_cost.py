@@ -4,11 +4,12 @@ little it sends when it does."""
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 from sqlalchemy import select, text
 
-from app.models.derived import ChatConversation, ChatDailyUsage
+from app.models.derived import ChatAnswerCache, ChatConversation, ChatDailyUsage
 from tests.chat_support import (
     AUGUST,
     a_chat_household,
@@ -31,6 +32,9 @@ pytestmark = [
 @pytest.fixture(autouse=True)
 def pinned_today(monkeypatch):
     monkeypatch.setattr("app.api.chat._today", lambda: TODAY)
+    monkeypatch.setattr(
+        "app.api.chat._now", lambda: datetime.combine(TODAY, time(12), UTC)
+    )
     monkeypatch.setattr("app.api.budgets._today", lambda: TODAY)
     monkeypatch.setattr("app.api.chat_suggestions._today", lambda: TODAY)
 
@@ -87,8 +91,10 @@ class TestNoModelCall:
         scripted = model(*AUGUST_ANSWER, *AUGUST_ANSWER)
         conversation = await a_conversation(api_client)
         await ask(api_client, conversation, "What did I spend in August?")
+        tomorrow = TODAY + timedelta(days=1)
+        monkeypatch.setattr("app.api.chat._today", lambda: tomorrow)
         monkeypatch.setattr(
-            "app.api.chat._today", lambda: TODAY.replace(day=TODAY.day + 1)
+            "app.api.chat._now", lambda: datetime.combine(tomorrow, time(12), UTC)
         )
 
         later = await a_conversation(api_client)
@@ -138,6 +144,58 @@ class TestNoModelCall:
             response = await ask(api_client, conversation, "What was that mostly?")
             assert response.json()["answered_by"] == "model"
         assert len(scripted.calls) == 4
+
+
+class TestTheCacheKeepsOneDay:
+    async def test_an_answer_expires_at_the_end_of_its_day(
+        self, api_client, db_session, model
+    ):
+        """The day is in the key, so an entry could not be found tomorrow:
+        it expires at midnight rather than lingering for weeks."""
+        household = await a_chat_household(api_client, db_session, "+14165578821")
+        model(*AUGUST_ANSWER)
+        conversation = await a_conversation(api_client)
+
+        await ask(api_client, conversation, "What did I spend in August?")
+
+        expires = await db_session.scalar(
+            select(ChatAnswerCache.expires_at).where(
+                ChatAnswerCache.household_id == household
+            )
+        )
+        assert expires == datetime.combine(TODAY + timedelta(days=1), time.min, UTC)
+
+    async def test_expired_entries_are_cleared_when_one_is_written(
+        self, api_client, db_session, model
+    ):
+        household = await a_chat_household(api_client, db_session, "+14165578822")
+        db_session.add(
+            ChatAnswerCache(
+                household_id=household,
+                question_hash="0" * 64,
+                ledger_version=1,
+                answer={"text": "old"},
+                expires_at=datetime(2026, 9, 1, tzinfo=UTC),
+            )
+        )
+        await db_session.commit()
+        model(*AUGUST_ANSWER)
+        conversation = await a_conversation(api_client)
+
+        await ask(api_client, conversation, "What did I spend in August?")
+
+        hashes = (
+            (
+                await db_session.execute(
+                    select(ChatAnswerCache.question_hash).where(
+                        ChatAnswerCache.household_id == household
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert "0" * 64 not in hashes and len(hashes) == 1
 
 
 class TestWhatIsSent:

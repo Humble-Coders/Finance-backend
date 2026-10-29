@@ -40,8 +40,12 @@ router = APIRouter(
 )
 
 
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
 def _today() -> date:
-    return datetime.now(UTC).date()
+    return _now().date()
 
 
 def _summary(conversation: ChatConversation) -> ConversationOut:
@@ -141,6 +145,7 @@ async def post_message(
             body.suggestion_id,
             settings=get_settings(),
             today=_today(),
+            now=_now(),
         )
     except chat.ChatRefused as refusal:
         # The 409 was logged (log_conflict) where it was decided. What the

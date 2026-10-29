@@ -68,7 +68,7 @@ People can now hold a conversation with the AI coach at `/chat/conversations`: l
 - `tests/chat_support.py`: the scripted model `Scripted`, the `call`, `say` and `say_from` steps, and the household and request helpers. The `model` and `no_model` fixtures are registered in `tests/conftest.py`.
 - `tests/test_chat_grounding.py`: 51 cases, no database.
 - `tests/test_chat_api.py`: 26 tests, `integration`.
-- `tests/test_chat_cost.py`: 7 tests, `integration`.
+- `tests/test_chat_cost.py`: 9 tests, `integration`.
 
 ## How to test
 
@@ -78,11 +78,11 @@ These steps use the local Docker database only, never `.env`.
    ```bash
    DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres .venv/bin/python -m alembic upgrade head
    ```
-2. Run the new tests with the same two variables. Expect 84 passed:
+2. Run the new tests with the same two variables. Expect 86 passed:
    ```bash
    .venv/bin/pytest -q tests/test_chat_grounding.py tests/test_chat_api.py tests/test_chat_cost.py
    ```
-3. Run both suites. Expect 584 without the database (525 before) and 832 with it (799 before).
+3. Run both suites. Expect 584 without the database (525 before) and 834 with it (799 before).
 4. Run the migration round trip, which needs an empty throwaway container. It passed locally.
 5. Lint:
    ```bash
@@ -105,7 +105,7 @@ No LLM key is needed; every test uses the scripted model.
 | One household can never read, post to or delete another's conversation (404) | Met | `test_another_households_conversation_is_404` |
 | Conversations untouched for 12 months are removed; account deletion removes conversations and cached answers | Met | `test_a_year_untouched_and_it_is_gone`. No account-deletion endpoint exists yet, so `test_deleting_the_household_deletes_conversations_and_cache` deletes the household row and checks all three chat tables cascade |
 | No message text, SQL or results in logs; `chat_turn` carries tokens and cost | Met | `test_it_carries_tokens_and_never_the_text` |
-| Migration applies, reverses and re-applies; ruff and pytest green; `database` count grew | Met locally | `check_migrations.sh` passed; 799 → 832. CI still to run on the PR |
+| Migration applies, reverses and re-applies; ruff and pytest green; `database` count grew | Met locally | `check_migrations.sh` passed; 799 → 834. CI still to run on the PR |
 
 ## Deviations and decisions
 
@@ -136,7 +136,11 @@ No LLM key is needed; every test uses the scripted model.
   The instrument list now holds only words that name one, and accounts are the household's own to ask about. All five are must-pass tests.
 - **The cache key includes the day.** "This month" on 30 September and on 1 October are different questions over the same ledger, and the prompt tells the model today's date.
 - **A concurrent turn is kept.** The conversation is re-read under `FOR UPDATE` right before storing, and the new turns are appended to what's there then. Before, a second message sent while the model answered was overwritten.
-- **No connection is held across a model call.** The session commits before the model runs and after each tool read, so on the transaction pooler a database connection isn't pinned while the model thinks. The cost is that each tool read opens its own short transaction.
+- **No connection is held across a model call.** The session commits after the last setup read (the feature flags and the data range), just before the model runs, and after each tool read. So on the transaction pooler no database connection is pinned at any model call, the first included. The cost is that each tool read opens its own short transaction.
+  - The first round's version committed *before* those setup reads, so a transaction was open again at the first model call.
+  - The test now asserts that no transaction is active at every model call, instead of counting commits.
+- **Cached answers last until the end of their day, and expired ones are cleared.** Since the key includes the day, an entry can't be found after midnight anyway; it was kept for 30 days and never deleted. Each new entry now deletes the household's expired ones, so the table holds at most a day of answers.
+- **One clock.** The API passes the same `now` the date came from (`app/api/chat.py` `_now`), so the expiry and the day in the key always agree.
 
 ## Open questions and follow-ups
 

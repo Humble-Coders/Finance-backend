@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import structlog
 from sqlalchemy import delete, func, select
@@ -76,7 +76,6 @@ log = structlog.get_logger()
 
 HISTORY_MESSAGES = 6
 MAX_OUTPUT_TOKENS = 400
-CACHE_FOR = timedelta(days=30)
 RETENTION = timedelta(days=365)
 TITLE_CHARS = 60
 PREVIEW_CHARS = 140
@@ -168,10 +167,6 @@ async def post_message(
         )
         if reply is None:
             await _gates(session, identity, settings, today)
-            # End the transaction before the model: on the transaction
-            # pooler an open one pins a database connection, and the model
-            # may take seconds. Each tool read below commits as it finishes.
-            await session.commit()
             reply = await _ask_model(
                 session, identity, history, text, currency, settings, today, run
             )
@@ -228,6 +223,15 @@ async def _cached(session, household_id, text, today, version, now) -> Reply | N
 async def _remember(
     session, household_id, text, today, version, reply: Reply, now
 ) -> None:
+    """Keep [reply] for the rest of [today] — the day is in the key, so it
+    could not be found after midnight anyway — and clear the household's
+    expired entries, so the table holds at most a day of answers."""
+    await session.execute(
+        delete(ChatAnswerCache).where(
+            ChatAnswerCache.household_id == household_id,
+            ChatAnswerCache.expires_at <= now,
+        )
+    )
     await session.execute(
         pg_insert(ChatAnswerCache)
         .values(
@@ -241,7 +245,7 @@ async def _remember(
                 "tools": reply.tools,
                 "figures": reply.figures,
             },
-            expires_at=now + CACHE_FOR,
+            expires_at=datetime.combine(today + timedelta(days=1), time.min, UTC),
         )
         .on_conflict_do_nothing()
     )
@@ -344,6 +348,11 @@ async def _ask_model(
         if m.get("role") == "assistant"
         for figure in m.get("figures") or []
     )
+    # End the transaction before the model — after the last read above (the
+    # features, the data range): on the transaction pooler an open one pins a
+    # database connection, and the model may take seconds. Each tool read
+    # commits as it finishes (`_releasing`), so none is open at any call.
+    await session.commit()
     try:
         return await _grounded(
             client, system, messages, specs, handlers, text, run, earlier

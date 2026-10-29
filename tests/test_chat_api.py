@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 from sqlalchemy import func, select, text, update
@@ -48,6 +48,9 @@ pytestmark = [
 @pytest.fixture(autouse=True)
 def pinned_today(monkeypatch):
     monkeypatch.setattr("app.api.chat._today", lambda: TODAY)
+    monkeypatch.setattr(
+        "app.api.chat._now", lambda: datetime.combine(TODAY, time(12), UTC)
+    )
     monkeypatch.setattr("app.api.budgets._today", lambda: TODAY)
     monkeypatch.setattr("app.api.chat_suggestions._today", lambda: TODAY)
 
@@ -514,37 +517,31 @@ class TestConcurrency:
             "Here you go.",
         ]
 
-    async def test_no_transaction_is_held_while_the_model_thinks(
+    async def test_no_transaction_is_open_at_any_model_call(
         self, api_client, db_session, model, monkeypatch
     ):
-        """The session commits before the model and after each tool read, so
-        on the pooler no connection is pinned across a model call."""
+        """On the pooler an open transaction pins a connection, and the model
+        may take seconds: at every model call — the first included, after the
+        feature and data-range reads — the session holds no transaction."""
         await a_chat_household(api_client, db_session, "+14165578782")
         conversation = await a_conversation(api_client)
         scripted = model(
             call("spending_summary", **AUGUST),
             say_from(lambda r: f"You spent ${float(r['total']):,.2f} in August."),
         )
-        commits = {"n": 0}
-        seen_at_each_call = []
-        real_commit, real_converse = db_session.commit, scripted.converse
-
-        async def counting_commit():
-            commits["n"] += 1
-            await real_commit()
+        open_at_each_call = []
+        real_converse = scripted.converse
 
         async def recording_converse(**kwargs):
-            seen_at_each_call.append(commits["n"])
+            transaction = db_session.sync_session.get_transaction()
+            open_at_each_call.append(bool(transaction and transaction.is_active))
             return await real_converse(**kwargs)
 
-        monkeypatch.setattr(db_session, "commit", counting_commit)
         monkeypatch.setattr(scripted, "converse", recording_converse)
 
         await ask(api_client, conversation, "What did I spend in August?")
 
-        first, second = seen_at_each_call
-        assert first >= 1, "committed before the first model call"
-        assert second > first, "and again after the tool read, before the next"
+        assert open_at_each_call == [False, False]
 
 
 class TestTheLogLine:

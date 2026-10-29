@@ -129,3 +129,32 @@ async def ask(api_client, conversation: str, question: str = "", **body):
 
 
 AUGUST = dict(from_month="2026-08", to_month="2026-08", group_by="none")
+
+
+async def a_learning_household(
+    api_client, db_session, phone: str, *, rows: int = 5, consent: bool = True
+):
+    """A household still learning: [rows] transactions, all in September
+    2026 — the running month, so no complete month yet."""
+    from tests.test_dashboard import a_household, setup_wizard, tx
+
+    household, account = await a_household(api_client, phone)
+    await setup_wizard(api_client)
+    db_session.add_all(
+        tx(
+            household,
+            account,
+            minor=1_000 + i,
+            month=9,
+            day=1 + i % 14,
+            description=f"SHOP {i}",
+        )
+        for i in range(rows)
+    )
+    await db_session.flush()
+    await rollups.rebuild(db_session, household)
+    await chat_on(db_session)
+    await db_session.commit()
+    if consent:
+        await consent_to_ai(api_client)
+    return household, account

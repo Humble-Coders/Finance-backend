@@ -11,7 +11,7 @@ The AI coach can now run **one SELECT it wrote itself**, for questions no fixed 
 3. **`SET LOCAL ROLE finai_chat_reader`**, a new role with SELECT on those temporary tables only.
 4. **Read-only and bounded:** `SET TRANSACTION READ ONLY`, a 2-second `statement_timeout`, and at most 50 rows with the true count.
 
-Everything runs as one prepared statement inside a savepoint that is always rolled back. A `run_sql` tool spec, a handler and a schema paragraph are ready for 6.4 to register. 60 tests attack the sandbox, including each wall on its own.
+Everything runs as one prepared statement inside a savepoint that is always rolled back. A `run_sql` tool spec, a handler and a schema paragraph are ready for 6.4 to register. 65 tests attack the sandbox, including each wall on its own.
 
 ## Files changed
 
@@ -53,7 +53,7 @@ Everything runs as one prepared statement inside a savepoint that is always roll
 - **For 6.4:** `RUN_SQL`, the tool spec; `handler_for(household_id, currency)`, which runs on a connection of its own and rolls back; `SCHEMA_PROMPT`, the paragraph for the cached system prompt.
 
 **Tests**
-- `tests/test_chat_sql.py`: 23 test functions, which expand to 60 test cases (the validator test is parametrized over 38 attacks). All are `integration`.
+- `tests/test_chat_sql.py`: 28 test functions, which expand to 65 test cases (the validator test is parametrized over 38 attacks). All are `integration`.
 
 ## How to test
 
@@ -63,11 +63,11 @@ These steps use the local Docker database only, never `.env`.
    ```bash
    cd ~/AndroidStudioProjects/Finance-backend && DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres .venv/bin/python -m alembic upgrade head
    ```
-2. Run the sandbox tests. Expect 60 passed:
+2. Run the sandbox tests. Expect 65 passed:
    ```bash
    DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres .venv/bin/pytest -q tests/test_chat_sql.py
    ```
-3. Run both suites. Expect 525 without the database and 793 with it (733 before this ticket).
+3. Run both suites. Expect 525 without the database and 798 with it (733 before this ticket).
 4. Run the migration round trip. It needs an **empty** throwaway container on port 55432:
    ```bash
    DATABASE_URL=postgresql://postgres:postgres@localhost:55432/postgres PG_CONTAINER=<container> PYTHON=.venv/bin/python scripts/check_migrations.sh
@@ -92,7 +92,7 @@ These steps use the local Docker database only, never `.env`.
 | Totals from `transactions` and `monthly_totals` equal `/dashboard`'s | Met | `test_totals_agree_with_the_dashboard` (March 2020) |
 | Amounts reach the model as decimal strings via `money.py`; no float | Met | `test_amounts_are_decimal_strings_never_floats`; `money.sql_major_units` |
 | No query text or result in logs | Met | `test_no_query_text_or_result_is_logged` |
-| Migration applies, reverses and re-applies; ruff and pytest green; `database` count grew | Met locally | `check_migrations.sh` passed; 733 → 793. CI still to run on the PR |
+| Migration applies, reverses and re-applies; ruff and pytest green; `database` count grew | Met locally | `check_migrations.sh` passed; 733 → 798. CI still to run on the PR |
 
 ## Deviations and decisions
 
@@ -120,6 +120,12 @@ These steps use the local Docker database only, never `.env`.
 - **No switch can turn a wall off.** `run()` takes only the connection, household, currency and query; a test pins that signature. Tests replace a wall by patching `chat_sql.validate` or `chat_sql._ROLE_STATEMENT`, and `test_replacing_a_wall_really_removes_it` proves the patch takes effect.
 - **The copy phase is bounded** by a 10-second `statement_timeout`. The model's query keeps its 2 seconds.
 - **Array indexing is allowed:** `A_Indirection` and `A_Indices`, so `(array_agg(…))[1]` works.
+- **Second review:**
+  - **Arrays come back as decimal strings and ISO dates.** `array_agg` used to reach the model as Python's own text (`"[Decimal('12.50')]"`); `_plain` now handles each element.
+  - **Isolation is tested in every table.** Household B gets a row in all seven sandbox tables; A's `SELECT *` on each shows none of them, and B's own sandbox does, so the check can fail.
+  - **Functions resolve only in `pg_catalog` and pg_trgm's schema.** The query's search path is set, local to the transaction, so a function added to `public` later can't be picked over a built-in. Relations still resolve to the temporary tables first.
+  - **A timeout says which limit it hit:** the 10-second copy or the 2-second query.
+  - **A cancelled call stays a cancellation.** If 6.4's deadline cancels a run and the cleanup then fails, the result is `CancelledError`, never a tool error.
 - **Not changed: row order through the wrapper.** It relies on Postgres keeping a subquery's `ORDER BY` under `count(*) OVER ()` and `LIMIT`. That holds in practice, but SQL doesn't guarantee it, and no simple fix avoids the same assumption.
 
 ## Open questions and follow-ups

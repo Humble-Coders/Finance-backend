@@ -9,6 +9,7 @@ hold; with the role skipped, the validator still refuses.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
@@ -20,8 +21,15 @@ import pytest
 from sqlalchemy import func, select, text
 from structlog.testing import capture_logs
 
-from app.models.enums import ReviewReason, TransactionDirection
+from app.models.enums import (
+    DebtKind,
+    GoalHorizon,
+    ReviewReason,
+    TransactionDirection,
+)
 from app.models.money import Transaction
+from app.models.planning import Budget, BudgetLine, Debt, Goal
+from app.models.setup import Obligation
 from app.services import chat_sql, chat_tools, rollups
 from app.services.chat_sql import (
     MAX_ROWS,
@@ -35,7 +43,12 @@ from app.services.chat_sql import (
 from app.services.llm import ToolError, _schema_problem
 from tests.conftest import requires_db
 from tests.fixtures.long_history import COMMON_MERCHANT, ten_years
-from tests.test_dashboard import a_household, authenticate_as, tx
+from tests.test_dashboard import (
+    a_household,
+    a_system_category_id,
+    authenticate_as,
+    tx,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -515,6 +528,67 @@ class TestTenYears:
         assert row["from_totals"] == row["from_rows"] == body["expenses"]["actual"]
 
 
+class TestEveryTableIsThisHouseholdsAlone:
+    async def test_b_has_a_row_in_every_table_and_a_sees_none_of_them(
+        self, api_client, db_session
+    ):
+        """A dropped household filter in any one table's copy would show
+        here: B is given a row in all seven, each carrying the secret."""
+        a, b = await two_households(api_client, db_session)
+        groceries = await a_system_category_id(db_session, "groceries")
+        budget = Budget(
+            household_id=b,
+            period_start=date(2026, 8, 1),
+            period_end=date(2026, 8, 31),
+            currency=CAD,
+            expected_income_minor_units=999_999,
+        )
+        db_session.add(budget)
+        await db_session.flush()
+        db_session.add_all(
+            [
+                BudgetLine(
+                    budget_id=budget.id,
+                    category_id=groceries,
+                    allocated_minor_units=999_999,
+                    currency=CAD,
+                ),
+                Goal(
+                    household_id=b,
+                    name=f"{SECRET} GOAL",
+                    horizon=GoalHorizon.short_term,
+                    target_minor_units=999_999,
+                    saved_minor_units=0,
+                    currency=CAD,
+                ),
+                Debt(
+                    household_id=b,
+                    name=f"{SECRET} CARD",
+                    kind=DebtKind.credit_card,
+                    balance_minor_units=999_999,
+                    currency=CAD,
+                ),
+                Obligation(
+                    household_id=b,
+                    name=f"{SECRET} RENT",
+                    monthly_amount_minor_units=999_999,
+                    currency=CAD,
+                    position=0,
+                ),
+            ]
+        )
+        await db_session.flush()
+        await rollups.rebuild(db_session, b)
+
+        for name in SANDBOX_TABLES:
+            result = await run_as(db_session, a, f"SELECT * FROM {name}")
+            assert not leaked(result), name
+        # And B's own sandbox does hold them, so the check above can fail.
+        for name in ("goals", "debts", "obligations", "budget_lines"):
+            mine = await run_as(db_session, b, f"SELECT * FROM {name}")
+            assert leaked(mine), name
+
+
 class TestWhatComesBack:
     async def test_amounts_are_decimal_strings_never_floats(
         self, api_client, db_session
@@ -535,6 +609,54 @@ class TestWhatComesBack:
         assert row["last"] == "2026-08-09"
         assert row["n"] == 2 and row["any_one_off"] is False
         assert not any(isinstance(v, float) for v in row.values())
+
+    async def test_arrays_hold_decimal_strings_and_iso_dates(
+        self, api_client, db_session
+    ):
+        a, _ = await two_households(api_client, db_session)
+
+        result = await run_as(
+            db_session,
+            a,
+            "SELECT array_agg(amount ORDER BY amount) AS amounts, "
+            "array_agg(occurred_on ORDER BY occurred_on) AS days FROM transactions",
+        )
+
+        assert result.rows == [
+            {"amounts": ["12.50", "20.00"], "days": ["2026-08-03", "2026-08-09"]}
+        ]
+
+    async def test_functions_resolve_only_in_pg_catalog_and_pg_trgm(
+        self, api_client, db_session
+    ):
+        """A function added to `public` later can never be picked over a
+        built-in: the query's search path is pg_catalog and pg_trgm's schema."""
+        a, _ = await two_households(api_client, db_session)
+        trgm = await db_session.scalar(
+            text(
+                "SELECT n.nspname FROM pg_extension e "
+                "JOIN pg_namespace n ON n.oid = e.extnamespace "
+                "WHERE e.extname = 'pg_trgm'"
+            )
+        )
+
+        result = await run_as(
+            db_session,
+            a,
+            "SELECT current_setting('search_path') AS p, "
+            "similarity('coffee', 'coffe') > 0 AS s FROM merchants LIMIT 1",
+            skip_validator=True,
+        )
+
+        assert result.rows[0]["p"] == f"pg_catalog, {trgm}"
+        assert result.rows[0]["s"] is True
+
+    async def test_a_slow_copy_says_so(self, api_client, db_session, monkeypatch):
+        a, _ = await two_households(api_client, db_session, long=True)
+        monkeypatch.setattr(chat_sql, "COPY_TIMEOUT", "1ms")
+
+        with pytest.raises(ToolError, match="preparing the data took too long"):
+            await run_as(db_session, a, "SELECT count(*) AS n FROM transactions")
 
     async def test_no_query_text_or_result_is_logged(self, api_client, db_session):
         a, _ = await two_households(api_client, db_session)
@@ -573,6 +695,34 @@ class TestTheTool:
         result = await handler({"query": "SELECT count(*) AS n FROM transactions"})
 
         assert result == {"rows": [{"n": 0}], "row_count": 1, "truncated": False}
+
+    async def test_a_cancelled_call_stays_a_cancellation(self):
+        """6.4's deadline cancels the task mid-query: what comes out is the
+        cancellation, never a tool error the loop would send to the model."""
+        from app.db import get_engine
+
+        async with get_engine().connect() as conn:
+            transaction = await conn.begin()
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(
+                    chat_sql,
+                    "validate",
+                    lambda q: chat_sql.Validated(frozenset({"merchants"}), q),
+                )
+                task = asyncio.create_task(
+                    run(
+                        conn,
+                        uuid.uuid4(),
+                        CAD,
+                        "SELECT count(*) AS n FROM generate_series(1, 2000000000)",
+                    )
+                )
+                await asyncio.sleep(0.3)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            await conn.invalidate()
+            del transaction
 
     async def test_the_reader_role_can_read_nothing_real(self, db_session):
         conn = await db_session.connection()

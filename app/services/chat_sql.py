@@ -42,6 +42,7 @@ its results, which carry merchant names and amounts.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import time
@@ -105,6 +106,23 @@ COPY_TIMEOUT = "10s"
 # the other walls hold without it can replace it — never an argument a caller
 # could pass.
 _ROLE_STATEMENT = f"SET LOCAL ROLE {READER_ROLE}"
+# Where the model's function and operator names resolve: pg_catalog, then the
+# schema pg_trgm lives in (for similarity) and nothing else — so a function
+# someone adds to `public` later can never be picked over a built-in by
+# overload resolution. Relations still resolve to the temporary tables first
+# (pg_temp is searched first for them, and never for functions). Local to the
+# transaction, like every setting here.
+_SEARCH_PATH_STATEMENT = """
+SELECT set_config(
+    'search_path',
+    'pg_catalog' || coalesce((
+        SELECT ', ' || quote_ident(n.nspname)
+        FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_trgm'
+    ), ''),
+    true
+)
+"""
 UNFILED = "uncategorized"
 
 
@@ -605,6 +623,10 @@ def _plain(value):
         return str(value)
     if value is None or isinstance(value, bool | int | str):
         return value
+    if isinstance(value, list | tuple):
+        # `array_agg` and friends: each element as the model reads it, never
+        # Python's own text for it ("[Decimal('12.50')]").
+        return [_plain(item) for item in value]
     return str(value)
 
 
@@ -627,17 +649,21 @@ async def run(
     started = time.monotonic()
     digest = _query_hash(query)
     outcome, copied, returned, tables = "error", 0, 0, ()
+    phase = "validate"
     try:
         checked = validate(query)
         tables, sql = tuple(sorted(checked.tables)), checked.sql
         savepoint = await conn.begin_nested()
         try:
+            phase = "copy"
             await conn.execute(text(f"SET LOCAL statement_timeout = '{COPY_TIMEOUT}'"))
             for name in tables:
                 copied += await _copy(conn, name, household_id, currency)
             await conn.execute(text("SET TRANSACTION READ ONLY"))
+            await conn.execute(text(_SEARCH_PATH_STATEMENT))
             await conn.execute(text(_ROLE_STATEMENT))
             await conn.execute(text(f"SET LOCAL statement_timeout = '{TIMEOUT}'"))
+            phase = "query"
             # On lines of its own, so even text that never went through the
             # parser (the tests that replace the validator) cannot comment the
             # wrapper away.
@@ -664,10 +690,18 @@ async def run(
         outcome = "rejected"
         raise
     except DBAPIError as exc:
-        reason = _db_reason(exc)
-        outcome = "timeout" if "statement timeout" in reason else "error"
+        if _being_cancelled():
+            raise asyncio.CancelledError() from exc
+        reason = _db_reason(exc, phase)
+        outcome = "timeout" if "took too long" in reason else "error"
         raise ToolError(reason) from None
     except Exception as exc:  # noqa: BLE001 — every failure goes back as a tool error
+        if _being_cancelled():
+            # The caller's deadline cancelled us and the cleanup then failed
+            # on the interrupted connection: that is the cancellation's story,
+            # not the query's. Raised as the cancellation, so the caller's
+            # timeout recognises it, never dressed up as a tool error.
+            raise asyncio.CancelledError() from exc
         # Not a database error: the driver itself gave up — asyncpg cannot
         # resolve the types of some catalog columns (`anyarray`) and says so.
         # Still the query's fault, never a crash in the chat: no details, only
@@ -687,14 +721,27 @@ async def run(
         )
 
 
-def _db_reason(exc: DBAPIError) -> str:
+def _being_cancelled() -> bool:
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
+def _db_reason(exc: DBAPIError, phase: str) -> str:
     """What went wrong, for the model to correct: Postgres's own first line
     (it names a column or a type, never another household's data — none is
-    reachable)."""
+    reachable). A timeout says which limit it was."""
     message = str(getattr(exc, "orig", exc)).splitlines()[0]
     message = message.split(">: ", 1)[-1]
     if "canceling statement due to statement timeout" in message:
-        return "the query took longer than the 2 second statement timeout; narrow it"
+        if phase == "copy":
+            return (
+                f"preparing the data took too long (over {COPY_TIMEOUT}); "
+                "ask about fewer tables"
+            )
+        return (
+            f"the query took too long (over the {TIMEOUT.removesuffix('s')} second "
+            "limit); narrow it"
+        )
     return f"the query failed: {message}"
 
 

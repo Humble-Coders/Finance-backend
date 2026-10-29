@@ -38,23 +38,23 @@ A reply that gives advice anyway, from the model or from the cache, is replaced 
 
 **Tests**
 - `tests/chat_support.py`: `a_learning_household`, with a few transactions, all in the running month.
-- `tests/test_chat_learning.py`: 29 tests.
-  - 22 need no database: the classification table and the prescriptive patterns.
+- `tests/test_chat_learning.py`: 40 tests.
+  - 33 need no database: the classification table and the prescriptive patterns.
   - 7 are `integration`.
 
 ## How to test
 
 These steps use the local Docker database only, never `.env`.
 
-1. Run the new tests. Expect 29 passed:
+1. Run the new tests. Expect 40 passed:
    ```bash
    cd ~/AndroidStudioProjects/Finance-backend && DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres .venv/bin/pytest -q tests/test_chat_learning.py
    ```
-2. Run every chat test with the same variables. Expect 115 passed:
+2. Run every chat test with the same variables. Expect 126 passed:
    ```bash
    .venv/bin/pytest -q tests/test_chat_learning.py tests/test_chat_api.py tests/test_chat_cost.py tests/test_chat_grounding.py
    ```
-3. Run both suites. Expect 606 without the database (584 before) and 841 with it (834 before).
+3. Run both suites. Expect 617 without the database (584 before) and 841 with it (834 before).
 4. Lint:
    ```bash
    .venv/bin/ruff check app tests && .venv/bin/ruff format --check app tests
@@ -79,8 +79,24 @@ No migration.
 - **`learning` is on every reply while learning,** facts included, and null once ready. The ticket allowed either; this lets the app show progress beside any answer.
 - **A replaced or held-back reply isn't cached.** A cache hit is still re-checked with `prescriptive()` while learning. Readiness can only change with the ledger (`ledger_version` is in the key) or at a month boundary (the day is in the key), so this second check is a backstop.
 - **The learning instruction goes at the end of the system prompt,** after the rules and the household's facts, so the cacheable prefix stays the same for learning and ready households.
-- **Advice wins over fact** when a question has both ("what should I budget for groceries?").
+- **Strong and weak advice markers.**
+  - **Strong** markers are advice in any tense: "should I", "how much should", "can I afford", "recommend", "tips", "make a plan".
+  - **Weak** markers count only when the question doesn't look back: "invest", "improve", "spend less", "which card", "suggest", "afford". So "should I invest?" is advice and "how much did I invest?" is a fact.
+  - A strong marker wins over a fact word ("what should I budget for groceries?").
 - **The learning reply is `answered_by: "template"`** when held back before the model. When it replaces a model reply it stays `"model"`, because a model call happened and was counted.
+
+### Changes from review (#90)
+
+- **Past-tense questions are facts.** Before, any weak marker made a question advice, so a learning household got the learning reply for:
+  - "How much did I invest last year?"
+  - "Did my score improve this month?"
+  - "Did I spend less than last month?"
+  - "Which card did I use most?"
+  - "What did the app suggest for my groceries budget?"
+  - "Did I afford the trip in July?"
+
+  All six are now table tests that must come out as facts.
+- **"Try to", "make sure you", "aim to" and "you need to" count as advice only before a money action** (save, spend, cut, keep, pay, reduce, budget…). A factual reply pointing to the Transactions screen ("try to look at…", "make sure you open…") was being replaced; both are now tests.
 
 ## Open questions and follow-ups
 

@@ -40,30 +40,51 @@ __all__ = [
 
 FACT, ADVICE, UNCLEAR = "fact", "advice", "unclear"
 
-_ADVICE = re.compile(
-    r"\bshould i\b|\bshould we\b|\bcan i afford\b|\bcould i afford\b|\bafford\b"
-    r"|\bhow much should\b|\bwhat should\b|\bis it (a good|wise|smart)\b"
-    r"|\bplan (for|to)\b|\bmake a plan\b|\bimprove\b|\bget better\b"
-    r"|\bincrease my score\b"
+# Asking for advice outright, whatever the tense.
+_STRONG_ADVICE = re.compile(
+    r"\bshould (i|we)\b|\bhow much should\b|\bwhat should\b"
+    r"|\b(can|could) (i|we) afford\b|\brecommend|\badvice\b|\badvise\b|\btips?\b"
+    r"|\bhelp me (save|budget|plan)\b|\bset (a|my) budget\b|\bmake a plan\b"
+    r"|\bis it (a good|wise|smart|worth)\b"
+    r"|\bhow (do|can|could|should) (i|we) (save|budget|reach|get|improve|pay|cut)\b"
+    r"|\bhow to (save|budget|improve|pay|cut)\b",
+    re.IGNORECASE,
+)
+# Words that are advice about what to do next — but a fact when the question
+# looks back: "how much did I invest?", "did my score improve?".
+_WEAK_ADVICE = re.compile(
+    r"\bafford\b|\bplan (for|to)\b|\bimprove\b|\bget better\b|\bincrease my score\b"
     r"|\binvest\b|\bsave more\b|\bspend less\b|\bcut (back|down)\b"
-    r"|\bpay (off|down)\b.{0,30}\bfirst\b|\bwhich (debt|card|loan)\b"
-    r"|\brecommend|\badvice\b|\badvise\b|\bsuggest\b|\btips?\b"
-    r"|\bhelp me (save|budget)\b"
-    r"|\bset (a|my) budget\b|\bhow (do|can) i (save|budget|reach|get)\b",
+    r"|\bpay (off|down)\b.{0,30}\bfirst\b|\bwhich (debt|card|loan)\b|\bsuggest\b",
+    re.IGNORECASE,
+)
+# A question about what already happened.
+_PAST = re.compile(
+    r"\b(did|was|were|had)\b|\bhave (i|we)\b|\bhas (my|our|the)\b",
     re.IGNORECASE,
 )
 _FACT = re.compile(
-    r"\bhow much (did|do|have) (i|we)\b|\bwhat did (i|we)\b|\bwhat('s| is| was| were)\b"
+    r"\bhow much (did|do|have) (i|we)\b|\bwhat did (i|we)\b"
+    r"|\bwhat('s| is| was| were)\b"
     r"|\bshow( me)?\b|\blist\b|\bcompare|\bbiggest\b|\blargest\b|\btop\b"
     r"|\bhow many\b|\bwhen did\b|\bwhere did\b|\bexplain\b|\bwhy (did|is|was)\b"
     r"|\btotal\b|\baverage\b",
     re.IGNORECASE,
 )
+# What a person does with money — so "try to" or "make sure you" is advice
+# only when it is about money, not "try to look at the Transactions screen".
+_MONEY_ACTION = (
+    r"(sav\w*|spend\w*|cut\w*|keep\w*|pay\w*|reduc\w*|limit\w*|budget\w*|"
+    r"put\w*|set\w* aside|mov\w*|transfer\w*|invest\w*|stop\w*|cancel\w*|"
+    r"lower\w*|increas\w*|build\w*)"
+)
 _PRESCRIPTIVE = re.compile(
     r"\byou should\b|\byou'?d (better|do well)\b|\bi (would |'d )?recommend\b"
     r"|\bi'?d suggest\b|\bi suggest\b|\bmy advice\b"
     r"|\bconsider (saving|cutting|paying|reducing|setting|moving|putting)\b"
-    r"|\btry to\b|\baim (to|for)\b|\byou need to\b|\bmake sure you\b"
+    rf"|\b(try to|aim to|you need to|make sure you|be sure to)\s+(\w+\s+){{0,2}}?"
+    rf"{_MONEY_ACTION}\b"
+    r"|\baim (to|for)\s+(\$|\d)"
     r"|\bit would be (wise|best|a good idea)\b",
     re.IGNORECASE,
 )
@@ -77,10 +98,16 @@ LEARNING_INSTRUCTION = (
 
 
 def classify(question: str) -> str:
-    """`advice` wins over `fact`: "what should I budget?" holds both."""
-    if _ADVICE.search(question):
+    """Asking outright for advice is advice ("what should I budget?" holds a
+    fact word too). A word about what to do next is advice only when the
+    question does not look back: "should I invest?" is advice, "how much did
+    I invest?" a fact."""
+    if _STRONG_ADVICE.search(question):
         return ADVICE
-    if _FACT.search(question):
+    looks_back = bool(_PAST.search(question))
+    if _WEAK_ADVICE.search(question) and not looks_back:
+        return ADVICE
+    if _FACT.search(question) or looks_back:
         return FACT
     return UNCLEAR
 

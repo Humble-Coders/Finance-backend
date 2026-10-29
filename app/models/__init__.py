@@ -7,7 +7,9 @@ autogenerate sees nothing that has not been imported.
 from app.models.categorization import Category, CategoryCorrection
 from app.models.derived import (
     AiBudgetSuggestion,
+    ChatAnswerCache,
     ChatConversation,
+    ChatDailyUsage,
     HealthScoreSnapshot,
     LedgerState,
     MonthlyCategoryTotal,
@@ -76,7 +78,9 @@ __all__ = [
     "MonthlyCategoryTotal",
     "PlanDiagnostic",
     "AiBudgetSuggestion",
+    "ChatAnswerCache",
     "ChatConversation",
+    "ChatDailyUsage",
     "SubscriptionEntitlement",
     "CountryPack",
     "FeatureAvailability",

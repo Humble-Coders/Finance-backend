@@ -79,6 +79,12 @@ class Settings(BaseSettings):
     # The AI coach's tool loop (#69): input plus output tokens one question may
     # spend across all its rounds before the loop stops.
     llm_chat_token_budget: int = 6_000
+    # The model the AI coach's chat uses (#71); empty means LLM_MODEL. A
+    # setting, so chat can run on a cheaper model than statement parsing.
+    llm_chat_model: str = ""
+    # Questions a model may answer per household per day. Suggested and
+    # cached answers do not count. Plan-based quotas are 7.1's.
+    chat_daily_message_limit: int = 30
     # Dollars per million tokens, by model: {"model": {"input": …,
     # "cached_input": …, "output": …}}. Used only to estimate a call's cost
     # when the provider does not report one (OpenRouter does); a model with no

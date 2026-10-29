@@ -235,3 +235,7 @@ async def api_client(db_session):
         yield client
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(current_user, None)
+
+
+# The AI coach's scripted model (#71), for every chat test module.
+from tests.chat_support import model, no_model  # noqa: E402, F401

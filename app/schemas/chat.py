@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, Field, model_validator
 
 
 class SuggestionOut(BaseModel):
@@ -26,3 +29,61 @@ class SuggestionAnswerOut(BaseModel):
 
     text: str
     figures: list[str]
+
+
+# --- Conversations (#71) ----------------------------------------------------------
+
+MAX_MESSAGE_CHARS = 1_000
+
+
+class ConversationOut(BaseModel):
+    id: uuid.UUID
+    title: str | None
+    preview: str | None
+    updated_at: datetime
+
+
+class ConversationsOut(BaseModel):
+    conversations: list[ConversationOut]
+
+
+class MessageOut(BaseModel):
+    """A turn as the person sees it — text only. The tools behind an answer
+    stay on the server."""
+
+    role: str
+    text: str
+    at: datetime
+    # Assistant turns only.
+    answered_by: str | None = None
+    disclaimer: bool | None = None
+
+
+class ConversationDetailOut(BaseModel):
+    id: uuid.UUID
+    title: str | None
+    messages: list[MessageOut]
+
+
+class MessageIn(BaseModel):
+    """A question in the person's words, or a suggestion chip tapped
+    (`suggestion_id`, from `GET /chat/suggestions`) — then `text` may be empty."""
+
+    text: str = Field(default="", max_length=MAX_MESSAGE_CHARS)
+    suggestion_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _something_to_answer(self) -> MessageIn:
+        if not self.text.strip() and self.suggestion_id is None:
+            raise ValueError("send text or a suggestion_id")
+        return self
+
+
+class ReplyOut(BaseModel):
+    text: str
+    # True when the answer is about what is to come: show /legal/disclaimer.
+    disclaimer: bool
+    # template | cache | model — how it was answered.
+    answered_by: str
+    # The learning phase's progress while advice is held back (6.5); null here.
+    learning: dict | None = None

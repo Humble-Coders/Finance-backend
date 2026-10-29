@@ -9,6 +9,7 @@ hold; with the role skipped, the validator still refuses.
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 import uuid
@@ -67,9 +68,28 @@ async def two_households(api_client, db_session, *, long: bool = False):
     return a, b
 
 
-async def run_as(db_session, household, query: str, **flags):
+async def run_as(
+    db_session,
+    household,
+    query: str,
+    *,
+    skip_validator: bool = False,
+    skip_role: bool = False,
+):
+    """Run [query] as [household]; with a wall replaced, to prove the others
+    hold without it. `run` itself has no way to turn a wall off — the tests
+    patch the module, which no caller in `app/` can do by accident."""
     conn = await db_session.connection()
-    return await run(conn, household, CAD, query, **flags)
+    with pytest.MonkeyPatch.context() as patch:
+        if skip_validator:
+            patch.setattr(
+                chat_sql,
+                "validate",
+                lambda q: chat_sql.Validated(frozenset(SANDBOX_TABLES), q),
+            )
+        if skip_role:
+            patch.setattr(chat_sql, "_ROLE_STATEMENT", "SELECT 1")
+        return await run(conn, household, CAD, query)
 
 
 def leaked(result) -> bool:
@@ -125,6 +145,12 @@ REJECTED = {
         "WITH x AS (DELETE FROM transactions RETURNING *) SELECT * FROM x"
     ),
     "a parameter": "SELECT $1 FROM transactions",
+    "a schema-qualified operator": (
+        "SELECT amount OPERATOR(public.+) 1 FROM transactions"
+    ),
+    "an operator in another schema": (
+        "SELECT merchant FROM transactions WHERE merchant OPERATOR(extensions.%) 'x'"
+    ),
     "WITH RECURSIVE": (
         "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) "
         "SELECT * FROM r, transactions"
@@ -158,6 +184,22 @@ class TestTheValidator:
         assert checked.tables == {"transactions"}
         assert "--" not in checked.sql and ";" not in checked.sql
 
+    async def test_array_indexing_and_catalog_operators_are_fine(self):
+        assert validate(
+            "SELECT (array_agg(amount ORDER BY amount DESC))[1] AS top, "
+            "amount OPERATOR(pg_catalog.+) 1 AS plus FROM transactions GROUP BY amount"
+        ).tables == {"transactions"}
+
+    async def test_no_caller_can_turn_a_wall_off(self):
+        """`run` takes the connection, the household, the currency and the
+        query — nothing that skips the validator or the role."""
+        assert list(inspect.signature(run).parameters) == [
+            "conn",
+            "household_id",
+            "currency",
+            "query",
+        ]
+
     async def test_it_names_only_the_tables_the_query_reads(self):
         checked = validate(
             "SELECT m.merchant FROM merchants m "
@@ -185,6 +227,19 @@ class TestIsolation:
         assert {r["merchant"] for r in result.rows} == {"COSTCO", "METRO"}
         assert not leaked(result)
 
+    async def test_replacing_a_wall_really_removes_it(self, api_client, db_session):
+        """Otherwise the one-wall-at-a-time tests below would prove nothing."""
+        a, _ = await two_households(api_client, db_session)
+        probe = "SELECT current_user AS u FROM transactions LIMIT 1"
+
+        with pytest.raises(ToolError):
+            await run_as(db_session, a, probe)  # current_user: refused
+        as_reader = await run_as(db_session, a, probe, skip_validator=True)
+        as_app = await run_as(db_session, a, probe, skip_validator=True, skip_role=True)
+
+        assert as_reader.rows == [{"u": chat_sql.READER_ROLE}]
+        assert as_app.rows[0]["u"] != chat_sql.READER_ROLE
+
     async def test_without_the_validator_the_tables_and_role_still_hold(
         self, api_client, db_session
     ):
@@ -201,7 +256,7 @@ class TestIsolation:
             "SELECT * FROM pg_stats WHERE tablename = 'transaction'",
         ):
             try:
-                result = await run_as(db_session, a, attack, _skip_validator=True)
+                result = await run_as(db_session, a, attack, skip_validator=True)
             except ToolError as refused:
                 assert "permission denied" in str(refused) or "pg_stats" in attack
                 continue
@@ -209,7 +264,7 @@ class TestIsolation:
             assert result.row_count == 0, attack
 
         mine = await run_as(
-            db_session, a, "SELECT merchant FROM transactions", _skip_validator=True
+            db_session, a, "SELECT merchant FROM transactions", skip_validator=True
         )
         assert not leaked(mine)
         assert mine.row_count == 2
@@ -226,7 +281,7 @@ class TestIsolation:
             'UNION SELECT merchant FROM "transaction"',
         ):
             with pytest.raises(ToolError):
-                await run_as(db_session, a, query, _skip_role=True)
+                await run_as(db_session, a, query, skip_role=True)
 
     async def test_the_temp_tables_alone_hold_only_this_household(
         self, api_client, db_session
@@ -240,8 +295,8 @@ class TestIsolation:
             a,
             "SELECT merchant FROM transactions "
             "UNION ALL SELECT merchant FROM merchants",
-            _skip_validator=True,
-            _skip_role=True,
+            skip_validator=True,
+            skip_role=True,
         )
 
         assert not leaked(result)
@@ -260,8 +315,8 @@ class TestWritesAreImpossible:
                 db_session,
                 a,
                 "SELECT lo_create(0) AS oid",
-                _skip_validator=True,
-                _skip_role=True,
+                skip_validator=True,
+                skip_role=True,
             )
 
     async def test_dml_cannot_even_be_wrapped(self, api_client, db_session):
@@ -272,7 +327,7 @@ class TestWritesAreImpossible:
                 db_session,
                 a,
                 "DELETE FROM transactions RETURNING *",
-                _skip_validator=True,
+                skip_validator=True,
             )
         assert (
             await run_as(db_session, a, "SELECT count(*) AS n FROM transactions")
@@ -303,13 +358,12 @@ class TestNothingOutlivesTheCall:
         # The session-level form too — the kind that once stuck to a pooled
         # connection: rolled back with the savepoint like any other.
         for local in ("true", "false"):
-            changed = await run(
-                conn,
+            changed = await run_as(
+                db_session,
                 a,
-                CAD,
                 f"SELECT set_config('role', 'postgres', {local}) AS r, "
                 f"set_config('application_name', 'probe', {local}) AS t",
-                _skip_validator=True,
+                skip_validator=True,
             )
             assert changed.rows == [{"r": "postgres", "t": "probe"}]
 

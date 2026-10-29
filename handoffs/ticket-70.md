@@ -11,14 +11,14 @@ The AI coach can now run **one SELECT it wrote itself**, for questions no fixed 
 3. **`SET LOCAL ROLE finai_chat_reader`**, a new role with SELECT on those temporary tables only.
 4. **Read-only and bounded:** `SET TRANSACTION READ ONLY`, a 2-second `statement_timeout`, and at most 50 rows with the true count.
 
-Everything runs as one prepared statement inside a savepoint that is always rolled back. A `run_sql` tool spec, a handler and a schema paragraph are ready for 6.4 to register. 55 tests attack the sandbox, including each wall on its own.
+Everything runs as one prepared statement inside a savepoint that is always rolled back. A `run_sql` tool spec, a handler and a schema paragraph are ready for 6.4 to register. 60 tests attack the sandbox, including each wall on its own.
 
 ## Files changed
 
 **Schema**
 - `alembic/versions/d7b3f9a1c426_chat_sql_reader_role.py`:
   - creates the `finai_chat_reader` role (NOLOGIN), guarded because roles are cluster-wide;
-  - `GRANT finai_chat_reader TO CURRENT_USER`, so the app's user can switch to it;
+  - `GRANT finai_chat_reader TO CURRENT_USER WITH SET TRUE, INHERIT FALSE`, so the app's user can switch to it but never inherits what it is granted;
   - `CREATE EXTENSION IF NOT EXISTS pg_trgm`, for `similarity()`.
 
   The downgrade drops the extension (RESTRICT), revokes the grant and drops the role.
@@ -33,7 +33,7 @@ Everything runs as one prepared statement inside a savepoint that is always roll
   - only a fixed set of node types is allowed, so anything unforeseen is closed by default;
   - CTEs are scoped as Postgres resolves them;
   - function, cast and `CURRENT_*` value allowlists;
-  - no schema qualification, except `pg_catalog.` on allowlisted functions such as `EXTRACT`;
+  - no schema qualification on tables, functions, casts or operators, except `pg_catalog.` (for example `EXTRACT`, which parses as `pg_catalog.extract`);
   - no `INTO`, locking, parameters or `WITH RECURSIVE`.
 - **`SANDBOX_TABLES`:** `monthly_totals`, `transactions`, `budget_lines`, `goals`, `debts`, `obligations` and `merchants`.
   - Each has fixed columns and a source query filtered by household and currency.
@@ -53,7 +53,7 @@ Everything runs as one prepared statement inside a savepoint that is always roll
 - **For 6.4:** `RUN_SQL`, the tool spec; `handler_for(household_id, currency)`, which runs on a connection of its own and rolls back; `SCHEMA_PROMPT`, the paragraph for the cached system prompt.
 
 **Tests**
-- `tests/test_chat_sql.py`: 20 test functions, which expand to 55 test cases (the validator test is parametrized over 36 attacks). All are `integration`.
+- `tests/test_chat_sql.py`: 23 test functions, which expand to 60 test cases (the validator test is parametrized over 38 attacks). All are `integration`.
 
 ## How to test
 
@@ -63,11 +63,11 @@ These steps use the local Docker database only, never `.env`.
    ```bash
    cd ~/AndroidStudioProjects/Finance-backend && DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres .venv/bin/python -m alembic upgrade head
    ```
-2. Run the sandbox tests. Expect 55 passed:
+2. Run the sandbox tests. Expect 60 passed:
    ```bash
    DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres MIGRATION_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/postgres .venv/bin/pytest -q tests/test_chat_sql.py
    ```
-3. Run both suites. Expect 525 without the database and 788 with it (733 before this ticket).
+3. Run both suites. Expect 525 without the database and 793 with it (733 before this ticket).
 4. Run the migration round trip. It needs an **empty** throwaway container on port 55432:
    ```bash
    DATABASE_URL=postgresql://postgres:postgres@localhost:55432/postgres PG_CONTAINER=<container> PYTHON=.venv/bin/python scripts/check_migrations.sh
@@ -82,7 +82,7 @@ These steps use the local Docker database only, never `.env`.
 
 | Criterion | Status | Where |
 |---|---|---|
-| **Isolation, attacked:** as household A, the attacks return nothing of B's (`SELECT * FROM transaction`, `set_config`, a `UNION` with a real table, a CTE naming a real table, schema-qualified names, `pg_catalog` reads, comment and quoting tricks) | Met | The `REJECTED` table (36 attacks) runs through the validator and through the whole sandbox (`test_the_attacks_return_nothing_of_anothers`) |
+| **Isolation, attacked:** as household A, the attacks return nothing of B's (`SELECT * FROM transaction`, `set_config`, a `UNION` with a real table, a CTE naming a real table, schema-qualified names, `pg_catalog` reads, comment and quoting tricks) | Met | The `REJECTED` table (38 attacks) runs through the validator and through the whole sandbox (`test_the_attacks_return_nothing_of_anothers`) |
 | Each defence holds on its own | Met | Validator bypassed: real tables are "permission denied", including after an in-statement `set_config('role')`; `pg_stats` is refused; sandbox names hold only A's rows. Role skipped: the validator still refuses. Validator and role both off: the temp tables alone hold only A |
 | Writes impossible: `INSERT`, `UPDATE`, `DELETE`, DDL and `SELECT … INTO` rejected, and if forced past the validator they fail under `READ ONLY` | Met | All rejected by the validator. Forced past it, DML can't even be wrapped, and `lo_create` fails with "read-only transaction" even with the role skipped |
 | Only the tables a query names are copied (from the audit line) | Met | `test_a_monthly_totals_query_copies_no_transactions` |
@@ -92,7 +92,7 @@ These steps use the local Docker database only, never `.env`.
 | Totals from `transactions` and `monthly_totals` equal `/dashboard`'s | Met | `test_totals_agree_with_the_dashboard` (March 2020) |
 | Amounts reach the model as decimal strings via `money.py`; no float | Met | `test_amounts_are_decimal_strings_never_floats`; `money.sql_major_units` |
 | No query text or result in logs | Met | `test_no_query_text_or_result_is_logged` |
-| Migration applies, reverses and re-applies; ruff and pytest green; `database` count grew | Met locally | `check_migrations.sh` passed; 733 → 788. CI still to run on the PR |
+| Migration applies, reverses and re-applies; ruff and pytest green; `database` count grew | Met locally | `check_migrations.sh` passed; 733 → 793. CI still to run on the PR |
 
 ## Deviations and decisions
 
@@ -110,6 +110,17 @@ These steps use the local Docker database only, never `.env`.
 - **No functions in `FROM`** (for example `generate_series`): `RangeFunction` isn't allowed, which keeps the node allowlist small. The coach's examples don't need it.
 - **Driver failures.** Reading `pg_stats` with the validator bypassed makes `asyncpg` fail to resolve the column types (`anyarray`), and it raises an internal client error rather than a database error. Every such failure now comes back as a `ToolError`, never a crash.
 - **Downgrade drops `pg_trgm`** (RESTRICT), so the migration check's "schema empty" holds. On a database where something else already uses `pg_trgm`, the downgrade would refuse rather than break it.
+
+### Changes from review (#88)
+
+- **Schema-qualified operators are refused.** `OPERATOR(public.+)` was accepted before. Operator names now get the same rule as functions: `pg_catalog.` only.
+- **The grant is explicit:** `WITH SET TRUE, INHERIT FALSE`.
+  - CI and local run as a superuser, which may switch to any role, so they can't prove the grant.
+  - A simulation with a non-superuser `CREATEROLE` login (as Supabase's `postgres` is) showed both the old and the new grant allow `SET LOCAL ROLE`. The change is for clarity and `INHERIT FALSE`, not a fix to a failure.
+- **No switch can turn a wall off.** `run()` takes only the connection, household, currency and query; a test pins that signature. Tests replace a wall by patching `chat_sql.validate` or `chat_sql._ROLE_STATEMENT`, and `test_replacing_a_wall_really_removes_it` proves the patch takes effect.
+- **The copy phase is bounded** by a 10-second `statement_timeout`. The model's query keeps its 2 seconds.
+- **Array indexing is allowed:** `A_Indirection` and `A_Indices`, so `(array_agg(…))[1]` works.
+- **Not changed: row order through the wrapper.** It relies on Postgres keeping a subquery's `ORDER BY` under `count(*) OVER ()` and `LIMIT`. That holds in practice, but SQL doesn't guarantee it, and no simple fix avoids the same assumption.
 
 ## Open questions and follow-ups
 

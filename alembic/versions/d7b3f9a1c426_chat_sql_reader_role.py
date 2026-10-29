@@ -43,7 +43,14 @@ def upgrade() -> None:
         $$
         """
     )
-    op.execute("GRANT finai_chat_reader TO CURRENT_USER")
+    # Explicit options, because the defaults differ by who runs this. In
+    # Postgres 16+ a role's creator gets an automatic membership whose SET is
+    # off unless `createrole_self_grant` says otherwise — fine for a superuser
+    # (CI, local), who may SET ROLE to anything, but not for Supabase's
+    # `postgres`, which is not one. SET TRUE is what `SET LOCAL ROLE` needs;
+    # INHERIT FALSE keeps the app's user from ever acquiring what the reader
+    # is granted (its temporary tables).
+    op.execute("GRANT finai_chat_reader TO CURRENT_USER WITH SET TRUE, INHERIT FALSE")
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
 
 

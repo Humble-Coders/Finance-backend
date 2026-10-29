@@ -97,6 +97,14 @@ log = structlog.get_logger()
 READER_ROLE = "finai_chat_reader"
 MAX_ROWS = 50
 TIMEOUT = "2s"
+# The copy is the server's own query over the household's own rows, but it
+# is bounded too: a household with an unusually long history must not hold a
+# connection open while the model waits.
+COPY_TIMEOUT = "10s"
+# What switches to the reader role. A module constant so the tests that prove
+# the other walls hold without it can replace it — never an argument a caller
+# could pass.
+_ROLE_STATEMENT = f"SET LOCAL ROLE {READER_ROLE}"
 UNFILED = "uncategorized"
 
 
@@ -157,7 +165,7 @@ _ALLOWED_NODES = frozenset(
     A_Expr BoolExpr NullTest BooleanTest CaseExpr CaseWhen CoalesceExpr
     MinMaxExpr FuncCall TypeCast TypeName RangeVar Alias JoinExpr RangeSubselect
     SubLink SortBy WindowDef WithClause CommonTableExpr SQLValueFunction
-    GroupingSet RowExpr A_ArrayExpr Interval""".split()
+    GroupingSet RowExpr A_ArrayExpr A_Indirection A_Indices Interval""".split()
 )
 
 
@@ -216,6 +224,8 @@ class _Validator:
             self.relation(value, visible)
         elif isinstance(value, ast.FuncCall):
             self.function(value)
+        elif isinstance(value, ast.A_Expr):
+            self.operator(value)
         elif isinstance(value, ast.TypeCast):
             self.type_name(value.typeName)
         elif isinstance(value, ast.SQLValueFunction):
@@ -248,6 +258,14 @@ class _Validator:
             parts = parts[1:]
         if len(parts) != 1 or parts[0] not in ALLOWED_FUNCTIONS:
             raise ToolError(f"function {'.'.join(parts)!r} is not allowed")
+
+    def operator(self, value: ast.A_Expr) -> None:
+        """`OPERATOR(schema.op)` names a schema like a function can: only
+        pg_catalog's, as for functions. An unqualified operator resolves with
+        pg_catalog first, so it cannot be shadowed."""
+        parts = _name(value.name or ())
+        if len(parts) > 1 and parts[0] != "pg_catalog":
+            raise ToolError("an operator may not name a schema")
 
     def type_name(self, value: ast.TypeName) -> None:
         parts = _name(value.names)
@@ -599,36 +617,30 @@ async def run(
     household_id: uuid.UUID,
     currency: str,
     query: str,
-    *,
-    _skip_validator: bool = False,
-    _skip_role: bool = False,
 ) -> SqlResult:
     """Run the model's [query] over this household's sandbox.
 
     [conn] is any connection in a transaction; everything here happens in a
     savepoint rolled back before returning, so nothing outlives the call.
-    The underscore flags exist only for the tests that prove each wall holds
-    without the others.
+    Every wall always applies: there is no argument that turns one off.
     """
     started = time.monotonic()
     digest = _query_hash(query)
     outcome, copied, returned, tables = "error", 0, 0, ()
     try:
-        if _skip_validator:
-            tables, sql = tuple(SANDBOX_TABLES), query
-        else:
-            checked = validate(query)
-            tables, sql = tuple(sorted(checked.tables)), checked.sql
+        checked = validate(query)
+        tables, sql = tuple(sorted(checked.tables)), checked.sql
         savepoint = await conn.begin_nested()
         try:
+            await conn.execute(text(f"SET LOCAL statement_timeout = '{COPY_TIMEOUT}'"))
             for name in tables:
                 copied += await _copy(conn, name, household_id, currency)
             await conn.execute(text("SET TRANSACTION READ ONLY"))
-            if not _skip_role:
-                await conn.execute(text(f"SET LOCAL ROLE {READER_ROLE}"))
+            await conn.execute(text(_ROLE_STATEMENT))
             await conn.execute(text(f"SET LOCAL statement_timeout = '{TIMEOUT}'"))
-            # On lines of its own, so even unvalidated text (the tests that
-            # bypass the validator) cannot comment the wrapper away.
+            # On lines of its own, so even text that never went through the
+            # parser (the tests that replace the validator) cannot comment the
+            # wrapper away.
             wrapped = (
                 f"SELECT *, count(*) OVER () AS _total FROM (\n{sql}\n) AS q "
                 f"LIMIT {MAX_ROWS}"

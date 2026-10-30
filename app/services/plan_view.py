@@ -9,7 +9,8 @@ its own.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import date
 
 from sqlalchemy import select
@@ -26,13 +27,16 @@ from app.services.learning import LearningState, learning_state
 
 __all__ = [
     "BUFFER_GOAL_NAME",
+    "Decided",
     "PlanView",
     "Suggested",
     "build",
+    "emergency_goal",
     "preference_row",
     "save_preferences",
     "suggested",
     "terms_of",
+    "weights_of",
 ]
 
 # What the buffer's goal is called when the plan creates it. The app shows it
@@ -50,6 +54,26 @@ class Suggested:
     goal_share_bps: int
     rate_line_bps: int
     strategy: PlanStrategy
+    # The starting choices, fitted to what the household has.
+    weights: tuple[plan.Weight, ...] = ()
+
+
+@dataclass(frozen=True)
+class Decided:
+    """A month's split and where it came from."""
+
+    split: plan.Split
+    # "ai" or "rules".
+    source: str = "rules"
+    # The AI's words about it; never a figure.
+    why: str | None = None
+    # The person set a row by hand.
+    edited: bool = False
+
+
+# Works out the split from the money left over, the choices and the limits:
+# by the rules unless the caller asks the AI (`plan_split`).
+Decide = Callable[[int, plan.Preferences, plan.Limits], Awaitable[Decided]]
 
 
 @dataclass(frozen=True)
@@ -73,6 +97,16 @@ class PlanView:
     other_strategy: plan.Schedule
     # What each goal asks of this month, by priority (the buffer's left out).
     asks: tuple[plan.GoalAsk, ...] = ()
+    limits: plan.Limits = plan.Limits(None, (), 0)
+    # The household's Emergency fund goal, when it has one.
+    emergency: Goal | None = None
+    decided: Decided | None = None
+    # What the debts' minimums add up to, for the Budget's Debt line.
+    minimums: int = 0
+    # The part of the Budget's Debt line set by hand above its suggestion:
+    # the plan's extra, put there from Your plan, still the plan's to split.
+    debt_line_extra: int = 0
+    names: dict[uuid.UUID, str] = field(default_factory=dict)
 
 
 async def preference_row(
@@ -84,7 +118,11 @@ async def preference_row(
 
 
 async def suggested(
-    session: AsyncSession, household_id: uuid.UUID, currency: str, today: date
+    session: AsyncSession,
+    household_id: uuid.UUID,
+    currency: str,
+    today: date,
+    limits: plan.Limits | None = None,
 ) -> Suggested:
     """The starting values, from the household's own figures (manager,
     2026-10-17): a month of its spending, 20%, 6%, avalanche."""
@@ -107,7 +145,19 @@ async def suggested(
         goal_share_bps=plan.DEFAULT_GOAL_SHARE_BPS,
         rate_line_bps=plan.DEFAULT_RATE_LINE_BPS,
         strategy=PlanStrategy.avalanche,
+        weights=plan.suggest_weights(limits) if limits is not None else (),
     )
+
+
+def weights_of(row: PlanPreference | None) -> tuple[plan.Weight, ...] | None:
+    """The saved choices, or None before any were saved this way."""
+    if row is None or not row.weights:
+        return None
+    return tuple(plan.Weight(w["category"], int(w["bps"])) for w in row.weights)
+
+
+async def emergency_goal(session: AsyncSession, household_id: uuid.UUID) -> Goal | None:
+    return await _emergency_goal(session, household_id)
 
 
 async def _emergency_goal(
@@ -128,10 +178,11 @@ async def save_preferences(
     currency: str,
     *,
     buffer: int | None,
-    goal_share_bps: int,
-    rate_line_bps: int,
+    goal_share_bps: int | None,
+    rate_line_bps: int | None,
     strategy: PlanStrategy,
     today: date,
+    weights: tuple[plan.Weight, ...] | None = None,
 ) -> PlanPreference:
     """Keep the person's choices.
 
@@ -139,18 +190,28 @@ async def save_preferences(
     Your plan has no buffer step now, and an Emergency fund is a goal the
     person adds themselves (the Goals screen suggests one). Nothing is
     created behind their back.
+
+    [weights] are the choices since the redesign; an older app sends none
+    and keeps what was saved. A goal share or rate line left out keeps what
+    was there, else the default.
     """
     del buffer, currency, today
     row = await preference_row(session, household_id)
-    goal_id: uuid.UUID | None = None
-
     if row is None:
-        row = PlanPreference(household_id=household_id)
+        row = PlanPreference(
+            household_id=household_id,
+            goal_share_bps=plan.DEFAULT_GOAL_SHARE_BPS,
+            rate_line_bps=plan.DEFAULT_RATE_LINE_BPS,
+        )
         session.add(row)
-    row.buffer_goal_id = goal_id
-    row.goal_share_bps = goal_share_bps
-    row.rate_line_bps = rate_line_bps
+    row.buffer_goal_id = None
+    if goal_share_bps is not None:
+        row.goal_share_bps = goal_share_bps
+    if rate_line_bps is not None:
+        row.rate_line_bps = rate_line_bps
     row.strategy = strategy
+    if weights is not None:
+        row.weights = [{"category": w.category, "bps": w.bps} for w in weights]
     await session.flush()
     return row
 
@@ -187,6 +248,12 @@ def _focus(
     return attacked[0].id
 
 
+async def _rules(
+    leftover: int, preferences: plan.Preferences, limits: plan.Limits
+) -> Decided:
+    return Decided(plan.split(leftover, preferences, limits))
+
+
 async def build(
     session: AsyncSession,
     household_id: uuid.UUID,
@@ -194,16 +261,17 @@ async def build(
     month: date,
     today: date,
     *,
-    buffer: tuple[int, int] | None = None,
-    goal_share_bps: int | None = None,
+    buffer: int | None = None,
+    weights: tuple[plan.Weight, ...] | None = None,
+    decide: Decide | None = None,
 ) -> PlanView:
     """[month]'s plan. While the household is still learning there is no
     budget yet, so nothing is left over to split: the schedule shows the
     debts at their minimums.
 
-    [buffer] — (target, saved) — puts the person's own savings figures in
-    place of the buffer's, for a diagnostic: the same split, their numbers.
-    [goal_share_bps] does the same for the goal share — 0 is "debt first".
+    [buffer] takes a diagnostic's own savings figure off the top first.
+    [weights] puts other choices in place of the person's, for a diagnostic —
+    `plan.debt_first`. [decide] works out the split; by the rules if None.
     """
     month = month.replace(day=1)
     learning = await learning_state(session, household_id, currency, today)
@@ -211,36 +279,33 @@ async def build(
         session, household_id, currency, month, today, ready=learning.ready
     )
     # What expected income leaves after every line but savings — the room a
-    # savings target would come out of. With a shortfall nothing is left.
-    leftover = view.savings_room if learning.ready and view.shortfall is None else 0
-
-    row = await preference_row(session, household_id)
-    hint = await suggested(session, household_id, currency, today)
-    # No buffer step (product decision, 2026-10-28): an Emergency fund is a
-    # goal like the others, given its share by priority. Only a diagnostic
-    # passes savings figures of its own ([buffer], below).
-    buffer_goal = None
-    preferences = plan.Preferences(
-        buffer_target=None,
-        buffer_saved=0,
-        goal_share_bps=row.goal_share_bps if row is not None else hint.goal_share_bps,
-        rate_line_bps=row.rate_line_bps if row is not None else hint.rate_line_bps,
-        strategy=row.strategy.value if row is not None else hint.strategy.value,
+    # savings target would come out of — plus whatever was put on the Debt
+    # line by hand above its suggestion: that is the plan's extra, placed
+    # there from Your plan, and still the plan's to split. Without it the
+    # money would leave the plan the moment it was applied.
+    debt_line_extra = (
+        max(view.debt.allocated - view.debt.suggested, 0)
+        if view.debt is not None and view.debt.is_user_set
+        else 0
+    )
+    leftover = (
+        view.savings_room + debt_line_extra
+        if learning.ready and view.shortfall is None
+        else 0
     )
 
-    if goal_share_bps is not None:
-        preferences = replace(preferences, goal_share_bps=goal_share_bps)
-    if buffer is not None:
-        preferences = replace(
-            preferences, buffer_target=buffer[0] or None, buffer_saved=buffer[1]
-        )
+    row = await preference_row(session, household_id)
+    emergency = await _emergency_goal(session, household_id)
+    if emergency is not None and emergency.currency != currency:
+        emergency = None
 
     goals = [
         g
         for g in await goal_service.goals_of(session, household_id)
-        if (buffer_goal is None or g.id != buffer_goal.id) and g.currency == currency
+        if g.currency == currency
     ]
     asks = []
+    emergency_remaining = 0
     for goal in goals:
         projection = goal_service.project(
             goal.target_minor_units,
@@ -249,6 +314,9 @@ async def build(
             goal.monthly_contribution_minor_units,
             today,
         )
+        if emergency is not None and goal.id == emergency.id:
+            emergency_remaining = max(projection.remaining, 0)
+            continue
         if projection.remaining > 0:
             asks.append(
                 plan.GoalAsk(
@@ -268,20 +336,35 @@ async def build(
         ).scalars()
     )
     terms = [terms_of(debt) for debt in debts]
-    divided = plan.split(leftover, preferences, asks, terms, month)
+    limits = plan.Limits(
+        emergency=(emergency.id, emergency_remaining) if emergency else None,
+        goals=tuple(asks),
+        debt=sum(max(t.balance, 0) for t in terms),
+    )
+    hint = await suggested(session, household_id, currency, today, limits)
+    preferences = plan.Preferences(
+        weights=weights or weights_of(row) or hint.weights,
+        rate_line_bps=row.rate_line_bps if row is not None else hint.rate_line_bps,
+        strategy=row.strategy.value if row is not None else hint.strategy.value,
+        buffer=buffer or 0,
+    )
+
+    decided = await (decide or _rules)(leftover, preferences, limits)
+    divided = decided.split
     line, strategy = preferences.rate_line_bps, preferences.strategy
     other = plan.SNOWBALL if strategy == plan.AVALANCHE else plan.AVALANCHE
+    names = {goal.id: goal.name for goal in goals}
     return PlanView(
         month=month,
         currency=currency,
         learning=learning,
         leftover=leftover,
         shortfall=view.shortfall if learning.ready else None,
-        saved=row is not None,
+        saved=row is not None and row.weights is not None,
         suggested=hint,
         preferences=preferences,
-        buffer_goal=buffer_goal,
-        goal_names={goal.id: goal.name for goal in goals},
+        buffer_goal=None,
+        goal_names=names,
         debts=debts,
         split=divided,
         focus=_focus(terms, month, line, strategy) if divided.extra_debt else None,
@@ -289,4 +372,10 @@ async def build(
         minimums_only=plan.schedule(terms, 0, month, line, strategy, rollover=False),
         other_strategy=plan.schedule(terms, divided.extra_debt, month, line, other),
         asks=tuple(asks),
+        limits=limits,
+        emergency=emergency,
+        decided=decided,
+        minimums=sum(t.minimum for t in terms),
+        debt_line_extra=debt_line_extra,
+        names=names,
     )

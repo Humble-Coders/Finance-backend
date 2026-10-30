@@ -14,6 +14,7 @@ from app.models.derived import (
     LedgerState,
     MonthlyCategoryTotal,
     PlanDiagnostic,
+    PlanSplit,
 )
 from app.models.enums import (
     AccountKind,
@@ -77,6 +78,7 @@ __all__ = [
     "LedgerState",
     "MonthlyCategoryTotal",
     "PlanDiagnostic",
+    "PlanSplit",
     "AiBudgetSuggestion",
     "ChatAnswerCache",
     "ChatConversation",

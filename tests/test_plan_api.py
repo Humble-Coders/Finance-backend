@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
@@ -56,11 +57,13 @@ class TestPreferences:
 
         assert body["saved"] is False
         suggested = body["suggested"]
-        assert (suggested["goal_share_percent"], suggested["rate_line_percent"]) == (
-            "20.00",
-            "6.00",
-        )
+        assert suggested["rate_line_percent"] == "6.00"
         assert suggested["strategy"] == "avalanche"
+        # Fitted to what the household has: a debt, no goals, no Emergency fund.
+        categories = [w["category"] for w in suggested["weights"]]
+        assert categories[0] == "debt" and "emergency_fund" not in categories
+        assert sum(Decimal(w["percent"]) for w in suggested["weights"]) == 100
+        assert body["weights"] == suggested["weights"], "the plan runs on them"
         assert suggested["buffer"] is not None and suggested["buffer"].endswith(
             ".00"
         ), "one month of spending, rounded up to a whole dollar"
@@ -83,19 +86,66 @@ class TestPreferences:
 
         assert saved.status_code == 200, saved.text
         body = saved.json()
+        # Only the redesign's choices count as saved; the rate line and the
+        # strategy an older app sends are still kept.
         assert (body["saved"], body["buffer"], body["buffer_goal_id"]) == (
-            True,
+            False,
             None,
             None,
         )
-        assert (body["goal_share_percent"], body["rate_line_percent"]) == (
-            "25.00",
-            "7.00",
-        )
+        assert (body["rate_line_percent"], body["strategy"]) == ("7.00", "snowball")
         goals = (await api_client.get("/goals")).json()["goals"]
         assert goals == []
 
-    async def test_an_emergency_fund_goal_is_a_goal_like_any_other(
+    async def test_the_choices_are_kept_in_their_order(self, api_client, db_session):
+        await a_ready_household(api_client, db_session, "+14165579104")
+        weights = [
+            {"category": "save_or_invest", "percent": "40"},
+            {"category": "debt", "percent": "60"},
+        ]
+
+        saved = await api_client.put(
+            PREFS, json={"strategy": "avalanche", "weights": weights}
+        )
+
+        assert saved.status_code == 200, saved.text
+        body = saved.json()
+        assert body["saved"] is True
+        assert [(w["category"], w["percent"]) for w in body["weights"]] == [
+            ("save_or_invest", "40.00"),
+            ("debt", "60.00"),
+        ]
+
+    @pytest.mark.parametrize(
+        ("phone", "weights"),
+        [
+            ("+14165579105", [{"category": "debt", "percent": "90"}]),
+            ("+14165579106", [{"category": "lottery", "percent": "100"}]),
+            (
+                "+14165579107",
+                [
+                    {"category": "debt", "percent": "50"},
+                    {"category": "debt", "percent": "50"},
+                ],
+            ),
+            ("+14165579108", [{"category": "emergency_fund", "percent": "100"}]),
+        ],
+    )
+    async def test_choices_it_cannot_keep_are_refused(
+        self, api_client, db_session, phone, weights
+    ):
+        """Not adding up to 100; not a category; one twice; an Emergency
+        fund the household has no goal for."""
+        await a_ready_household(api_client, db_session, phone)
+
+        response = await api_client.put(
+            PREFS, json={"strategy": "avalanche", "weights": weights}
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"]["code"] == "invalid_weights"
+
+    async def test_an_emergency_fund_goal_is_its_own_category(
         self, api_client, db_session
     ):
         await a_ready_household(api_client, db_session, "+14165579103")
@@ -113,7 +163,12 @@ class TestPreferences:
         plan = (await api_client.get("/plan")).json()
 
         assert plan["split"]["buffer"] in (None, "0.00")
-        assert made.json()["id"] in {g["goal_id"] for g in plan["split"]["goals"]}
+        fund = plan["split"]["emergency_fund"]
+        assert fund["goal_id"] == made.json()["id"]
+        assert fund["still_needed"] == "800.00"
+        assert made.json()["id"] not in {g["goal_id"] for g in plan["split"]["goals"]}
+        assert plan["preferences"]["has_emergency_fund"] is True
+        assert plan["preferences"]["weights"][0]["category"] == "emergency_fund"
 
     @pytest.mark.parametrize(
         ("phone", "change", "field"),
@@ -157,6 +212,9 @@ class TestThePlan:
         split = plan["split"]
         parts = cents(split["buffer"]) + sum(cents(g["amount"]) for g in split["goals"])
         parts += cents(split["extra_debt"]) + cents(split["save_or_invest"])
+        if split["emergency_fund"]:
+            parts += cents(split["emergency_fund"]["amount"])
+        assert split["source"] == "rules", "no consent to AI processing: the rules"
         assert parts == cents(plan["leftover"]), "every dollar accounted for"
         debt = next(d for d in plan["debts"] if d["debt_id"] == visa)
         assert debt["rate_percent"] == "20.99"

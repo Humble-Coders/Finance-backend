@@ -228,6 +228,20 @@ _DIGIT = re.compile(r"\d")
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
 
 
+# What the model may wrap a line's amount in, though asked for a bare number:
+# separators in either system, a symbol, a currency word.
+_AMOUNT_MARKS = re.compile(r"[,\s$₹€£]|Rs\.?|INR", re.IGNORECASE)
+
+
+def _bare_amount(raw: str) -> str:
+    """`"₹1,20,000"` -> `"120000"`: the digits and point a line's amount is.
+
+    >>> _bare_amount("Rs. 4,500.00")
+    '4500.00'
+    """
+    return _AMOUNT_MARKS.sub("", raw)
+
+
 def figure_free(text: object, limit: int) -> str | None:
     """[text] without any sentence that carries a figure, or None.
 
@@ -276,9 +290,7 @@ def _proposed(
         if slug not in SPENDING_SLUGS:
             continue
         try:
-            value = Decimal(
-                str(item.get("amount", "")).replace(",", "").replace("$", "")
-            )
+            value = Decimal(_bare_amount(str(item.get("amount", ""))))
         except InvalidOperation:
             continue
         if not value.is_finite() or value < 0:

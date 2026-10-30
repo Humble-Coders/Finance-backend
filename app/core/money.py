@@ -27,6 +27,7 @@ __all__ = [
     "normalize",
     "round_up_to_whole_unit",
     "display",
+    "group_digits",
     "sql_major_units",
 ]
 
@@ -36,6 +37,7 @@ _EXPONENTS: dict[str, int] = {
     "USD": 2,
     "EUR": 2,
     "GBP": 2,
+    "INR": 2,
     "JPY": 0,
 }
 
@@ -43,7 +45,30 @@ _DEFAULT_EXPONENT = 2
 
 # Symbols for sentences a person reads. A currency without one is shown by its
 # code after the amount ("1,200 JPY"), which is never wrong, only plainer.
-_SYMBOLS: dict[str, str] = {"CAD": "$", "USD": "$", "EUR": "€", "GBP": "£"}
+_SYMBOLS: dict[str, str] = {"CAD": "$", "USD": "$", "EUR": "€", "GBP": "£", "INR": "₹"}
+
+# Currencies written in the Indian system: the last three digits, then pairs —
+# ₹1,00,000.00 is one lakh, never ₹100,000.00. A fact about how the currency is
+# written, kept as data beside the symbols, so it is no country branch.
+_INDIAN_GROUPING: frozenset[str] = frozenset({"INR"})
+
+
+def group_digits(whole: str, currency: str) -> str:
+    """[whole] (digits only) with its thousands separators for [currency].
+
+    >>> group_digits("10000000", "INR")
+    '1,00,00,000'
+    >>> group_digits("10000000", "CAD")
+    '10,000,000'
+    """
+    if currency.upper() not in _INDIAN_GROUPING or len(whole) <= 3:
+        return f"{int(whole):,}"
+    head, last = whole[:-3], whole[-3:]
+    pairs = []
+    while len(head) > 2:
+        pairs.insert(0, head[-2:])
+        head = head[:-2]
+    return ",".join([head, *pairs, last])
 
 
 class MoneyError(ValueError):
@@ -158,6 +183,8 @@ def display(amount: str, currency: str) -> str:
     '-$12.00'
     >>> display("1200", "JPY")
     '1,200 JPY'
+    >>> display("100000", "INR")
+    '₹1,00,000.00'
     """
     exponent = exponent_for(currency)
     value = _parse(amount).quantize(Decimal(1).scaleb(-exponent))
@@ -166,7 +193,9 @@ def display(amount: str, currency: str) -> str:
             f"{amount!r} has more precision than {currency.upper()} allows"
         )
     sign = "-" if value < 0 else ""
-    digits = f"{abs(value):,.{exponent}f}"
+    plain = f"{abs(value):.{exponent}f}"
+    whole, _, fraction = plain.partition(".")
+    digits = group_digits(whole, currency) + (f".{fraction}" if fraction else "")
     symbol = _SYMBOLS.get(currency.upper())
     return f"{sign}{symbol}{digits}" if symbol else f"{sign}{digits} {currency.upper()}"
 

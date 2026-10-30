@@ -500,10 +500,72 @@ class TestAnAmountCopiedAsPrinted:
             ("−$11.29", "11.29"),
             ("1,234.56", "1,234.56"),
             ("86.40", "86.40"),
+            ("Rs.1,00,000.00", "1,00,000.00"),
+            ("INR 2,500.00", "2,500.00"),
+            ("₹1,00,000.00", "1,00,000.00"),
         ],
     )
     def test_only_the_decoration_is_removed(self, printed, bare):
         assert statements._bare(printed) == bare
+
+
+class TestARupeeStatement:
+    """An Indian statement groups in lakhs: `1,00,000.00`, not `100,000.00`."""
+
+    TEXT = "\n".join(
+        [
+            "05/10/2026 SALARY NORTHWIND INDIA 1,00,000.00 Cr",
+            "07/10/2026 UPI-SWIGGY 2,450.00 Dr",
+        ]
+    )
+
+    @pytest.mark.asyncio
+    async def test_an_amount_written_without_its_lakh_commas_is_still_found(self):
+        # The model is asked to copy amounts as printed and does not always:
+        # "100000.00" for a printed "1,00,000.00" is the same number.
+        model = FakeModel(
+            rows(
+                row("100000.00", "SALARY NORTHWIND INDIA", "2026-10-05", "credit"),
+                row("2450.00", "UPI-SWIGGY", "2026-10-07"),
+            )
+        )
+
+        outcome = await parse_statement(model, self.TEXT, "INR")
+
+        assert [r.amount for r in outcome.rows] == ["100000.00", "2450.00"]
+        assert outcome.unparsed_line_count == 0
+
+    @pytest.mark.asyncio
+    async def test_an_amount_copied_with_its_lakh_commas_is_read_whole(self):
+        model = FakeModel(
+            rows(row("1,00,000.00", "SALARY NORTHWIND INDIA", "2026-10-05", "credit"))
+        )
+
+        outcome = await parse_statement(model, self.TEXT, "INR")
+
+        assert [r.amount for r in outcome.rows] == ["100000.00"]
+
+    @pytest.mark.asyncio
+    async def test_a_different_number_is_still_refused(self):
+        model = FakeModel(
+            rows(row("10000.00", "SALARY NORTHWIND INDIA", "2026-10-05", "credit"))
+        )
+
+        outcome = await parse_statement(model, self.TEXT, "INR")
+
+        assert outcome.rows == []
+        assert outcome.unparsed_line_count == 1
+
+    def test_the_model_is_told_how_to_read_a_numeric_date(self):
+        assert "day-first" in statements._SYSTEM_PROMPT
+        assert "statement period" in statements._SYSTEM_PROMPT
+
+    def test_the_date_rule_never_tells_the_model_to_drop_a_row(self):
+        # A tie-breaker only: a Canadian statement printing 08/05/2026 with no
+        # period known must be read as before, not lose its rows.
+        after = statements._SYSTEM_PROMPT.split("A numeric date", 1)[1]
+        rule = after.split("\n- ", 1)[0]
+        assert "omit" not in rule
 
 
 def test_thinking_is_off_unless_asked_for():

@@ -38,6 +38,10 @@ class TestFiguresIn:
             ("A change of $-332.65.", ["-332.65"]),
             ("212 transactions", ["212"]),
             ("1,000,000.00 of income", ["1000000.00"]),
+            # Rupees: the Indian grouping read as one figure, however marked.
+            ("You spent ₹1,00,000.00 in October.", ["100000.00"]),
+            ("Rs. 2,50,000 is left.", ["250000"]),
+            ("That is INR 12,34,567.89 in all.", ["1234567.89"]),
         ],
     )
     def test_it_reads_each_figure(self, text, expected):
@@ -58,6 +62,9 @@ class TestFiguresIn:
 
     def test_a_dollar_amount_is_checked_however_small(self):
         assert [str(v) for _, v in figures_in("Only $3.")] == ["3"]
+
+    def test_a_rupee_amount_is_checked_however_small(self):
+        assert [str(v) for _, v in figures_in("Only ₹3, or Rs 4.")] == ["3", "4"]
 
 
 class TestUngrounded:

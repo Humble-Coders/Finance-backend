@@ -160,8 +160,8 @@ Rules:
   appear in a "STATEMENT HEADER" block above the transactions. If you cannot
   tell, omit the row rather than guessing a year.
 - A numeric date may be day-first (05/10/2026 is 5 October) or month-first
-  (10/05/2026 is 5 October). Read it the way that puts the row inside the
-  statement period. If both readings fit, or neither does, omit the row.
+  (10/05/2026 is 5 October). When the statement period is known and only one
+  reading falls inside it, use that reading.
 - A "STATEMENT HEADER" block is context only. Never return a transaction from
   it, however much one of its lines looks like one.
 - confidence is how sure you are of THAT row: 90+ for a clean tabular line,

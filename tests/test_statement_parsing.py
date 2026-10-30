@@ -560,6 +560,13 @@ class TestARupeeStatement:
         assert "day-first" in statements._SYSTEM_PROMPT
         assert "statement period" in statements._SYSTEM_PROMPT
 
+    def test_the_date_rule_never_tells_the_model_to_drop_a_row(self):
+        # A tie-breaker only: a Canadian statement printing 08/05/2026 with no
+        # period known must be read as before, not lose its rows.
+        after = statements._SYSTEM_PROMPT.split("A numeric date", 1)[1]
+        rule = after.split("\n- ", 1)[0]
+        assert "omit" not in rule
+
 
 def test_thinking_is_off_unless_asked_for():
     # On by default, every import after 2026-10-04 came back empty or rejected

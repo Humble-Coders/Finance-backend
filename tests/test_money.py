@@ -128,6 +128,13 @@ class TestDisplay:
     def test_a_negative_amount_keeps_its_sign_before_the_symbol(self):
         assert display("-12", "CAD") == "-$12.00"
 
+    def test_rupees_are_grouped_in_lakhs_and_crores(self):
+        assert display("100000", "INR") == "₹1,00,000.00"
+        assert display("12345678.9", "INR") == "₹1,23,45,678.90"
+        assert display("-1234567.89", "INR") == "-₹12,34,567.89"
+        assert display("12345", "INR") == "₹12,345.00"
+        assert display("999", "INR") == "₹999.00"
+
     def test_a_currency_without_a_symbol_is_named_by_its_code(self):
         assert display("1200", "JPY") == "1,200 JPY"
 

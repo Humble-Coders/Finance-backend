@@ -45,12 +45,14 @@ _DATES = re.compile(
 
 # A figure: an optional sign, an optional currency symbol either side of it,
 # digits with optional thousands separators and decimals, an optional %.
+# Separators in either system: 100,000 or the Indian 1,00,000 (a lakh) — read
+# as two figures, "1" and "00,000", a rupee answer could never be grounded.
 _FIGURE = re.compile(
     r"""
     (?<![\w.])
     (?P<raw>
-        (?P<neg>[-−])?\s?[$€£]?\s?(?P<neg2>-)?
-        (?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)
+        (?P<neg>[-−])?\s?(?P<symbol>[$€£₹]|Rs\.?\s?|INR\s?)?\s?(?P<neg2>-)?
+        (?P<num>\d{1,2}(?:,\d{2})+,\d{3}(?:\.\d+)?|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)
         (?P<pct>\s?%)?
     )
     (?![\w])
@@ -77,11 +79,7 @@ def figures_in(text: str) -> list[tuple[str, Decimal]]:
         value = _value(match.group("num"))
         if value is None:
             continue
-        is_money = (
-            "$" in match.group("raw")
-            or "€" in match.group("raw")
-            or ("£" in match.group("raw"))
-        )
+        is_money = match.group("symbol") is not None
         whole = value == value.to_integral_value() and "." not in match.group("num")
         if not is_money and not match.group("pct") and whole:
             if 1900 <= value <= 2100 and "," not in match.group("num"):

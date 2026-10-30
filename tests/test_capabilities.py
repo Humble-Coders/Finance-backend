@@ -24,6 +24,7 @@ from app.services.capabilities import (
     _plan_for,
     resolve,
 )
+from app.services.goals import regional_disclaimer
 from tests.conftest import requires_db
 
 pytestmark = [
@@ -71,6 +72,29 @@ class TestSeededCanada:
         assert result.currency == "CAD"
         assert result.locale == "en-CA"
         assert result.content["tax_accounts"] == ["RRSP", "TFSA", "FHSA"]
+
+
+class TestSeededIndia:
+    """A +91 household had no pack and was served Canadian dollars."""
+
+    async def test_returns_rupees_and_indian_content(self, db_session):
+        household = await _household(db_session, "IN")
+        result = await resolve(db_session, household)
+
+        assert result.region == "IN"
+        assert result.currency == "INR"
+        assert result.locale == "en-IN"
+        assert result.content["tax_accounts"] == ["PPF", "EPF", "NPS", "ELSS"]
+        assert result.content["disclaimer_version"] == "in-v1"
+
+    async def test_its_disclaimer_is_the_one_served(self, db_session):
+        household = await _household(db_session, "IN")
+
+        disclaimer = await regional_disclaimer(db_session, household)
+
+        assert disclaimer is not None
+        assert disclaimer.version == "in-v1"
+        assert "SEBI" in disclaimer.body
 
     async def test_features_come_from_the_database(self, db_session):
         household = await _household(db_session, "CA")

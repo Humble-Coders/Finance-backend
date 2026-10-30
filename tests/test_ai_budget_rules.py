@@ -12,6 +12,7 @@ import pytest
 
 from app.services.ai_budget import (
     WANT_SLUGS,
+    _bare_amount,
     checked,
     envelope,
     figure_free,
@@ -98,3 +99,17 @@ class TestNoFigureInTheWords:
         assert figure_free("Spend 20% less.", 200) is None
         assert figure_free(None, 200) is None
         assert figure_free(42, 200) is None
+
+
+@pytest.mark.parametrize(
+    ("written", "bare"),
+    [
+        ("₹1,20,000", "120000"),
+        ("Rs. 4,500.00", "4500.00"),
+        ("INR 900", "900"),
+        ("$1,200", "1200"),
+        ("350.50", "350.50"),
+    ],
+)
+def test_a_line_amount_is_read_whatever_the_model_wraps_it_in(written, bare):
+    assert _bare_amount(written) == bare

@@ -45,7 +45,7 @@ from datetime import date
 
 import structlog
 
-from app.core.money import MoneyError, normalize
+from app.core.money import MoneyError, group_digits, normalize
 from app.models.enums import TransactionDirection
 from app.services.llm import LlmClient, LlmError
 
@@ -159,6 +159,9 @@ Rules:
 - If the year is not on a line, take it from the statement period, which may
   appear in a "STATEMENT HEADER" block above the transactions. If you cannot
   tell, omit the row rather than guessing a year.
+- A numeric date may be day-first (05/10/2026 is 5 October) or month-first
+  (10/05/2026 is 5 October). Read it the way that puts the row inside the
+  statement period. If both readings fit, or neither does, omit the row.
 - A "STATEMENT HEADER" block is context only. Never return a transaction from
   it, however much one of its lines looks like one.
 - confidence is how sure you are of THAT row: 90+ for a clean tabular line,
@@ -166,7 +169,7 @@ Rules:
 - If there are no transactions, return [].
 """
 
-_PROMPT_VERSION = "2026-10-05.1"
+_PROMPT_VERSION = "2026-10-30.1"
 
 
 @dataclass(frozen=True)
@@ -304,8 +307,11 @@ def _amount_forms(amount: str) -> set[str]:
     forms = {amount}
     if "." in amount:
         whole, _, fraction = amount.partition(".")
-        grouped = f"{int(whole):,}" if whole.lstrip("-").isdigit() else whole
-        forms.add(f"{grouped}.{fraction}")
+        if whole.isdigit():
+            # Both ways of grouping: `100,000.00`, and the Indian `1,00,000.00`
+            # a rupee statement prints — the same number, written differently.
+            forms.add(f"{int(whole):,}.{fraction}")
+            forms.add(f"{group_digits(whole, 'INR')}.{fraction}")
     return forms
 
 
@@ -326,7 +332,7 @@ def _appears_verbatim(amount: str, haystack: str) -> bool:
 # `CA$12.00`. Stripped before the number is read, never before the check that
 # the model's text is really on the statement.
 _AMOUNT_DECORATION = re.compile(
-    r"^[\s(+\-−–]*(?:[A-Z]{0,3}[$₹€£¥])?[\s(+\-−–]*|[\s)+\-−–]*$"
+    r"^[\s(+\-−–]*(?:[A-Z]{0,3}[$₹€£¥]|Rs\.?|INR)?[\s(+\-−–]*|[\s)+\-−–]*$"
 )
 
 

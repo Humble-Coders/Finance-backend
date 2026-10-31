@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
 )
 from sqlalchemy import Enum as SAEnum
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -274,3 +275,7 @@ class PlanPreference(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     strategy: Mapped[PlanStrategy] = mapped_column(
         SAEnum(PlanStrategy, name="plan_strategy"), nullable=False
     )
+    # The choices since the redesign (2026-10-31): the categories in the
+    # person's order, each with a share — [{"category", "bps"}], adding up to
+    # 10,000. Null until saved; `goal_share_bps` then no longer splits anything.
+    weights: Mapped[list | None] = mapped_column(JSONB, nullable=True)

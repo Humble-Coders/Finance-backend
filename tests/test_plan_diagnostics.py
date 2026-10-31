@@ -74,21 +74,20 @@ class TestWhereTheMoneyGoes:
         model = FakeModel(ALLOCATION_ANSWER)
         use_model(monkeypatch, model)
 
-        response = await api_client.post(
-            ALLOCATION, json={"savings_target": "1000", "savings_now": "400"}
-        )
+        response = await api_client.post(ALLOCATION, json={"monthly_savings": "600"})
 
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["stored"] is False
-        assert body["savings_gap"] == "600.00"
-        assert body["to_savings"] == "600.00", "savings first, up to the gap"
+        assert body["monthly_savings"] == "600.00"
+        assert body["to_savings"] == "600.00", "the monthly saving comes first"
         assert money(body["to_debt"]) > 0
         assert body["debt_first"] == "Visa"
         assert body["debt_first_rate_percent"] == "20.99"
         assert money(body["debt_per_100"]) > money(body["invest_per_100"])
         total = sum(
-            money(body[k]) for k in ("to_savings", "to_goals", "to_debt", "to_invest")
+            money(body[k])
+            for k in ("to_savings", "to_emergency", "to_goals", "to_debt", "to_invest")
         )
         assert total == money(body["leftover"]), "every dollar left over is placed"
         # Words only: the sentence with "21%" is gone, so is the made-up step.
@@ -96,7 +95,10 @@ class TestWhereTheMoneyGoes:
         assert body["note"] == "Your savings amount fits your spending."
         sent = model.calls[0][1]
         assert "Visa" not in sent, "no names go to the model"
-        assert json.loads(sent)["savings_target"] == "1000.00"
+        assert json.loads(sent)["monthly_savings"] == "600.00"
+        # And it is the Budget's savings target now.
+        budget = (await api_client.get("/budgets/2026-09")).json()
+        assert budget["savings"]["allocated"] == "600.00"
 
     async def test_the_same_figures_return_the_stored_answer(
         self, api_client, db_session, monkeypatch
@@ -104,7 +106,7 @@ class TestWhereTheMoneyGoes:
         await ready(api_client, db_session, "+14165579502")
         model = FakeModel(ALLOCATION_ANSWER)
         use_model(monkeypatch, model)
-        figures = {"savings_target": "1000", "savings_now": "400"}
+        figures = {"monthly_savings": "600"}
 
         await api_client.post(ALLOCATION, json=figures)
         again = await api_client.post(ALLOCATION, json=figures)
@@ -121,7 +123,7 @@ class TestWhereTheMoneyGoes:
             (
                 await api_client.post(
                     ALLOCATION,
-                    json={"savings_target": str(1000 + i), "savings_now": "0"},
+                    json={"monthly_savings": str(100 + i)},
                 )
             ).status_code
             for i in range(5)
@@ -131,8 +133,8 @@ class TestWhereTheMoneyGoes:
         assert codes == [200, 200, 200, 200, 429]
         assert len(model.calls) == 4
         assert listed["runs_left"]["allocation"] == 0
-        assert listed["allocation"]["savings_target"] == "1003.00", "the last one stays"
-        assert listed["savings_target"] == "1003.00", "the form remembers"
+        assert listed["allocation"]["monthly_savings"] == "103.00", "the last one stays"
+        assert listed["monthly_savings"] == "103.00", "the form starts from it"
 
 
 class TestShouldIInvest:
@@ -223,18 +225,15 @@ class TestDebtBeforeGoals:
         model = FakeModel(DEBT_FIRST_ANSWER)
         use_model(monkeypatch, model)
 
-        body = (
-            await api_client.post(
-                ALLOCATION, json={"savings_target": "1000", "savings_now": "1000"}
-            )
-        ).json()
+        body = (await api_client.post(ALLOCATION, json={"monthly_savings": "0"})).json()
 
         assert money(body["to_goals"]) > 0, "the plan gives the goal its share"
         assert body["alt_available"] is True
-        assert body["goal_share_percent"] == "20.00"
-        assert money(body["alt_to_debt"]) == money(body["to_debt"]) + money(
-            body["to_goals"]
-        ), "in the other order the goal's money goes to the debt"
+        assert body["goal_share_percent"] == "25.00", "the suggestion, fitted"
+        # In the other order the goals' share goes to the debt, up to what is
+        # owed; what the debt cannot take is saved or invested, not given back
+        # to the goals.
+        assert money(body["alt_to_debt"]) >= money(body["to_debt"])
         assert body["goals_waiting"] == ["Trip to Lisbon"]
         assert body["recommend"] == "debt_first"
         assert (
@@ -250,11 +249,7 @@ class TestDebtBeforeGoals:
         await ready(api_client, db_session, "+14165579802")
         use_model(monkeypatch, FakeModel(DEBT_FIRST_ANSWER))
 
-        body = (
-            await api_client.post(
-                ALLOCATION, json={"savings_target": "1000", "savings_now": "1000"}
-            )
-        ).json()
+        body = (await api_client.post(ALLOCATION, json={"monthly_savings": "0"})).json()
 
         assert body["alt_available"] is False
         assert body["recommend"] is None, "whatever the model said"

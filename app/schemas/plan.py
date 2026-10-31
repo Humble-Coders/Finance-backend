@@ -13,13 +13,28 @@ from pydantic import BaseModel
 from app.models.enums import DebtKind, PlanStrategy
 
 
-class PreferencesIn(BaseModel):
-    """The person's choices. `buffer` null means no buffer."""
+class WeightIn(BaseModel):
+    # emergency_fund, debt, goals or save_or_invest
+    category: str
+    percent: str
 
-    buffer: str | None
-    goal_share_percent: str
-    rate_line_percent: str
+
+class WeightOut(BaseModel):
+    category: str
+    percent: str
+
+
+class PreferencesIn(BaseModel):
+    """The person's choices. Since the redesign (2026-10-31): `weights`, the
+    categories in their order with a percentage each, adding up to 100.
+    The other fields are what apps from before send; left out, what was
+    saved is kept."""
+
+    buffer: str | None = None
+    goal_share_percent: str | None = None
+    rate_line_percent: str | None = None
     strategy: PlanStrategy
+    weights: list[WeightIn] | None = None
 
 
 class SuggestedOut(BaseModel):
@@ -28,6 +43,7 @@ class SuggestedOut(BaseModel):
     goal_share_percent: str
     rate_line_percent: str
     strategy: PlanStrategy
+    weights: list[WeightOut] = []
 
 
 class PreferencesOut(BaseModel):
@@ -40,12 +56,32 @@ class PreferencesOut(BaseModel):
     rate_line_percent: str
     strategy: PlanStrategy
     suggested: SuggestedOut
+    # The categories in the person's order, each with its percentage.
+    weights: list[WeightOut] = []
+    # The household has an Emergency fund goal, so it is one of the categories.
+    has_emergency_fund: bool = False
 
 
 class GoalShareOut(BaseModel):
     goal_id: uuid.UUID
     name: str
     amount: str
+
+
+class EmergencyShareOut(BaseModel):
+    goal_id: uuid.UUID
+    name: str
+    amount: str
+    # What the goal still needs: the most this row can be set to.
+    still_needed: str
+
+
+class LimitOut(BaseModel):
+    # emergency_fund, debt, goal or save_or_invest; goal_id for a goal.
+    row: str
+    goal_id: uuid.UUID | None = None
+    # The most the row can be set to; null for no limit but the total.
+    most: str | None
 
 
 class SplitOut(BaseModel):
@@ -55,6 +91,27 @@ class SplitOut(BaseModel):
     goals: list[GoalShareOut]
     extra_debt: str
     save_or_invest: str
+    # The Emergency fund goal's row, when the household has one.
+    emergency_fund: EmergencyShareOut | None = None
+    # "ai" when the AI proposed it (checked by the server), "rules" otherwise.
+    source: str = "rules"
+    # The AI's words about it; never a figure.
+    why: str | None = None
+    # The person set a row by hand.
+    edited: bool = False
+    limits: list[LimitOut] = []
+
+
+class SplitEditIn(BaseModel):
+    """One row of "Where it goes" set by hand. `apply` also puts it where it
+    belongs: a goal's monthly amount, the Budget's Debt line, or its savings
+    target."""
+
+    # emergency_fund, debt, goal or save_or_invest
+    row: str
+    goal_id: uuid.UUID | None = None
+    amount: str
+    apply: bool = False
 
 
 class PlanDebtOut(BaseModel):
@@ -107,10 +164,14 @@ class PlanOut(BaseModel):
 
 class DiagnosticIn(BaseModel):
     """The person's own savings figures, as decimal strings. Left out, the
-    ones they ran with last are used (else the plan's own buffer)."""
+    ones they ran with last are used (else the plan's own buffer).
+
+    `monthly_savings` is what allocation runs on since the redesign: what
+    they save each month. It becomes the Budget's savings target."""
 
     savings_target: str | None = None
     savings_now: str | None = None
+    monthly_savings: str | None = None
 
 
 class DiagnosticGoalOut(BaseModel):
@@ -142,6 +203,8 @@ class DiagnosticOut(BaseModel):
     savings_now: str
     savings_gap: str
     to_savings: str
+    monthly_savings: str | None = None
+    to_emergency: str | None = None
     to_goals: str
     to_debt: str
     to_invest: str
@@ -194,3 +257,6 @@ class DiagnosticsOut(BaseModel):
     savings_target: str
     savings_now: str
     runs_left: dict[str, int]
+    # What allocation's form starts with: the Budget's savings target this
+    # month, else what was last run with.
+    monthly_savings: str = "0.00"

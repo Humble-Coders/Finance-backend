@@ -1,9 +1,10 @@
 """Your plan's two diagnostics (product decision, 2026-10-26).
 
 * **allocation** — "Pay debt, fund goals, or keep it in savings?" The person
-  says how much they want to keep in savings and how much they have; the
-  plan's own split (`plan.split`, the arithmetic Your plan already uses) runs
-  on those figures, and the AI explains the order in words.
+  says how much they want to save each month (redesign, 2026-10-31: monthly,
+  and it becomes the Budget's savings target); that comes off the top and
+  the rest is split by their own order and percentages (`plan.split`), and
+  the AI explains the order in words.
 * **invest** — "Should I invest, and how much?" The server checks what has to
   come first — the savings buffer full, no debt above the rate line, the goals
   covered — and works out what is free to invest each month; the AI says
@@ -42,7 +43,7 @@ from app.services.llm import LlmClient
 
 log = structlog.get_logger()
 
-PROMPT_VERSION = "2026-10-26.1"
+PROMPT_VERSION = "2026-10-31.1"
 
 ALLOCATION = "allocation"
 INVEST = "invest"
@@ -100,16 +101,16 @@ async def facts(
     kind: str,
     savings_target: int,
     savings_now: int,
+    monthly_savings: int = 0,
 ) -> Facts:
     """The server's figures for [kind], from the plan run on the person's own
-    savings amounts."""
+    savings: for allocation what they save each month, for invest what their
+    savings still need."""
+    first = (
+        monthly_savings if kind == ALLOCATION else max(savings_target - savings_now, 0)
+    )
     view = await plan_view.build(
-        session,
-        household.id,
-        currency,
-        today.replace(day=1),
-        today,
-        buffer=(savings_target, savings_now),
+        session, household.id, currency, today.replace(day=1), today, buffer=first
     )
     split = view.split
     line = view.preferences.rate_line_bps
@@ -131,10 +132,16 @@ async def facts(
     ]
     common = {
         "leftover": view.leftover,
-        "savings_target": savings_target,
-        "savings_now": savings_now,
-        "savings_gap": max(savings_target - savings_now, 0),
+        "savings_target": monthly_savings if kind == ALLOCATION else savings_target,
+        "savings_now": 0 if kind == ALLOCATION else savings_now,
+        "savings_gap": (
+            monthly_savings
+            if kind == ALLOCATION
+            else max(savings_target - savings_now, 0)
+        ),
+        "monthly_savings": monthly_savings if kind == ALLOCATION else None,
         "to_savings": split.buffer,
+        "to_emergency": split.emergency,
         "to_goals": sum(g["amount"] for g in goals),
         "to_debt": split.extra_debt,
         "to_invest": split.save_or_invest,
@@ -149,15 +156,15 @@ async def facts(
             else None
         )
         per_100 = 100 * 10 ** exponent_for(currency)
-        # The other order: goals wait until no debt is above the rate line.
+        # The other order: debt first, with the goals' share; goals wait.
         alt = await plan_view.build(
             session,
             household.id,
             currency,
             today.replace(day=1),
             today,
-            buffer=(savings_target, savings_now),
-            goal_share_bps=0,
+            buffer=first,
+            weights=plan.debt_first(view.preferences.weights),
         )
         alt_saved = (
             alt.minimums_only.total_interest - alt.schedule.total_interest
@@ -193,7 +200,16 @@ async def facts(
             else None,
             "invest_per_100": first_year_gain(per_100, ASSUMED_RETURN_BPS),
             "assumed_return_percent": _rate_percent(ASSUMED_RETURN_BPS),
-            "goal_share_percent": _rate_percent(view.preferences.goal_share_bps),
+            "goal_share_percent": _rate_percent(
+                next(
+                    (
+                        w.bps
+                        for w in view.preferences.weights
+                        if w.category == plan.GOALS
+                    ),
+                    0,
+                )
+            ),
             "alt_available": alt_available,
             "alt_to_debt": alt.split.extra_debt if alt_available else None,
             "alt_interest_saved": alt_saved if alt_available else None,
@@ -259,6 +275,8 @@ async def facts(
 
 
 _MONEY_KEYS = {
+    "monthly_savings",
+    "to_emergency",
     "alt_to_debt",
     "alt_interest_saved",
     "monthly_need",
@@ -308,17 +326,17 @@ company. Answer with JSON only."""
 _ALLOCATION = (
     _SHARED
     + """
-The question is where this month's money left over should go: the person's
-savings (up to the amount they want to keep), their goals by priority, extra
-payments on their debts, or investing. The app's plan fills savings first,
-then splits between goals and the highest-rate debt while any debt charges
-more than the rate line, then invests what is left. Explain why this order
-fits their figures — compare what paying the debt saves with what investing
-might earn ("debt_per_100" against "invest_per_100") — and say plainly if
-their savings amount looks low or high for their spending.
-When "alt_available" is true there is a second order to weigh: goals wait
-until no debt is above the rate line, and that money goes to the debt
-("alt_to_debt", "alt_interest_saved", "alt_debt_free"). Recommend one —
+The question is where this month's money left over should go: what the
+person saves each month ("monthly_savings"), their emergency fund, their goals
+by priority, extra payments on their debts, or investing. The app takes their
+monthly saving first, then splits the rest by the order and percentages the
+person chose. Explain why this fits their figures — compare what paying the
+debt saves with what investing might earn ("debt_per_100" against
+"invest_per_100") — and say plainly if their monthly saving looks low or high
+for their spending.
+When "alt_available" is true there is a second order to weigh: debt first,
+given the goals' share, while the goals wait ("alt_to_debt",
+"alt_interest_saved", "alt_debt_free"). Recommend one —
 "plan" (keep giving goals their share) or "debt_first" — weighing the debt's
 rate and size against each goal: a goal with a date coming soon, or one that
 protects the person, can be worth keeping; a goal with no date, or far off,
@@ -418,12 +436,20 @@ async def run(
     kind: str,
     savings_target: int,
     savings_now: int,
+    monthly_savings: int = 0,
 ) -> tuple[PlanDiagnostic, bool]:
     """(the run, whether it is a stored one). A fresh run only when the
     figures changed since the last; `LimitReached` past this month's runs."""
     month = today.replace(day=1)
     found = await facts(
-        session, household, currency, today, kind, savings_target, savings_now
+        session,
+        household,
+        currency,
+        today,
+        kind,
+        savings_target,
+        savings_now,
+        monthly_savings,
     )
     last = await latest(session, household.id, kind)
     if last is not None and last.fingerprint == found.fingerprint:
@@ -452,7 +478,11 @@ async def run(
         month=month,
         currency=currency,
         fingerprint=found.fingerprint,
-        inputs={"savings_target": savings_target, "savings_now": savings_now},
+        inputs={
+            "savings_target": savings_target,
+            "savings_now": savings_now,
+            "monthly_savings": monthly_savings,
+        },
         figures=found.figures,
         advice=advice,
         model=client.model,

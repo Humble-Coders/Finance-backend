@@ -11,6 +11,7 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -43,6 +44,7 @@ __all__ = [
     "LedgerState",
     "MonthlyCategoryTotal",
     "PlanDiagnostic",
+    "PlanSplit",
 ]
 
 
@@ -118,6 +120,35 @@ class AiBudgetSuggestion(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
     advice: Mapped[str | None] = mapped_column(Text, nullable=True)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class PlanSplit(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):
+    """A month's "Where it goes", as last worked out (redesign, 2026-10-31).
+
+    `fingerprint` hashes what the split was worked out from — the money left
+    over, the choices, what each category can use. The same again returns
+    this row, the person's own edits included, without asking the AI; a
+    change works it out afresh. `figures` holds minor units in `currency`:
+    {"emergency", "goals": {id: amount}, "debt", "save_or_invest"}. `source`
+    is "ai" or "rules"; `why` the AI's words, never a figure.
+    """
+
+    __tablename__ = "plan_split"
+    __table_args__ = (
+        Index("uq_plan_split_household_month", "household_id", "month", unique=True),
+        currency_check(),
+    )
+
+    month: Mapped[date] = mapped_column(Date, nullable=False)
+    currency: Mapped[str] = money_currency()
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    figures: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    source: Mapped[str] = mapped_column(String(8), nullable=False)
+    why: Mapped[str | None] = mapped_column(String(600), nullable=True)
+    edited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Fresh AI runs this month: the cost guard (`plan_split.MAX_AI_RUNS`).
+    ai_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class PlanDiagnostic(UUIDMixin, TimestampMixin, HouseholdScopedMixin, Base):

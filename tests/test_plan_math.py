@@ -14,13 +14,23 @@ import pytest
 
 from app.services.plan import (
     AVALANCHE,
+    DEBT,
+    EMERGENCY,
+    GOALS,
+    SAVE_OR_INVEST,
     SNOWBALL,
     DebtTerms,
     GoalAsk,
+    Limits,
     Preferences,
+    Weight,
+    checked,
+    debt_first,
+    edited,
     schedule,
     split,
     suggest_buffer,
+    suggest_weights,
 )
 
 NOV = date(2026, 11, 1)
@@ -178,64 +188,158 @@ class TestEdges:
         assert result.total_interest == 0
 
 
-def prefs(
-    buffer=None, saved=0, share=2000, line=LINE, strategy=AVALANCHE
-) -> Preferences:
-    return Preferences(buffer, saved, share, line, strategy)
+def prefs(*weights, buffer=0, line=LINE, strategy=AVALANCHE) -> Preferences:
+    return Preferences(
+        tuple(Weight(c, bps) for c, bps in weights), line, strategy, buffer
+    )
 
 
 HOUSE = GoalAsk(uuid.uuid4(), need=10_000, remaining=500_000)
 TRIP = GoalAsk(uuid.uuid4(), need=0, remaining=100_000)
+FUND = uuid.uuid4()
+
+# Emergency fund $300 short; the house and the trip; $4,000 owed.
+LIMITS = Limits(emergency=(FUND, 30_000), goals=(HOUSE, TRIP), debt=400_000)
+CHOICES = prefs((EMERGENCY, 2000), (DEBT, 5000), (GOALS, 2000), (SAVE_OR_INVEST, 1000))
 
 
 class TestTheSplit:
-    def test_buffer_then_goal_share_then_debt(self):
-        """$1,200 left: $800 tops the buffer up to $1,000; 20% of the $400 left
-        ($80) to goals — the house asks $100, gets $80; $320 to the Visa."""
-        result = split(
-            120_000, prefs(buffer=100_000, saved=20_000), [HOUSE, TRIP], [VISA], NOV
-        )
+    def test_each_takes_its_percentage_in_order(self):
+        """$1,200: 20% ($240) to the fund, 50% ($600) to debt, 20% ($240) to
+        goals — the house's $100 to stay on pace, then the rest to it as well
+        — and 10% ($120) to save or invest."""
+        result = split(120_000, CHOICES, LIMITS)
 
-        assert result.buffer == 80_000
-        assert result.goals == ((HOUSE.id, 8_000),)
-        assert (result.extra_debt, result.save_or_invest) == (32_000, 0)
+        assert result.emergency == 24_000
+        assert result.extra_debt == 60_000
+        assert result.goals == ((HOUSE.id, 24_000),)
+        assert result.save_or_invest == 12_000
         assert result.total == 120_000
 
-    def test_with_no_debt_above_the_line_goals_then_save_or_invest(self):
-        mortgage = debt("Mortgage", 30_000_000, 150_000, 450)
+    def test_what_a_category_cannot_use_goes_on_down_the_priorities(self):
+        """$3,000: the fund's 20% is $600 but it only needs $300; the $300 over
+        tops the next by priority — debt, up to what is owed — first."""
+        result = split(300_000, CHOICES, LIMITS)
 
-        result = split(120_000, prefs(), [HOUSE, TRIP], [mortgage], NOV)
+        assert result.emergency == 30_000
+        assert result.extra_debt == 150_000 + 30_000
+        assert result.total == 300_000
 
-        assert result.goals == ((HOUSE.id, 10_000), (TRIP.id, 100_000))
-        assert (result.extra_debt, result.save_or_invest) == (0, 10_000)
+    def test_with_nothing_to_give_to_the_rest_is_saved_or_invested(self):
+        empty = Limits(emergency=None, goals=(), debt=0)
+
+        result = split(50_000, CHOICES, empty)
+
+        assert (result.emergency, result.extra_debt, result.goals) == (0, 0, ())
+        assert result.save_or_invest == 50_000
+
+    def test_a_buffer_comes_off_the_top(self):
+        result = split(120_000, prefs((DEBT, 10_000), buffer=20_000), LIMITS)
+
+        assert result.buffer == 20_000
+        assert result.extra_debt == 100_000
         assert result.total == 120_000
-
-    @pytest.mark.parametrize(
-        ("share", "to_goals", "to_debt"), [(0, 0, 120_000), (10_000, 110_000, 10_000)]
-    )
-    def test_a_goal_share_of_none_or_all(self, share, to_goals, to_debt):
-        """0%: everything to the debt. 100%: goals take what they need (the
-        house $100 on pace, the trip all $1,000 it still needs) and only the
-        rest goes to the debt."""
-        result = split(120_000, prefs(share=share), [HOUSE, TRIP], [VISA], NOV)
-
-        assert sum(a for _, a in result.goals) == to_goals
-        assert result.extra_debt == to_debt
-        assert result.total == 120_000
-
-    def test_a_full_buffer_takes_nothing_and_no_buffer_takes_nothing(self):
-        full = split(
-            50_000, prefs(buffer=100_000, saved=100_000, share=0), [], [VISA], NOV
-        )
-        none = split(50_000, prefs(buffer=None, share=0), [], [VISA], NOV)
-
-        assert full.buffer == none.buffer == 0
-        assert full.extra_debt == none.extra_debt == 50_000
 
     def test_nothing_left_over_splits_nothing(self):
-        result = split(0, prefs(buffer=100_000), [HOUSE], [VISA], NOV)
+        assert split(0, CHOICES, LIMITS).total == 0
 
-        assert result.total == 0
+
+class TestTheSuggestedChoices:
+    def test_a_category_with_nothing_to_give_to_is_left_out(self):
+        weights = suggest_weights(Limits(emergency=None, goals=(HOUSE,), debt=0))
+
+        assert [w.category for w in weights] == [GOALS, SAVE_OR_INVEST]
+        assert sum(w.bps for w in weights) == 10_000
+
+    def test_all_four_when_there_is_something_for_each(self):
+        weights = suggest_weights(LIMITS)
+
+        assert [w.category for w in weights] == [EMERGENCY, DEBT, GOALS, SAVE_OR_INVEST]
+        assert sum(w.bps for w in weights) == 10_000
+
+
+class TestAnAiProposalIsChecked:
+    def test_too_much_is_taken_back_from_the_lowest_priority(self):
+        proposed = {EMERGENCY: 30_000, DEBT: 80_000, GOALS: 0, SAVE_OR_INVEST: 40_000}
+
+        result = checked(120_000, CHOICES, LIMITS, proposed, {})
+
+        assert result.save_or_invest == 10_000
+        assert result.total == 120_000
+
+    def test_over_a_limit_is_cut_and_the_rest_goes_down_the_priorities(self):
+        proposed = {EMERGENCY: 90_000, DEBT: 30_000, GOALS: 0, SAVE_OR_INVEST: 0}
+
+        result = checked(120_000, CHOICES, LIMITS, proposed, {})
+
+        assert result.emergency == 30_000, "it only needs $300"
+        assert result.extra_debt == 90_000
+        assert result.total == 120_000
+
+    def test_a_goals_amount_is_kept_within_what_it_needs(self):
+        proposed = {EMERGENCY: 0, DEBT: 0, GOALS: 0, SAVE_OR_INVEST: 0}
+
+        result = checked(120_000, CHOICES, LIMITS, proposed, {TRIP.id: 500_000})
+
+        assert dict(result.goals)[TRIP.id] == 100_000
+        assert result.total == 120_000
+
+    def test_a_negative_amount_is_none(self):
+        proposed = {EMERGENCY: -5_000, DEBT: 120_000, GOALS: 0, SAVE_OR_INVEST: 0}
+
+        result = checked(120_000, CHOICES, LIMITS, proposed, {})
+
+        assert result.emergency == 0
+        assert result.total == 120_000
+
+
+class TestARowSetByHand:
+    def test_more_for_one_row_comes_from_the_lowest_priority_first(self):
+        current = split(120_000, CHOICES, LIMITS)
+
+        result = edited(current, CHOICES, LIMITS, DEBT, 70_000)
+
+        assert result.extra_debt == 70_000
+        assert result.save_or_invest == 2_000, "save or invest gave its $100 first"
+        assert result.total == 120_000
+
+    def test_less_for_one_row_goes_to_the_highest_that_can_use_it(self):
+        current = split(120_000, CHOICES, LIMITS)
+
+        result = edited(current, CHOICES, LIMITS, DEBT, 50_000)
+
+        assert result.emergency == 30_000, "the fund tops up to what it needs"
+        assert result.total == 120_000
+
+    def test_a_goal_row_is_set_by_its_id(self):
+        current = split(120_000, CHOICES, LIMITS)
+
+        result = edited(current, CHOICES, LIMITS, GOALS, 5_000, TRIP.id)
+
+        assert dict(result.goals)[TRIP.id] == 5_000
+        assert result.total == 120_000
+
+    @pytest.mark.parametrize("amount", [-1, 130_000])
+    def test_outside_what_the_row_can_hold_is_refused(self, amount):
+        current = split(120_000, CHOICES, LIMITS)
+
+        with pytest.raises(ValueError):
+            edited(current, CHOICES, LIMITS, EMERGENCY, amount)
+
+    def test_the_emergency_fund_is_not_set_past_what_it_needs(self):
+        current = split(120_000, CHOICES, LIMITS)
+
+        with pytest.raises(ValueError):
+            edited(current, CHOICES, LIMITS, EMERGENCY, 40_000)
+
+
+class TestDebtFirst:
+    def test_the_goals_share_goes_to_debt_and_debt_leads(self):
+        result = debt_first(CHOICES.weights)
+
+        assert result[0] == Weight(DEBT, 7000)
+        assert Weight(GOALS, 0) in result
+        assert sum(w.bps for w in result) == 10_000
 
 
 class TestTheSuggestedBuffer:

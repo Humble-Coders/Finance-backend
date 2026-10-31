@@ -277,13 +277,21 @@ def _advice_settings():
 
 
 async def _decider(
-    session: AsyncSession, identity: ResolvedIdentity, currency: str, month: date
+    session: AsyncSession,
+    identity: ResolvedIdentity,
+    currency: str,
+    month: date,
+    *,
+    ask_ai: bool = True,
 ):
     """The split as the AI proposes it, kept for the month; by the rules when
-    the AI may not be asked."""
+    the AI may not be asked. [ask_ai] False reads without asking: the kept
+    split while it still fits, else the rules."""
     household = identity.household
 
     async def may_ask() -> bool:
+        if not ask_ai:
+            return False
         try:
             await ai_budget_api._may_ask(session, identity.user)
         except HTTPException:
@@ -310,6 +318,18 @@ async def read_plan(
     identity: ResolvedIdentity = Depends(current_identity),
     session: AsyncSession = Depends(get_session),
 ) -> PlanOut:
+    return await plan_for(identity, session, month)
+
+
+async def plan_for(
+    identity: ResolvedIdentity,
+    session: AsyncSession,
+    month: str | None,
+    *,
+    ask_ai: bool = True,
+) -> PlanOut:
+    """[month]'s plan. The AI coach reads it with [ask_ai] False: a question
+    about the plan must not set off a second model call to split it."""
     household = identity.household
     today = _today()
     try:
@@ -323,7 +343,9 @@ async def read_plan(
         currency,
         when,
         today,
-        decide=await _decider(session, identity, currency, when.replace(day=1)),
+        decide=await _decider(
+            session, identity, currency, when.replace(day=1), ask_ai=ask_ai
+        ),
     )
     await session.commit()
     return _plan_out(view, currency)

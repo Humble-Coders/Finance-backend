@@ -94,8 +94,9 @@ async def _debts(identity, session, arguments, today):
 
 
 async def _plan(identity, session, arguments, today):
-    return await plan_api.read_plan(
-        month=_month(arguments, today), identity=identity, session=session
+    # The kept split or the rules: never a second model call from inside a chat.
+    return await plan_api.plan_for(
+        identity, session, _month(arguments, today), ask_ai=False
     )
 
 

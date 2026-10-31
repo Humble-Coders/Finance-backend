@@ -217,9 +217,16 @@ def decider(
         by_rules = plan.split(leftover, preferences, limits)
         runs = row.ai_runs if row is not None else 0
         if leftover <= 0 or runs >= MAX_AI_RUNS or not await may_ask():
-            return await keep(row, mark, by_rules, RULES)
+            # Not kept: a rules split pinned to these figures would stop the
+            # AI being asked once it may be (consent given, next month's runs).
+            return Decided(by_rules, RULES)
 
-        client = client_factory()
+        try:
+            client = client_factory()
+        except LlmError as error:
+            # Misconfigured (no key, an unknown provider): the plan still shows.
+            log.warning("plan_split_ai_unavailable", error=str(error))
+            return Decided(by_rules, RULES)
         try:
             raw = await client.complete(
                 system=_SYSTEM,

@@ -143,6 +143,67 @@ class TestTheAiProposes:
         assert total(plan["split"]) == money(plan["leftover"])
 
 
+class TestWhenTheAiCannotBeAsked:
+    async def test_a_misconfigured_model_still_shows_the_plan(
+        self, api_client, db_session, monkeypatch
+    ):
+        """No key or an unknown provider: the client cannot even be built.
+        The plan is split by the rules rather than failing."""
+        await ready(api_client, db_session, "+14165579921")
+
+        def unbuildable(_settings):
+            raise LlmError("LLM_API_KEY is not set")
+
+        monkeypatch.setattr("app.api.plan.build_client", unbuildable)
+
+        response = await api_client.get("/plan")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["split"]["source"] == "rules"
+
+    async def test_the_coach_reads_the_plan_without_asking(
+        self, api_client, db_session, monkeypatch
+    ):
+        """A question about the plan never sets off a second model call."""
+        from sqlalchemy import select
+
+        from app.models.identity import Household, User
+        from app.services import chat_service_tools
+        from app.services.identity import ResolvedIdentity
+        from tests.test_plan_api import TODAY
+
+        await ready(api_client, db_session, "+14165579922")
+        model = FakeModel(answer(debt="100", save="0"))
+        use_model(monkeypatch, model)
+        user = await db_session.scalar(
+            select(User).where(User.phone.endswith("14165579922"))
+        )
+        household = await db_session.get(Household, user.household_id)
+        identity = ResolvedIdentity(user=user, household=household, created=False)
+        _, handlers = await chat_service_tools.available(identity, db_session, TODAY)
+
+        plan = await handlers["plan"]({})
+
+        assert plan["split"]["source"] == "rules"
+        assert model.calls == []
+
+    async def test_a_rules_split_is_not_kept_so_consent_later_asks(
+        self, api_client, db_session, monkeypatch
+    ):
+        await a_ready_household(api_client, db_session, "+14165579923")
+        await a_rate_on_the_visa(api_client)
+        model = FakeModel(answer(debt="100", save="0"))
+        use_model(monkeypatch, model)
+
+        before = (await api_client.get("/plan")).json()["split"]
+        await consent_to_ai(api_client)
+        after = (await api_client.get("/plan")).json()["split"]
+
+        assert before["source"] == "rules", "no consent yet"
+        assert after["source"] == "ai", "the same figures, now asked"
+        assert len(model.calls) == 1
+
+
 class TestARowSetByHand:
     async def test_the_others_rebalance_and_the_edit_is_kept(
         self, api_client, db_session, monkeypatch

@@ -167,6 +167,8 @@ class Message:
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
     is_error: bool = False
+    # An assistant turn's content as the provider returned it (`AssistantTurn`).
+    blocks: tuple[dict, ...] = field(default=(), compare=False, repr=False)
 
     @staticmethod
     def user(text: str) -> Message:
@@ -179,6 +181,10 @@ class AssistantTurn:
 
     text: str | None
     tool_calls: tuple[ToolCall, ...] = ()
+    # The provider's own content blocks, sent back unchanged when the
+    # conversation continues: Anthropic rejects a turn whose thinking blocks
+    # were dropped or edited. Empty for providers that need nothing back.
+    blocks: tuple[dict, ...] = field(default=(), compare=False, repr=False)
 
     @property
     def is_final(self) -> bool:
@@ -409,6 +415,22 @@ class _OpenAICompatibleClient:
 _GEMINI_EFFORTS = (("none", 0), ("low", 1_024), ("medium", 8_192), ("high", 24_576))
 
 
+# Current Claude models reject `temperature`, `top_p` and `top_k` (a 400 at
+# any value on this version), and they always think. Thinking counts toward
+# `max_tokens`, so effort is kept low: these are short extraction and
+# lookup calls, and the budgets were sized for answers, not reasoning.
+ANTHROPIC_VERSION = "2026-10-21"
+_ANTHROPIC_OUTPUT = {"effort": "low"}
+
+
+def _check_stop(data: dict, model: str, max_output_tokens: int) -> None:
+    reason = data.get("stop_reason")
+    if reason == "max_tokens":
+        raise _cut_off(model, max_output_tokens)
+    if reason == "refusal":
+        raise LlmError("the model declined to answer")
+
+
 class _AnthropicClient:
     """Anthropic's Messages API, which puts the system prompt beside the turns."""
 
@@ -437,23 +459,29 @@ class _AnthropicClient:
             "system": system,
             "messages": [{"role": "user", "content": user}],
             "max_tokens": max_output_tokens,
-            "temperature": 0,
+            "output_config": _ANTHROPIC_OUTPUT,
         }
         data = await _post(
             self._http,
             f"{self._base_url}/messages",
-            headers={"x-api-key": self._key, "anthropic-version": "2023-06-01"},
+            headers=self._headers(),
             payload=payload,
         )
-        try:
-            text = data["content"][0]["text"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise LlmError("unexpected response shape") from exc
+        blocks = data.get("content")
+        if not isinstance(blocks, list):
+            raise LlmError("unexpected response shape")
 
         self._record_usage(data, max_output_tokens, ())
-        if data.get("stop_reason") == "max_tokens":
-            raise _cut_off(self._model, max_output_tokens)
+        _check_stop(data, self._model, max_output_tokens)
+        # A thinking block comes before the answer, so the text is not
+        # necessarily the first block.
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        if not text:
+            raise LlmError("the model returned no text")
         return text
+
+    def _headers(self) -> dict[str, str]:
+        return {"x-api-key": self._key, "anthropic-version": ANTHROPIC_VERSION}
 
     def _record_usage(self, data: dict, max_tokens: int, tools: Sequence[str]) -> None:
         usage = data.get("usage") or {}
@@ -505,14 +533,14 @@ class _AnthropicClient:
             ],
             "messages": _anthropic_messages(messages),
             "max_tokens": max_output_tokens,
-            "temperature": 0,
+            "output_config": _ANTHROPIC_OUTPUT,
         }
         if specs:
             payload["tools"] = specs
         data = await _post(
             self._http,
             f"{self._base_url}/messages",
-            headers={"x-api-key": self._key, "anthropic-version": "2023-06-01"},
+            headers=self._headers(),
             payload=payload,
         )
         blocks = data.get("content")
@@ -529,12 +557,11 @@ class _AnthropicClient:
             if b.get("type") == "tool_use"
         )
         self._record_usage(data, max_output_tokens, _loggable(calls, tools))
-        if data.get("stop_reason") == "max_tokens":
-            raise _cut_off(self._model, max_output_tokens)
+        _check_stop(data, self._model, max_output_tokens)
         text = "".join(texts).strip()
         if not calls and not text:
             raise LlmError("the model returned neither text nor a tool call")
-        return AssistantTurn(text=text or None, tool_calls=calls)
+        return AssistantTurn(text=text or None, tool_calls=calls, blocks=tuple(blocks))
 
 
 UNREGISTERED_TOOL = "<unregistered>"
@@ -774,6 +801,9 @@ def _anthropic_messages(messages: Sequence[Message]) -> list[dict]:
                 last["content"].append(block)
             else:
                 out.append({"role": "user", "content": [block]})
+        elif message.role == "assistant" and message.blocks:
+            # As returned, thinking blocks and all.
+            out.append({"role": "assistant", "content": list(message.blocks)})
         elif message.role == "assistant" and message.tool_calls:
             content: list[dict] = []
             if message.text:
@@ -1010,7 +1040,8 @@ async def run_tools(
             # Returned even past the budget: it is already paid for.
             return RunResult(
                 text=turn.text or "",
-                messages=transcript + [Message("assistant", text=turn.text)],
+                messages=transcript
+                + [Message("assistant", text=turn.text, blocks=turn.blocks)],
                 rounds=round_number,
                 tool_results=results,
             )
@@ -1047,7 +1078,12 @@ async def run_tools(
             corrected = True
 
         transcript.append(
-            Message("assistant", text=turn.text, tool_calls=turn.tool_calls)
+            Message(
+                "assistant",
+                text=turn.text,
+                tool_calls=turn.tool_calls,
+                blocks=turn.blocks,
+            )
         )
         for call, problem in zip(turn.tool_calls, problems, strict=True):
             if problem is not None:

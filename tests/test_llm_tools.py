@@ -390,6 +390,33 @@ async def test_anthropic_marks_the_stable_prefix_for_caching():
 
 
 @pytest.mark.asyncio
+async def test_anthropic_sends_no_sampling_parameters():
+    # Current Claude models answer any of the three with a 400.
+    client, sent = wired("anthropic", [anthropic_text("Hi.")])
+
+    await ask(client, Recorder())
+
+    assert not {"temperature", "top_p", "top_k"} & sent[0].keys()
+    assert sent[0]["output_config"] == {"effort": "low"}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_thinking_goes_back_unchanged_with_the_tool_call():
+    # With thinking on, a tool round whose thinking block was dropped is a 400.
+    thinking = {"type": "thinking", "thinking": "", "signature": "sig-1"}
+    calls = anthropic_calls(("c1", "spending_summary", GOOD_ARGS))
+    calls["content"] = [thinking, *calls["content"]]
+    client, sent = wired("anthropic", [calls, anthropic_text("Done.")])
+
+    result = await ask(client, Recorder())
+
+    assistant = sent[1]["messages"][1]
+    assert assistant == {"role": "assistant", "content": calls["content"]}
+    # The final turn keeps its blocks too, for a retry that continues it.
+    assert result.messages[-1].blocks == tuple(anthropic_text("Done.")["content"])
+
+
+@pytest.mark.asyncio
 class TestCost:
     async def test_the_providers_own_cost_is_kept(self):
         client, _ = wired(

@@ -272,9 +272,11 @@ class TestOneConnectionPerClient:
 class TestAnthropic:
     def wired(self, respond: dict):
         sent: list[dict] = []
+        self.headers: list[httpx.Headers] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             sent.append(json.loads(request.content))
+            self.headers.append(request.headers)
             return httpx.Response(200, json=respond)
 
         client = build_client(settings(llm_provider="anthropic", llm_model="claude"))
@@ -285,7 +287,7 @@ class TestAnthropic:
         # It raised AttributeError before: there was no `_http` to post through.
         client, sent = self.wired(
             {
-                "content": [{"text": "[]"}],
+                "content": [{"type": "text", "text": "[]"}],
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 9, "output_tokens": 2},
             }
@@ -295,9 +297,53 @@ class TestAnthropic:
         assert len(sent) == 1
         assert client.usage.input_tokens == 9
 
+    async def test_the_request_carries_no_sampling_parameters(self):
+        # Current Claude models answer any of the three with a 400.
+        client, sent = self.wired(
+            {"content": [{"type": "text", "text": "[]"}], "stop_reason": "end_turn"}
+        )
+
+        await complete(client, max_output_tokens=100)
+
+        body = sent[0]
+        assert not {"temperature", "top_p", "top_k"} & body.keys()
+        assert body["max_tokens"] == 100
+        assert body["output_config"] == {"effort": "low"}
+        assert self.headers[0]["anthropic-version"] == "2026-10-21"
+
+    async def test_the_answer_is_read_past_a_thinking_block(self):
+        client, _ = self.wired(
+            {
+                "content": [
+                    {"type": "thinking", "thinking": "", "signature": "sig"},
+                    {"type": "text", "text": "[]"},
+                ],
+                "stop_reason": "end_turn",
+            }
+        )
+
+        assert await complete(client, max_output_tokens=100) == "[]"
+
+    async def test_an_answer_with_no_text_raises(self):
+        client, _ = self.wired(
+            {
+                "content": [{"type": "thinking", "thinking": "", "signature": "s"}],
+                "stop_reason": "end_turn",
+            }
+        )
+
+        with pytest.raises(LlmError, match="no text"):
+            await complete(client, max_output_tokens=100)
+
+    async def test_a_refusal_raises(self):
+        client, _ = self.wired({"content": [], "stop_reason": "refusal"})
+
+        with pytest.raises(LlmError, match="declined"):
+            await complete(client, max_output_tokens=100)
+
     async def test_running_out_of_room_raises(self):
         client, _ = self.wired(
-            {"content": [{"text": "[{"}], "stop_reason": "max_tokens"}
+            {"content": [{"type": "text", "text": "[{"}], "stop_reason": "max_tokens"}
         )
 
         with pytest.raises(LlmError, match="cut off"):

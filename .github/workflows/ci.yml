@@ -18,7 +18,9 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: from 2026-11 that is 26.04, which has no
+    # prebuilt 3.12.8 — the version .python-version and Render run.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -62,7 +64,9 @@ jobs:
     # production needed prepared_statement_name_func before it worked at all.
     # /readyz on the deployed service remains the check for that. Do not read a
     # green run here as evidence about pooler behaviour.
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: from 2026-11 that is 26.04, which has no
+    # prebuilt 3.12.8 — the version .python-version and Render run.
+    runs-on: ubuntu-24.04
     # A dead database connection once hung a local run for hours. Fail instead.
     timeout-minutes: 10
     services:

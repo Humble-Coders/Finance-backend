@@ -52,8 +52,22 @@ from app.models.platform import (
     SubscriptionEntitlement,
 )
 from app.models.setup import FinancialProfile, Investment, Obligation
+from app.models.splits import (
+    Split,
+    SplitContact,
+    SplitItem,
+    SplitItemShare,
+    SplitParticipant,
+    SplitReceiptUsage,
+)
 
 __all__ = [
+    "Split",
+    "SplitContact",
+    "SplitItem",
+    "SplitItemShare",
+    "SplitParticipant",
+    "SplitReceiptUsage",
     "Household",
     "User",
     "UserIdentity",

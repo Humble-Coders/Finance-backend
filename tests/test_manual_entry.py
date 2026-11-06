@@ -330,7 +330,9 @@ class TestCategories:
         assert response.json()["category_id"] is not None
         assert response.json()["needs_review"] is False
         # PRD Appendix A.3: a shop name and a price, and nothing else.
-        assert json.loads(model.prompts[0]) == [["Tim Hortons Mississauga", "5.25"]]
+        # The amount carries its side, money going out as "-": still only an
+        # amount, and how the model tells interest charged from interest earned.
+        assert json.loads(model.prompts[0]) == [["Tim Hortons Mississauga", "-5.25"]]
 
     async def test_without_consent_the_model_is_never_asked(
         self, api_client, monkeypatch

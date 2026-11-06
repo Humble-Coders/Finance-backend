@@ -30,9 +30,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.categorization import Category, CategoryCorrection
+from app.models.enums import TransactionDirection
 from app.services.llm import LlmClient, LlmError
 
-__all__ = ["Suggestion", "categorize", "OTHER", "MAX_EXAMPLES", "BATCH_SIZE"]
+__all__ = [
+    "Suggestion",
+    "categorize",
+    "signed",
+    "OTHER",
+    "MAX_EXAMPLES",
+    "BATCH_SIZE",
+]
 
 log = structlog.get_logger()
 
@@ -65,8 +73,29 @@ Rules:
 - Every element must be one of the slugs above. Never invent one.
 - If you are unsure, use "other". A wrong confident answer costs more than
   "other", which a person can correct in seconds.
-- A negative or incoming amount is usually "income" or "transfers".
+- Every amount is signed: "-" is money going out, "+" is money coming in.
+- Money going out is never "income". Interest, fees and penalties charged
+  are "fees".
+- Money coming in is usually "income" (pay, interest earned) or "transfers".
+  It takes a spending category only when it is a refund from that kind of
+  shop.
 {examples}"""
+
+
+# Money going out answered as one of these is wrong whatever the merchant:
+# interest charged filed as Income put a card's interest on the income side.
+_NEVER_OUT = frozenset({"income"})
+
+
+def signed(amount: str, direction: TransactionDirection) -> str:
+    """[amount] as the model reads it: "-" going out, "+" coming in.
+
+    Unsigned, the model could not tell interest charged from interest earned,
+    and filed the first as Income and the second as Fees. A sign is still only
+    an amount (PRD Appendix A.3): no word for the account or its side is sent.
+    """
+    plain = amount.strip().lstrip("+-")
+    return ("-" if direction == TransactionDirection.debit else "+") + plain
 
 
 @dataclass(frozen=True)
@@ -175,12 +204,18 @@ async def _batch(
         return [Suggestion(OTHER, recognised=False) for _ in pairs]
 
     slugs = _parse(answer, len(pairs))
-    return [
-        Suggestion(slug, recognised=True)
-        if slug in known
-        else Suggestion(OTHER, recognised=False)
-        for slug in slugs
-    ]
+    suggestions = []
+    for (_, amount), slug in zip(pairs, slugs, strict=True):
+        if slug not in known:
+            suggestions.append(Suggestion(OTHER, recognised=False))
+        elif amount.startswith("-") and slug in _NEVER_OUT:
+            # Asked on a signed amount and still impossible: to a person,
+            # rather than onto the wrong side of the household's figures.
+            log.info("categorization_wrong_side", slug=slug)
+            suggestions.append(Suggestion(OTHER, recognised=False))
+        else:
+            suggestions.append(Suggestion(slug, recognised=True))
+    return suggestions
 
 
 def _parse(answer: str, expected: int) -> list[str]:

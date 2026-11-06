@@ -4,9 +4,10 @@
 is unconventional; it is a get-or-create, it is idempotent, and it saves every
 client a separate bootstrap round trip on the path users hit most.
 
-The two writes here are onboarding steps (app/services/onboarding.py): choosing
-a region, and accepting the account terms. Both return the updated `/me`, so
-the client routes on the response without another call.
+The onboarding writes (app/services/onboarding.py) — choosing a region and
+accepting the account terms — return the updated `/me`, so the client routes on
+the response without another call. Profile's: `PATCH /me` changes the name, and
+`DELETE /me` deletes the account and its sign-in (app/services/account_deletion.py).
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_identity
+from app.config import Settings, get_settings
 from app.db import get_session
 from app.models.enums import RegionSource
 from app.models.identity import ConsentEvent, HouseholdRegionChange
@@ -23,10 +25,12 @@ from app.schemas.identity import (
     ConsentIn,
     HouseholdOut,
     MeOut,
+    ProfileIn,
     RegionIn,
     TermsStatus,
     UserOut,
 )
+from app.services.account_deletion import SignInDeletionError, delete_account
 from app.services.conflicts import log_conflict
 from app.services.identity import ResolvedIdentity
 from app.services.onboarding import onboarding_state
@@ -146,3 +150,45 @@ async def accept_terms(
         await session.commit()
 
     return await _me(session, identity)
+
+
+@router.patch("/me", response_model=MeOut)
+async def update_profile(
+    body: ProfileIn,
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+) -> MeOut:
+    """The person's name, as Profile shows it. Trimmed; blank is refused."""
+    name = body.display_name.strip()
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "name_required", "field": "display_name"},
+        )
+    identity.user.display_name = name
+    await session.commit()
+    return await _me(session, identity)
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+async def delete_me(
+    identity: ResolvedIdentity = Depends(current_identity),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Delete the account: every row of the household (this person's own when
+    someone else shares it) and the sign-in. Nothing is deleted unless the
+    sign-in could be removed too, so a failure can simply be tried again."""
+    try:
+        await delete_account(session, settings, identity.user, identity.household)
+    except SignInDeletionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "deletion_unavailable",
+                "message": (
+                    "Your account couldn't be deleted just now. Nothing was "
+                    "removed; try again in a moment."
+                ),
+            },
+        ) from error

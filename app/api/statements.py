@@ -365,7 +365,7 @@ async def parse(
                 session,
                 client,
                 household.id,
-                [(row.description, row.amount) for row in outcome.rows],
+                [(row.description, row.amount, row.direction) for row in outcome.rows],
             )
             if outcome.rows
             else []

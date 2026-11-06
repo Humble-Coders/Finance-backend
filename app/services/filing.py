@@ -19,9 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.core.money import from_minor_units
 from app.models.categorization import Category
-from app.models.enums import ReviewReason
+from app.models.enums import ReviewReason, TransactionDirection
 from app.models.money import Transaction
-from app.services.categorization import categorize
+from app.services.categorization import categorize, signed
 from app.services.corrections import apply_rules, merchant_key, rules_for
 from app.services.llm import LlmClient, LlmError, build_client, close_client
 from app.services.normalization import merchant as readable_merchant
@@ -126,7 +126,10 @@ async def file_rows(
             pairs=[
                 (
                     row.merchant or "",
-                    from_minor_units(row.amount_minor_units, row.currency),
+                    signed(
+                        from_minor_units(row.amount_minor_units, row.currency),
+                        row.direction,
+                    ),
                 )
                 for row in rows
             ],
@@ -150,9 +153,10 @@ async def suggest(
     session: AsyncSession,
     client: LlmClient,
     household_id: uuid.UUID,
-    rows: list[tuple[str, str]],
+    rows: list[tuple[str, str, TransactionDirection]],
 ) -> list[uuid.UUID | None]:
-    """A category for each (description, amount) of a statement not saved yet.
+    """A category for each (description, amount, direction) of a statement
+    not saved yet.
 
     The same order of precedence as `file_rows`, moved to before saving so the
     person can see and change every category while checking the import: the
@@ -163,7 +167,7 @@ async def suggest(
 
     The caller holds consent: the parse that produced these rows required it.
     """
-    merchants = [readable_merchant(description) for description, _ in rows]
+    merchants = [readable_merchant(description) for description, _, _ in rows]
     rules = await rules_for(session, household_id, merchants)
 
     suggested: list[uuid.UUID | None] = [
@@ -183,7 +187,10 @@ async def suggest(
         session,
         client,
         household_id=household_id,
-        pairs=[(merchants[index] or "", rows[index][1]) for index in ask],
+        pairs=[
+            (merchants[index] or "", signed(rows[index][1], rows[index][2]))
+            for index in ask
+        ],
     )
     slugs = await session.execute(
         select(Category.slug, Category.id).where(Category.household_id.is_(None))

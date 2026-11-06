@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "ConsentIn",
@@ -55,6 +55,12 @@ class MeOut(BaseModel):
     onboarding_required: list[str] = []
 
     terms: TermsStatus
+
+
+class ProfileIn(BaseModel):
+    """What the person may change about themselves from Profile."""
+
+    display_name: str = Field(min_length=1, max_length=80)
 
 
 class RegionIn(BaseModel):

@@ -42,12 +42,14 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 
 import structlog
 
 from app.core.money import MoneyError, group_digits, normalize
-from app.models.enums import TransactionDirection
+from app.models.enums import AccountKind, TransactionDirection
 from app.services.llm import LlmClient, LlmError
+from app.services.statement_balance import reconcile, signed_balance
 
 __all__ = [
     "ParsedRow",
@@ -146,14 +148,31 @@ You read bank and credit-card statements and return the transactions in them.
 
 Return ONLY a JSON array. Each element:
   {"date": "YYYY-MM-DD", "description": "...", "amount": "123.45",
-   "direction": "debit" | "credit", "confidence": 0-100}
+   "direction": "debit" | "credit", "balance": "1,204.55 Cr" | null,
+   "confidence": 0-100}
 
 Rules:
 - Copy every amount's digits EXACTLY as they appear in the text. Never round,
-  never calculate one. Write it as a plain number with no currency symbol and
-  no sign: "-$86.40" is "86.40" — direction says which way it went.
-- "debit" is money leaving the account, "credit" is money arriving. A credit-card
-  statement's purchases are debits.
+  never calculate one. Write it as a plain number with no currency symbol, no
+  sign and no CR/DR: "-$86.40" and "86.40 Cr" are both "86.40" — direction
+  says which way it went.
+- "balance" is the running balance printed on the SAME line as the
+  transaction, copied exactly as printed, with any minus, brackets or CR/DR.
+  null when that line shows no balance. Never calculate one.
+- "debit" is money leaving the account, "credit" is money arriving. Decide it
+  from these, in this order:
+  1. A tag after an amount, added from where the number sat on the page:
+     "[out]" was printed in a withdrawals / debit / paid-out column (debit);
+     "[in]" in a deposits / credit / paid-in column (credit); "[balance]" is
+     the running balance and is never the transaction's amount. A tag outranks
+     everything below.
+  2. A marker printed with the amount: "CR" or "Cr" is a credit, "DR" or "Dr"
+     is a debit.
+  3. The "Account type" and "Columns" lines in the STATEMENT HEADER. On a bank
+     account, a minus sign, brackets or a trailing minus ("12.40-") on an
+     amount mean money out. On a credit card or loan they mean a payment,
+     refund or credit; a card's purchases, fees and interest are debits.
+  4. Only when none of these settle it, the description.
 - Ignore running balances, subtotals, totals, interest summaries and page
   headers. Only individual transactions.
 - If the year is not on a line, take it from the statement period, which may
@@ -169,7 +188,7 @@ Rules:
 - If there are no transactions, return [].
 """
 
-_PROMPT_VERSION = "2026-10-30.1"
+_PROMPT_VERSION = "2026-11-24.1"
 
 
 @dataclass(frozen=True)
@@ -181,6 +200,11 @@ class ParsedRow:
     amount: str
     direction: TransactionDirection
     confidence: int
+    # The running balance printed on the row, signed in the account's own
+    # terms, when the model found one in the text. Never sent to the client:
+    # it exists so the direction can be checked by arithmetic (see
+    # statement_balance).
+    balance: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -332,7 +356,11 @@ def _appears_verbatim(amount: str, haystack: str) -> bool:
 # `CA$12.00`. Stripped before the number is read, never before the check that
 # the model's text is really on the statement.
 _AMOUNT_DECORATION = re.compile(
-    r"^[\s(+\-−–]*(?:[A-Z]{0,3}[$₹€£¥]|Rs\.?|INR)?[\s(+\-−–]*|[\s)+\-−–]*$"
+    r"^[\s(+\-−–]*(?:[A-Z]{0,3}[$₹€£¥]|Rs\.?|INR)?[\s(+\-−–]*"
+    # A trailing `Cr` / `DR`, as Indian and some Canadian statements print
+    # them: the model copies it with the amount, and the row was dropped as
+    # unreadable when the direction was the only thing it said.
+    r"|[\s)+\-−–]*(?:(?i:cr|dr)\.?)?[\s)+\-−–]*$"
 )
 
 
@@ -347,7 +375,29 @@ def _bare(amount: str) -> str:
     return _AMOUNT_DECORATION.sub("", amount.strip())
 
 
-def _coerce(raw: object, window: str, currency: str) -> ParsedRow | None:
+def _balance(
+    raw: object, window: str, currency: str, kind: AccountKind | None
+) -> Decimal | None:
+    """The row's running balance, if the model gave one that is in the text."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    printed = str(raw).strip()
+    if not printed:
+        return None
+    try:
+        bare = normalize(_ungrouped(_bare(printed)), currency)
+    except MoneyError:
+        return None
+    # Held to the same standard as an amount: a balance the model made up
+    # would "prove" a direction, which is worse than proving nothing.
+    if not (_appears_verbatim(bare, window) or _appears_verbatim(printed, window)):
+        return None
+    return signed_balance(printed, bare, kind)
+
+
+def _coerce(
+    raw: object, window: str, currency: str, kind: AccountKind | None = None
+) -> ParsedRow | None:
     """One model-produced row, or None if it cannot be trusted.
 
     Every rejection here is silent by design — the caller counts them. A row
@@ -384,10 +434,13 @@ def _coerce(raw: object, window: str, currency: str) -> ParsedRow | None:
         amount=amount,
         direction=direction,
         confidence=max(0, min(100, confidence)),
+        balance=_balance(raw.get("balance"), window, currency, kind),
     )
 
 
-def _rows_from(answer: str, window: str, currency: str) -> tuple[list[ParsedRow], int]:
+def _rows_from(
+    answer: str, window: str, currency: str, kind: AccountKind | None = None
+) -> tuple[list[ParsedRow], int]:
     """Parse one model answer, returning the good rows and the rejected count."""
     text = answer.strip()
     # Models wrap JSON in fences however firmly you ask them not to.
@@ -403,7 +456,7 @@ def _rows_from(answer: str, window: str, currency: str) -> tuple[list[ParsedRow]
 
     rows, rejected = [], 0
     for item in payload:
-        row = _coerce(item, window, currency)
+        row = _coerce(item, window, currency, kind)
         if row is None:
             rejected += 1
         else:
@@ -475,11 +528,51 @@ def _usage_fields(client: LlmClient) -> dict[str, object]:
     }
 
 
+_ACCOUNT_LINES = {
+    AccountKind.chequing: "Account type: bank account (chequing)",
+    AccountKind.savings: "Account type: bank account (savings)",
+    AccountKind.credit_card: (
+        "Account type: credit card. Purchases, fees and interest are debits; "
+        "payments, refunds and cashback are credits"
+    ),
+    AccountKind.loan: (
+        "Account type: loan. Payments towards it are credits; interest, fees "
+        "and new borrowing are debits"
+    ),
+    AccountKind.investment: "Account type: investment account",
+    AccountKind.cash: "Account type: cash",
+}
+
+# What a column heading may contain once it reaches the prompt. The device
+# sends only words from a fixed vocabulary; this is the server's own check.
+# Letters in any script ("Dépôts", "Solde"), never a digit.
+_COLUMNS_ALLOWED = re.compile(r"^(?:[^\W\d_]|[ .,&/()'|-]){1,200}$")
+
+
+def _fixed_context(kind: AccountKind | None, columns: str | None) -> list[str]:
+    """What every window is told about the account, whatever its position.
+
+    Both decide direction where the text alone cannot: the same `-500.00` is a
+    withdrawal on a bank statement and a payment on a card's, and a table's
+    "Withdrawals | Deposits" heading is dropped by the device with the name and
+    address above it.
+    """
+    lines = []
+    if kind is not None:
+        lines.append(_ACCOUNT_LINES[kind])
+    if columns and _COLUMNS_ALLOWED.match(columns.strip()):
+        lines.append(f"Columns, left to right: {columns.strip()}")
+    return lines
+
+
 async def parse_statement(
     client: LlmClient,
     text: str,
     currency: str,
     period: tuple[date, date] | None = None,
+    *,
+    account_kind: AccountKind | None = None,
+    columns: str | None = None,
 ) -> ParseOutcome:
     """Read a whole statement, however many model calls that takes.
 
@@ -494,6 +587,7 @@ async def parse_statement(
     read that statement", which is wrong and leaves the user nothing to do.
     """
     context = _period_context(period, _header(text.splitlines()))
+    fixed = _fixed_context(account_kind, columns)
     windows = _windows(text)
     if len(windows) > MAX_WINDOWS:
         raise LlmError(
@@ -514,9 +608,10 @@ async def parse_statement(
         # all. A scraped header is already inside window 0, so repeating it
         # there would only invite the model to read those lines twice.
         include = bool(context) and (period is not None or index > 0)
+        header = [*fixed, *([context] if include else [])]
         prompt = (
-            f"STATEMENT HEADER\n{context}\n\nTRANSACTIONS\n{window}"
-            if include
+            "STATEMENT HEADER\n" + "\n".join(header) + f"\n\nTRANSACTIONS\n{window}"
+            if header
             else window
         )
         answer = await client.complete(
@@ -528,7 +623,9 @@ async def parse_statement(
         )
         # Validated against the window, never against the prompt: a balance in
         # the header must not be able to vouch for an amount the model invented.
-        window_rows, window_rejected = _rows_from(answer, window, currency)
+        window_rows, window_rejected = _rows_from(
+            answer, window, currency, account_kind
+        )
         per_window.append(window_rows)
         rejected += window_rejected
         total_rows += len(window_rows)
@@ -541,6 +638,10 @@ async def parse_statement(
     merged = _merge(per_window)
     if len(merged) > MAX_ROWS:
         raise TooManyRowsError(f"more than {MAX_ROWS} transactions")
+    # The balances, where the statement prints them, settle what the model
+    # could only guess: a row that took the balance down by its own amount
+    # was money out, whatever its description sounded like.
+    merged, corrected = reconcile(merged, account_kind)
     log.info(
         "statement_parsed",
         model=client.model,
@@ -548,6 +649,7 @@ async def parse_statement(
         windows=len(windows),
         rows=len(merged),
         rejected=rejected,
+        directions_corrected=corrected,
         seconds=round(time.monotonic() - started, 1),
         # What the whole statement cost, summed over its windows — the figure
         # per import that the per-call `llm_call` lines add up to. Absent for

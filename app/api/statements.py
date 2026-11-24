@@ -319,13 +319,17 @@ async def parse(
                 },
             )
 
+    # The account's kind goes to the parser: the same `-500.00` is money out
+    # on a bank statement and a payment on a card's.
+    account_kind = None
     if body.account_id is not None:
         owned = await session.execute(
-            select(Account.id).where(
+            select(Account.kind).where(
                 Account.id == body.account_id, Account.household_id == household.id
             )
         )
-        if owned.scalar_one_or_none() is None:
+        account_kind = owned.scalar_one_or_none()
+        if account_kind is None:
             # 404 rather than 403: whether an account id exists is not something
             # a caller outside the household gets to learn.
             raise HTTPException(
@@ -356,7 +360,14 @@ async def parse(
             if body.statement_period_start and body.statement_period_end
             else None
         )
-        outcome = await parse_statement(client, body.text, currency, period)
+        outcome = await parse_statement(
+            client,
+            body.text,
+            currency,
+            period,
+            account_kind=account_kind,
+            columns=body.statement_columns,
+        )
         # Categorised now rather than on save, so the person sees and can
         # change every category while checking the import. Never raises on a
         # model problem: a row it cannot answer comes back without one.

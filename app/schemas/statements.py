@@ -52,10 +52,25 @@ class StatementParseIn(BaseModel):
     # than guess at.
     statement_period_start: date | None = None
     statement_period_end: date | None = None
+    # The statement table's column headings, left to right ("Date | Details |
+    # Withdrawals | Deposits | Balance"), read on the device before redaction
+    # drops the block they sit in. Without them the model cannot tell which
+    # column a bare `450.00` came from. Words only: the device sends nothing
+    # outside a fixed vocabulary, and a digit here is refused outright.
+    statement_columns: str | None = Field(default=None, max_length=200)
     # Opt-in, per import, and only honoured when the import actually went badly
     # (PRD F2, 2026-09-21). Defaulting to False is the safe default and is
     # asserted by a test rather than trusted.
     keep_text_for_diagnostics: bool = False
+
+    @field_validator("statement_columns")
+    @classmethod
+    def _columns_are_words(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if any(ch.isdigit() for ch in value):
+            raise ValueError("column headings must not contain digits")
+        return value.strip() or None
 
     @model_validator(mode="after")
     def _period_is_a_period(self) -> StatementParseIn:

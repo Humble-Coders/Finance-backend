@@ -728,3 +728,57 @@ class TestTheImportRecord:
 
         assert response.status_code == 404
         assert response.json()["detail"]["code"] == "unknown_account"
+
+
+class TestWhatTheParserIsTold:
+    """The account's kind and the table's columns reach the model (the money
+    in / money out fix): without them a bare `450.00` could be either."""
+
+    async def test_the_account_kind_and_columns_are_in_the_prompt(
+        self, api_client, monkeypatch
+    ):
+        prompts: list[str] = []
+
+        class Recording(FakeModel):
+            async def complete(self, *, system, user, max_output_tokens):
+                prompts.append(user)
+                return await super().complete(
+                    system=system, user=user, max_output_tokens=max_output_tokens
+                )
+
+        use_model(monkeypatch, Recording())
+        await onboard(api_client, "+14165571031")
+        await consent_to_ai(api_client)
+        card = await api_client.post(
+            "/accounts", json={"name": "Maple Visa", "kind": "credit_card"}
+        )
+        assert card.status_code == 201, card.text
+
+        response = await api_client.post(
+            PARSE,
+            json=body(
+                account_id=card.json()["id"],
+                statement_columns="Date | Description | Debit | Credit",
+            ),
+        )
+
+        assert response.status_code == 200, response.text
+        # The same client also categorises the rows; only the reads count here.
+        reads = [p for p in prompts if "\nTRANSACTIONS\n" in p]
+        assert reads
+        assert all("Account type: credit card" in p for p in reads)
+        assert all(
+            "Columns, left to right: Date | Description | Debit | Credit" in p
+            for p in reads
+        )
+
+    async def test_digits_in_the_columns_are_refused(self, api_client, monkeypatch):
+        use_model(monkeypatch, FakeModel())
+        await onboard(api_client, "+14165571032")
+        await consent_to_ai(api_client)
+
+        response = await api_client.post(
+            PARSE, json=body(statement_columns="Account 0042 | Balance")
+        )
+
+        assert response.status_code == 422
